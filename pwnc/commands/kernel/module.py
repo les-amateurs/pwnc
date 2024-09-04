@@ -1,22 +1,17 @@
-from ...types import *
-from ...util import run, backup
+from ...util import *
 from ... import err
 import shutil
 from tempfile import NamedTemporaryFile
 from ... import minelf
 
-def command(args: Args):
-    with open(args.file, "rb") as fp:
-        raw_elf_bytes = fp.read()
-
-    elf = minelf.ELF(raw_elf_bytes)
+def parse_modinfo(elf: minelf.ELF):
     for section in elf.sections:
         if elf.section_name(section).tobytes() == b".modinfo":
             modinfo = section
             break
     else:
         err.fatal("could not find .modinfo section")
-    
+
     raw_modinfo_bytes = elf.section_content(section)
     info = dict()
     for entry in raw_modinfo_bytes.tobytes().strip(b"\x00").split(b"\x00"):
@@ -28,6 +23,16 @@ def command(args: Args):
         if key in info:
             err.warn(f"modinfo key {key} already exists, overwriting")
         info[key] = value
+    return section, raw_modinfo_bytes, info
+
+def command(args: Args):
+    with open(args.file, "rb") as fp:
+        raw_elf_bytes = fp.read()
+
+    elf = minelf.ELF(raw_elf_bytes)
+    section, raw_modinfo_bytes, info = parse_modinfo(elf)
+    for key, value in info.items():
+        print(f"{key} = {value}")
 
     if args.set:
         for new_key, new_value in args.set:
@@ -37,7 +42,7 @@ def command(args: Args):
         for key, value in info.items():
             new_modinfo_bytes += f"{key}={value}".encode() + b"\x00"
 
-        """ Slight optimization, detect if .modinfo is already at the end of the file
+        """ TODO: slight optimization, detect if .modinfo is already at the end of the file
             and extend that instead of appending a whole new section.
         """
         if len(new_modinfo_bytes) > section.size:

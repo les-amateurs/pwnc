@@ -1,5 +1,20 @@
 __pycache__/
 **.so*
 **.ko*
+**.cmd
+**.mod*
+**.symvers
+**.order
+*.o
+
+# ignore this, random testing files
 log.txt
 elfutils/
+devpro
+failed.txt
+libc-paths.txt
+patched.txt
+thing.sh
+wtf
+stuff/
+other/

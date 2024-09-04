@@ -1,159 +1,146 @@
 from bs4 import BeautifulSoup
-from pprint import pprint
-from pathlib import Path
-from urllib.parse import urlparse
 import asyncio
 import aiohttp
 import re
-import os
 import functools
-import itertools
+from ...util import *
+from .index import Index
+from ...import minelf
+from .package import Package
 
+DISTRO = "ubuntu"
+ROOT = "https://launchpad.net/"
+VERSION = re.compile(rb"GLIBC (\d+\.\d+.*)\)")
 MAX_CONCURRENT = 5
-BATCH_SIZE = 300
+BATCH_SIZE = 100
 RETRIES = 10
-ARCHITECTURES = ["amd64", "arm64", "armel", "armhf", "i386"]
+# ARCHITECTURES = ["amd64", "arm64", "armel", "armhf", "i386"]
+ARCHITECTURES = ["amd64"]
 
 session, sem = None, None
-async def must(f):
+async def request(url):
     global session, sem
     await sem.put(None)
     retries = 0
     while True:
         try:
-            r = await f(session)
-            if r.status == 200:
+            err.info(f"requesting {url}")
+            resp = await session.get(url)
+            if resp.status == 200:
                 break
-            # print(f"status = {r.status}")
         except Exception as e:
-            print(f"error = {e}")
+            print(f"error while requesting {url}: {e}")
             pass
         retries += 1
         if retries > RETRIES:
-            print("Maximum retry count exceeded")
+            print(f"maximum retry count exceeded requesting {url}")
             break
         await asyncio.sleep(1.0)
     await sem.get()
-    return r
+    return await resp.content.read()
 
-async def get_html(url):
-    async with (await must(lambda session: session.get(url))) as resp:
-        return BeautifulSoup(await resp.text(), features="html.parser")
+async def parse(html: str):
+    return BeautifulSoup(html, features="html.parser")
 
-async def get_published_range(package: str, batch_start: int, batch_end: int):
+# cache the publishinghistory webpages, they arent too big
+async def request_published_range(package: str, batch_start: int, batch_end: int):
+    index = Index(f"{DISTRO}-publishinghistory")
     batch_size = batch_end - batch_start
-    return await get_html(f"https://launchpad.net/ubuntu/+source/{package}/+publishinghistory?batch={batch_size}&start={batch_start}")
+    path = f"/ubuntu/+source/{package}/+publishinghistory?batch={batch_size}&start={batch_start}"
+    if path in index:
+        html = index[path]
+    else:
+        html = await request(f"{ROOT}/{path}")
+        index[path] = html
+    return await parse(html)
 
-async def get_num_published(package: str):
-    soup = await get_published_range(package, 0, 0)
+async def request_num_published(package: str):
+    index = Index(f"{DISTRO}-num_published")
+    if package in index:
+        return index[package]
+    
+    soup = await request_published_range(package, 0, 0)
     results = soup.find("td", { "class": "batch-navigation-index" })
     num_published = int(re.search(r"\s([0-9]+)\sresults", " ".join(filter(len, results.text.split()))).group(1))
+    index[package] = num_published
     return num_published
 
-async def get_versions_batched(package: str, batch_start: int, batch_end: int):
+async def request_versions(package: str, batch_start: int, batch_end: int):
+    index = Index(f"{DISTRO}-{package}-versions")
+    key = f"{package}-{batch_start}-{batch_end}"
+    if key in index:
+        return index[key]
+
     paths = set()
-    soup = await get_published_range(package, batch_start, batch_end)
+    soup = await request_published_range(package, batch_start, batch_end)
     for tr in soup.find_all("tr"):
         if len(tr.find_all("td")) != 8:
             continue
-
-        path = tr.find_all("td")[7].find_all("a")[0]["href"]
-        paths.add(path)
-
+        link = tr.find_all("td")[7].find_all("a")[0]
+        version = link.text
+        paths.add(version)
+    index[key] = paths
     return paths
 
-async def extract_build_pages(path: str):
-    version = Path(path).name
-    soup = await get_html(f"https://launchpad.net/{path}")
-    builds = soup.find(id="source-builds")
+async def request_build_pages(package: str, version: str):
+    index = Index(f"{DISTRO}-build_pages-{package}-{version}")
+    url = f"{ROOT}/ubuntu/+source/{package}/{version}"
+    if url in index:
+        html = index[url]
+    else:
+        html = await request(url)
+        index[url] = html
+    
+    soup = await parse(html)
+    sources = soup.find(id="source-builds")
+    builds = dict()
 
-    paths = {}
+    ptags = list(filter(lambda tag: tag.name == "p", sources.children))
+    if len(ptags) == 0:
+        err.warn(f"failed to locate build pages")
+        return builds
+    
+    links = filter(lambda tag: tag.name == "a", ptags[0].children)
+    links = list(links)
+    for i, tag in enumerate(links):
+        architecture = tag.text
+        if architecture in ARCHITECTURES:
+            builds[architecture] = tag["href"]
 
-    try:
-        tags = filter(lambda tag: tag.name == "p", builds.children)
-        tags = next(tags).children
-        tags = filter(lambda tag: tag.name is not None, tags)
-        tags = list(tags)
-        for i, tag in enumerate(tags):
-            if i > 0 and tag.name == "a" and tags[i-1]["alt"] == "[FULLYBUILT]":
-                if tag.text in ARCHITECTURES:
-                    paths[tag.text] = tag["href"]
-    except StopIteration:
-        pass
+    return builds
 
-    return version, paths
+async def request_deb(binpackage: str, version: str, arch: str, build: str):
+    debug = re.compile(rf"{binpackage}-dbg(sym)?_{version}_{arch}.d?deb$")
+    # development_debug = re.compile(rf"{binpackage}-dev-dbg(sym)?_{version}_{arch}.d?deb$")
+    # development = re.compile(rf"{binpackage}-dev_{version}_{arch}.d?deb$")
 
-class Result:
-    def __init__(self):
-        self.cached = 0
-        self.downloaded = 0
-        self.failed = 0
-        self.missing = 0
+    soup = await parse(await request(f"{ROOT}/{build}"))
+    for link in soup.find_all("a"):
+        url = link["href"]
+        if debug.search(url) is not None:
+            deb_url = url
+            break
+    else:
+        err.warn(f"no debs found on {build} with {debug}")
+        return
 
-    def sum(self):
-        return self.cached + self.downloaded + self.failed + self.missing
+    err.info(f"found deb url: {deb_url}")
+    return await request(deb_url)
 
-    def add(self, other: 'Result'):
-        self.cached += other.cached
-        self.downloaded += other.downloaded
-        self.failed += other.failed
-        self.missing += other.missing
-        return self
+def parse_libc_version(elf: minelf.ELF):
+    m = VERSION.search(elf.raw_elf_bytes)
+    if not m.group(1):
+        err.warn("failed to determine libc version")
+    return m.group(1).decode()
 
-async def extract_debs(cache: Path, name: str, version: str, paths: dict[str, list[str]]):
-    result = Result()
+def provides(elf: minelf.ELF):
+    return DISTRO.encode("utf-8") in elf.raw_elf_bytes and (parse_libc_version(elf) != None)
 
-    for arch, path in paths.items():
-        debug = re.compile(rf"{name}-dbg(sym)?_{version}_{arch}.d?deb$")
-        development_debug = re.compile(rf"{name}-dev-dbg(sym)?_{version}_{arch}.d?deb$")
-        development = re.compile(rf"{name}-dev_{version}_{arch}.d?deb$")
+async def asynchronous_locate(elf: minelf.ELF):
+    global session, sem
 
-        soup = await get_html(f"https://launchpad.net/{path}")
-        for link in soup.find_all("a"):
-            url = link["href"]
-            if debug.search(url) is not None \
-            or development_debug.search(url) is not None \
-            or development.search(url) is not None:
-                deb_url = url
-                break
-        else:
-            # print(f"no debs found on {path} with {debug}")
-            result.missing += 1
-            continue
-
-        file = Path(urlparse(deb_url).path).name
-
-        filepath = cache / arch / file
-        os.makedirs(cache / arch, exist_ok=True)
-
-        if filepath.exists():
-            # print(f"{path} {filepath} already exists")
-            result.cached += 1
-            continue
-
-        # print(f"downloading {deb_url} from {path}")
-
-        async with (await must(lambda session: session.get(deb_url))) as resp:
-            try:
-                data = await resp.read()
-                if not data:
-                    # print("FAILED DOWNLOAD", filepath, "from", deb_url)
-                    result.failed += 1
-                    continue
-                with open(filepath, "wb") as f:
-                    f.write(data)
-                result.downloaded += 1
-            except TimeoutError:
-                # print(f"download for {filepath} timed out")
-                result.failed += 1
-                continue
-
-    return result
-
-async def main():
-    global session
-
-    packages = ["glibc", "eglibc", "dietlibc", "musl"]
+    # packages = ["glibc", "eglibc", "dietlibc", "musl"]
+    packages = ["glibc"]
     names = {
         "glibc": "libc6",
         "eglibc": "libc6",
@@ -161,28 +148,29 @@ async def main():
         "musl": "musl",
     }
 
+    sem = asyncio.Queue(maxsize=MAX_CONCURRENT)
     async with aiohttp.ClientSession() as session:
         for package in packages:
-            num_published = await get_num_published(package)
+
+            num_published = await request_num_published(package)
+
             ranges = list(range(0, num_published, BATCH_SIZE)) + [num_published]
             ranges = [(package, ranges[i], ranges[i+1]) for i in range(len(ranges)-1)]
             
-            paths = await asyncio.gather(*[asyncio.create_task(get_versions_batched(*version_range)) for version_range in ranges])
-            paths = functools.reduce(lambda a, b: a.union(b), paths)
+            versions = await asyncio.gather(*[asyncio.create_task(request_versions(*version_range)) for version_range in ranges])
+            versions = functools.reduce(lambda a, b: a.union(b), versions)
+            version = parse_libc_version(elf)
+            if version not in versions:
+                err.fatal(f"unable to find {version} in {DISTRO} snapshot")
 
-            cache = Path("_cache") / "ubuntu" / package
-            version_and_paths = await asyncio.gather(*[asyncio.create_task(extract_build_pages(path)) for path in paths])
-            results = await asyncio.gather(*[asyncio.create_task(extract_debs(cache, names[package], *info)) for info in version_and_paths])
-            results = functools.reduce(lambda a, b: a.add(b), results)
-            print("=" * 10 + f"[ {package:<16} ]" + "=" * 10)
-            print(f"cached = {results.cached}")
-            print(f"downloaded = {results.downloaded}")
-            print(f"missing = {results.missing}")
-            print(f"failed = {results.failed}")
+            arch = "amd64"
+            builds = await request_build_pages(package, version)
+            if arch not in builds:
+                err.fatal(f"architecture amd64 not supported by {package} {version}")
 
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    sem = asyncio.Queue(maxsize=MAX_CONCURRENT)
-    loop.run_until_complete(main())
-    loop.close()
+            contents = await request_deb(names[package], version, arch, builds[arch])
+            if contents is not None:
+                return Package(DISTRO, package, version, contents)
+
+def locate(elf: minelf.ELF):
+    return asyncio.get_event_loop().run_until_complete(asynchronous_locate(elf))

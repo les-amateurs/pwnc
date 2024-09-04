@@ -76,6 +76,116 @@ def generate_section(bits: int, little_endian: bool):
             _fields_ = fields
         return BE
 
+def generate_symbol(bits: int, little_endian: bool):
+    addrsize = addrsize_from_bits(bits)
+    if bits == 64:
+        fields = [
+            ("name", ctypes.c_uint32),
+            ("info", ctypes.c_uint8),
+            ("other", ctypes.c_uint8),
+            ("section_index", ctypes.c_uint16),
+            ("value", addrsize),
+            ("size", addrsize)
+        ]
+    else:
+        fields = [
+            ("name", ctypes.c_uint32),
+            ("value", addrsize),
+            ("size", ctypes.c_uint32),
+            ("info", ctypes.c_uint8),
+            ("other", ctypes.c_uint8),
+            ("section_index", ctypes.c_uint16)
+        ]
+
+    if little_endian:
+        class LE(ctypes.LittleEndianStructure):
+            _fields_ = fields
+        return LE
+    else:
+        class BE(ctypes.BigEndianStructure):
+            _fields_ = fields
+        return BE
+    
+def generate_reloc(bits: int, little_endian: bool, addend: bool):
+    addrsize = addrsize_from_bits(bits)
+    fields = [
+        ("offset", addrsize),
+        ("info", addrsize),
+    ]
+
+    if addend:
+        fields.append(("addend", addrsize, ))
+
+    split = 8 if bits == 32 else 32
+    mask = (1 << split) - 1
+    parent = ctypes.LittleEndianStructure if little_endian else ctypes.BigEndianStructure
+    class Reloc(parent):
+        _fields_ = fields
+
+        @property
+        def type(self):
+            return self.info & mask
+        
+        @type.setter
+        def type(self, val: int):
+            self.info = (self.info & ~mask) | (val & mask)
+
+        @property
+        def sym(self):
+            return self.info >> split
+        
+        @sym.setter
+        def sym(self, val: int):
+            self.info = (self.info & mask) | (val << split)
+    
+    return Reloc
+
+def generate_dyntag(bits: int, little_endian: bool):
+    addrsize = addrsize_from_bits(bits)
+    parent = ctypes.LittleEndianStructure if little_endian else ctypes.BigEndianStructure
+    class Dyntag(parent):
+        _fields_ = [
+            ("tag", addrsize),
+            ("val", addrsize),
+        ]
+    return Dyntag
+
+def generate_segment(bits: int, little_endian: bool):
+    addrsize = addrsize_from_bits(bits)
+    parent = ctypes.LittleEndianStructure if little_endian else ctypes.BigEndianStructure
+    fields = [
+        ("type", ctypes.c_uint32)
+    ]
+    if bits == 64:
+        fields.append(("flags", ctypes.c_uint32))
+    fields.extend([
+        ("offset", addrsize),
+        ("virtual_address", addrsize),
+        ("physical_address", addrsize),
+        ("file_size", addrsize),
+        ("mem_size", addrsize)
+    ])
+    if bits == 32:
+        fields.append(("flags", ctypes.c_uint32))
+    fields.append(("alignment", addrsize))
+
+    class Segment(parent):
+        _fields_ = fields
+    return Segment
+
+def generate_note(bits: int, little_endian: bool):
+    addrsize = addrsize_from_bits(bits)
+    parent = ctypes.LittleEndianStructure if little_endian else ctypes.BigEndianStructure
+    fields = [
+        ("name_size", ctypes.c_uint32),
+        ("description_size", ctypes.c_uint32),
+        ("type", ctypes.c_uint32),
+    ]
+
+    class Note(parent):
+        _fields_ = fields
+    return Note
+
 class ELF:
     def __init__(self, raw_elf_bytes: bytes, bits: int=None, little_endian: bool=None):
         if bits is not None and bits not in ALLOWED_BITS:
@@ -83,7 +193,13 @@ class ELF:
 
         self.raw_elf_bytes = bytearray(raw_elf_bytes)
         self.cached_header_type = None
+        self.cached_segment_type = None
         self.cached_section_type = None
+        self.cached_symbol_type = None
+        self.cached_reloc_type = None
+        self.cached_reloca_type = None
+        self.cached_dyntag_type = None
+        self.cached_note_type = None
 
         self.cached_ident = None
         self.cached_header = None
@@ -104,17 +220,53 @@ class ELF:
         return self.cached_header_type
     
     @property
+    def Segment(self):
+        if not self.cached_segment_type:
+            self.cached_segment_type = generate_segment(self.bits, self.little_endian)
+        return self.cached_segment_type
+
+    @property
     def Section(self):
         if not self.cached_section_type:
             self.cached_section_type = generate_section(self.bits, self.little_endian)
         return self.cached_section_type
 
     @property
+    def Symbol(self):
+        if not self.cached_symbol_type:
+            self.cached_symbol_type = generate_symbol(self.bits, self.little_endian)
+        return self.cached_symbol_type
+    
+    @property
+    def Reloc(self):
+        if not self.cached_reloc_type:
+            self.cached_reloc_type = generate_reloc(self.bits, self.little_endian, False)
+        return self.cached_reloc_type
+
+    @property
+    def Reloca(self):
+        if not self.cached_reloca_type:
+            self.cached_reloca_type = generate_reloc(self.bits, self.little_endian, True)
+        return self.cached_reloca_type
+    
+    @property
+    def Dyntag(self):
+        if not self.cached_dyntag_type:
+            self.cached_dyntag_type = generate_dyntag(self.bits, self.little_endian)
+        return self.cached_dyntag_type
+    
+    @property
+    def Note(self):
+        if not self.cached_note_type:
+            self.cached_note_type = generate_note(self.bits, self.little_endian)
+        return self.cached_note_type
+
+    @property
     def ident(self):
         if not self.cached_ident:
             self.cached_ident = Ident.from_buffer(self.raw_elf_bytes)
         return self.cached_ident
-    
+
     @property
     def bits(self):
         if not self.cached_bits:
@@ -124,7 +276,7 @@ class ELF:
                 case 2: self.cached_bits = 64
                 case _: err.fatal("failed to guess bit width")
         return self.cached_bits
-    
+
     @property
     def little_endian(self):
         if not self.cached_little_endian:
@@ -134,7 +286,7 @@ class ELF:
                 case 2: self.cached_little_endian = False
                 case _: err.fatal("failed to guess endianness")
         return self.cached_little_endian
-    
+
     @property
     def header(self):
         if not self.cached_header:
@@ -142,7 +294,18 @@ class ELF:
         return self.cached_header
     
     @property
-    def sections(self):
+    def segments(self) -> list["ELF.Segment"]:
+        if not self.cached_segments:
+            self.cached_segments = []
+            offset = self.header.segment_offset
+            for _ in range(self.header.number_of_segments):
+                segment = self.Segment.from_buffer(self.raw_elf_bytes, offset)
+                offset += ctypes.sizeof(self.Segment)
+                self.cached_segments.append(segment)
+        return self.cached_segments
+
+    @property
+    def sections(self) -> list["ELF.Section"]:
         if not self.cached_sections:
             self.cached_sections = []
             offset = self.header.section_offset
@@ -151,6 +314,18 @@ class ELF:
                 offset += ctypes.sizeof(self.Section)
                 self.cached_sections.append(section)
         return self.cached_sections
+    
+    @property
+    def buildid(self):
+        notes = self.notes(self.section_content(self.section_from_name(b".note.gnu.build-id")))
+        if len(notes) == 0:
+            err.fatal("unable to parse any notes from .note.gnu.build-id")
+        note = notes[0]
+        if note.type != 3:
+            err.fatal(f"note type is not NT_GNU_BUILD_ID (3), was {note.type}")
+        if note.name != b"GNU\x00":
+            err.fatal(f"note name is not b'GNU\x00', was {note.name}")
+        return note.description
 
     def section_name(self, section: "ELF.Section"):
         section_name_table = self.sections[self.header.section_name_table_index]
@@ -159,6 +334,40 @@ class ELF:
         while contents[offset] != 0:
             offset += 1
         return contents[section.name:offset]
-    
+
     def section_content(self, section: "ELF.Section"):
         return memoryview(self.raw_elf_bytes)[section.offset:section.offset+section.size]
+    
+    def notes(self, content: bytes):
+        offset = 0
+        length = len(content)
+        notes = []
+        while offset < length:
+            note = self.Note.from_buffer_copy(content, offset)
+            offset += ctypes.sizeof(self.Note)
+            name = content[offset:offset+note.name_size].tobytes()
+            offset = (offset + note.name_size) + 3 & ~3
+            description = content[offset:offset+note.description_size].tobytes()
+            offset += note.description_size
+
+            note.name = name
+            note.description = description
+            notes.append(note)
+        
+        return notes
+
+    def section_from_name(self, name: bytes):
+        for section in self.sections:
+            if self.section_name(section) == name:
+                return section
+            
+    def cstr(self, offset: int, maxlen = None):
+        start = offset
+        if maxlen is None:
+            maxlen = len(self.raw_elf_bytes)
+        else:
+            maxlen = min(offset + maxlen, len(self.raw_elf_bytes))
+
+        while offset < maxlen and self.raw_elf_bytes[offset] != 0:
+            offset += 1
+        return memoryview(self.raw_elf_bytes)[start:offset]

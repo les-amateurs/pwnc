@@ -2,6 +2,16 @@
 
 ### new stuff
 
+#### gdb
+expose wrappers around the gdb api to use in solve scripts
+- programatically place breakpoints
+- oneshot breakpoints
+- run python code from breakpoints
+- pwntools provides this but it is fairly basic
+
+#### minelf
+minimal elf parsing and in place modification library
+
 #### kmod
 kernel module utilities
 - extract modinfo
@@ -9,21 +19,16 @@ kernel module utilities
 
 #### dwarf
 dwarf utilities
-- extract ONLY types from dwarf file
-
-#### sym
-symbol utilities
-- define new symbols for gdb debugging
-    - relative symbols
-    - absolute symbols
+binja plugin to generate dwarf info on the fly to import into gdb
 
 #### unstrip
 more comprehensive and usable unstripping cli
 - special case for libc, search popular distros for files that debuginfod misses
 - normal binaries fall back to debuginfod
+- download the ubuntu/debian package to extract other libraries
 
 #### patch
-nice utilities for patching files
+nice utilities for patching files, patchelf replacement
 
 ### stuff to steal from pwntools
 

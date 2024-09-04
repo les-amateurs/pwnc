@@ -11,4 +11,4 @@ def warn(msg: str):
 
 def fatal(msg: str):
     logging.error(msg)
-    exit(1)
+    raise RuntimeError("fatal error")

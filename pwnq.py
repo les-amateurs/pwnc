@@ -7,6 +7,8 @@ import pwnc.commands.patch as patch
 import pwnc.commands.kernel as kernel
 import logging
 
+from pwn import SigreturnFrame
+
 logging.basicConfig(level=logging.INFO)
 
 usage = """\
@@ -31,17 +33,21 @@ def get_main_parser():
 
     subparser = subparsers.add_parser("unstrip", help="unstrip binaries by adding debuginfo")
     subparser.add_argument("file", type=lambda file: Path(file))
-    subparser.add_argument("--libc", action=BooleanOptionalAction)
-
-    subparser = subparsers.add_parser("patch", help="patch binaries")
-    subparser.add_argument("--interp")
-    subparser.add_argument("--rpath")
-    subparser.add_argument("file", type=lambda file: Path(file))
+    subparser.add_argument("--libc", action="store_true")
+    subparser.add_argument("--save", action="store_true")
 
     subparser = subparsers.add_parser("kmod", help="kernel module helpers")
     subparser.add_argument("--set", type=str, action='append', nargs=2, default=[])
     subparser.add_argument("-o", type=lambda file: Path(file))
     subparser.add_argument("file", type=lambda file: Path(file))
+
+    subparser = subparsers.add_parser("patch", help="patch binaries")
+    subparser.add_argument("--bits", choices=[32, 64])
+    subparser.add_argument("--endian", choices=["big", "little"])
+    subparser.add_argument("--rpath", type=str)
+    subparser.add_argument("--interp", type=str)
+    subparser.add_argument("file", type=lambda file: Path(file))
+    subparser.add_argument("outfile", type=lambda file: Path(file), nargs="?")
 
     return parser
 
@@ -56,3 +62,5 @@ if __name__ == "__main__":
             patch.command(args)
         case "kmod":
             kernel.module.command(args)
+        case "kinit":
+            pass

@@ -1,0 +1,11 @@
+[package]
+name = "teemo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gimli = "0.31.0"
+goblin = "0.8.2"
+scroll = "0.12.0"
+serde = { version = "1.0.209", features = ["derive"] }
+serde_json = "1.0.127"

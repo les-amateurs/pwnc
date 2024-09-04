@@ -1,10 +1,14 @@
-from .types import *
 import subprocess
 import os
 import shutil
 
-def run(cmd: str, check=True, capture_output=False, encoding="utf-8"):
-    return subprocess.run(cmd, shell=True, check=check, capture_output=capture_output, encoding=encoding)
+from argparse import Namespace as Args
+from pathlib import Path
+
+from . import err
+
+def run(cmd: str, check=True, capture_output=False, encoding="utf-8", cwd=None):
+    return subprocess.run(cmd, shell=True, check=check, capture_output=capture_output, encoding=encoding, cwd=cwd)
 
 def backup(file: Path):
     backup_directory = Path("_backup")
