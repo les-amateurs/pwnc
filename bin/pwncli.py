@@ -47,6 +47,9 @@ def get_main_parser():
     subparser.add_argument("file", type=PathArg)
     subparser.add_argument("outfile", type=PathArg, nargs="?")
 
+    subparser = subparsers.add_parser("errno", help="interpret errno code")
+    subparser.add_argument("code")
+
     kernel = subparsers.add_parser("kernel", help="kernel pwn setup")
     kernel = kernel.add_subparsers()
     kernel.required = True
@@ -90,6 +93,9 @@ match command.get("subcommand"):
     case "patch":
         import pwnc.commands.patch
         pwnc.commands.patch.command(args)
+    case "errno":
+        import pwnc.commands.errno
+        pwnc.commands.errno.command(args)
     case "kernel":
         import pwnc.commands.kernel
         match command.get("subcommand.kernel"):
