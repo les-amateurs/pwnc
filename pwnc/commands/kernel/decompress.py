@@ -33,13 +33,15 @@ def command(args):
     rootfs = args.rootfs
     save = load_config(False)
     
-    if rootfs is None and not args.ignore and save is not None:
-        rootfs = Path(config.load(CONFIG_INITRAMFS / "rootfs"))
-    else:
-        rootfs = Path(".") / "rootfs"
+    if rootfs is None:
+        if args.ignore and save is not None:
+            rootfs = Path(config.load(CONFIG_INITRAMFS / "rootfs"))
+        else:
+            rootfs = Path(".") / "rootfs"
 
-    if initramfs is None and not args.ignore and save is not None:
-        initramfs = Path(config.load(CONFIG_INITRAMFS / "path"))
+    if initramfs is None:
+        if args.ignore and save is not None:
+            initramfs = Path(config.load(CONFIG_INITRAMFS / "path"))
 
     if initramfs is None:
         err.fatal("specify initramfs file")

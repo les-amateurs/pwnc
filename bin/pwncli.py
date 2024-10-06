@@ -67,7 +67,7 @@ def get_main_parser():
     subparser.add_argument("--rootfs", type=PathArg, required=False)
     subparser.add_argument("--initramfs", type=PathArg, required=False)
     subparser.add_argument("--gzipped", action="store_true")
-    subparser.add_argument("--gzip-level", choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    subparser.add_argument("--gzip-level", type=int, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     subparser = kernel.add_parser("decompress", help="decompress initramfs file into rootfs")
     subparser.add_argument("--rootfs", type=PathArg, required=False)

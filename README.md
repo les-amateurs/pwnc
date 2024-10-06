@@ -10,10 +10,14 @@
 #### compress
 - `pwnc kernel compress`
 - uses saved information by `init` to compress rootfs
+- `pwnc kernel compress --rootfs rootfs --initramfs initramfs.cpio.gz --gzipped --gzip-level 9`
+- manually specify paths
 
 #### decompress
 - `pwnc kernel decompress`
 - uses saved information by `init` to decompress rootfs
+- `pwnc kernel decompress --initramfs initramfs.cpio.gz --rootfs backup-rootfs`
+- manually specify paths
 
 #### module
 - `pwnc kernel module chal.ko`
@@ -38,7 +42,10 @@
 - search for libc in ubuntu and debian packages, download .deb file
 
 ### unpack
-- `pwnc unpack
+- `pwnc unpack`
+- unpacks compressed challenge archive
+    - archives that contain a single toplevel directory are used directly
+    - archives that contain toplevel files are moved into a new directory
 
 ## utilities
 
