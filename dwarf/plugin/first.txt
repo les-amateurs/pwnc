@@ -1,0 +1,72 @@
+void* r14 = *arg1
+if (r14 == 0)
+r14 = sub_139f0(arg1)
+bool z
+if (0 == *(r14 + 0x240))
+*(r14 + 0x240) = 1
+z = true
+else
+*(r14 + 0x240)
+z = false
+if (not(z))
+std::sys::sync::mutex::futex::Mutex::lock_contended::h77e164488e312e13(r14 + 0x240)
+void* result_1
+char rbp
+if (data_11bac8 << 1 == 0)
+rbp = 0
+if (*(r14 + 0x244) != 0)
+label_3a610:
+result_1 = r14 + 0x240
+char var_b0 = rbp
+unwrap_failed("called `Result::unwrap()` on an …", 0x2b, &result_1)
+noreturn
+else
+rbp = sub_19030() ^ 1
+if (*(r14 + 0x244) != 0)
+goto label_3a610
+int128_t zmm0 = *arg2
+int128_t zmm1 = arg2[1]
+int128_t zmm2 = arg2[2]
+int64_t r15_1 = *(r14 + 0x268)
+void* rax_7 = *arg1
+if (rax_7 == 0)
+rax_7 = sub_139f0(arg1)
+int64_t temp1 = *(rax_7 - 0x80)
+*(rax_7 - 0x80) += 1
+if (temp1 s<= -1)
+trap(6)
+int128_t var_118 = zmm2
+int128_t var_128 = zmm1
+int128_t var_138 = zmm0
+void* result_3 = rax_7 - 0x80
+int64_t var_108 = r15_1
+char var_c0 = 0
+void* rax_9 = async_executor::Executor::schedule::hb09b2d67199add7a(arg1)
+memcpy(&result_1, &result_3, 0x88)
+void* var_180 = rax_9
+data_113482
+void* result_2 = j___rdl_alloc(0xb8, 8)
+if (result_2 == 0)
+sub_60280()
+noreturn
+*result_2 = &data_108b08
+*(result_2 + 8) = 0x111
+*(result_2 + 0x10) = 0
+*(result_2 + 0x20) = 1
+*(result_2 + 0x28) = rax_9
+memcpy(result_2 + 0x30, &result_3, 0x88)
+result_3 = result_2
+result_1 = result_2
+void* r12_1
+r12_1.b = 1
+sub_2b420(r14 + 0x248, r15_1, &data_108aa8, async_task::raw::RawTask<F,T,S,M>::clone_waker::h563841cac681052d(result_2))
+(**result_3)()
+void* result = result_1
+if (rbp == 0 && (data_11bac8 & 0x7fffffffffffffff) != 0 && sub_19030() == 0)
+*(r14 + 0x244) = 1
+int32_t temp0 = *(r14 + 0x240)
+*(r14 + 0x240) = 0
+if (temp0 != 2)
+return result
+sub_191f0(r14 + 0x240)
+return result

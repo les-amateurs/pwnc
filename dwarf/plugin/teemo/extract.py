@@ -1,3 +1,4 @@
+from calendar import c
 from binaryninja import (
     QualifiedName,
     Type,
@@ -11,15 +12,18 @@ import json
 import builtins
 
 def escape(name: QualifiedName):
-    return name.name[0]
+    return "::".join(name.name)
 
 # Since this is used to differentiate between types
 # using strings as keys is non optimal because we cannot
 # guarantee there will be no collisions.
 # (although unlikely since such names are probably
 # engineered specifically to break this).
-def extract_typename(type: Type, name: str | QualifiedName | None = None):
-    if builtins.type(name) == QualifiedName:
+def extract_typename(type: Type | None, name: str | QualifiedName | None = None):
+    if type is None:
+        return ""
+    
+    if name is not None and builtins.type(name) != str:
         name = escape(name)
 
     match type.type_class.value:
@@ -31,9 +35,11 @@ def extract_typename(type: Type, name: str | QualifiedName | None = None):
             else:
                 name = escape(type.registered_name.name)
             match type.type.value:
-                case StructureVariant.StructStructureType:
+                case StructureVariant.StructStructureType.value:
                     return name
-                case StructureVariant.UnionStructureType:
+                case StructureVariant.UnionStructureType.value:
+                    return name
+                case StructureVariant.ClassStructureType.value:
                     return name
                 case _:
                     raise NotImplementedError(f"unknown structure type: {type.type}")
@@ -51,8 +57,10 @@ def extract_typename(type: Type, name: str | QualifiedName | None = None):
             return ""
         case TypeClass.FloatTypeClass.value:
             return type.get_string()
+        case TypeClass.BoolTypeClass.value:
+            return type.get_string()
         case _:
-            raise NotImplementedError(f"unhandled: {name} {type(type)}")
+            raise NotImplementedError(f"unhandled: {name} {builtins.type(type)}")
 
 class TypeCollection:
     def __init__(self, bv: BinaryView):
@@ -93,7 +101,6 @@ class TypeCollection:
     def dump(self, tmp: Path):
         entries = ["structs", "unions", "enums", "integers", "floats", "typedefs", "pointers", "prototypes", "functions", "arrays", "variables"]
         for entry in entries:
-            print(f"dumping {entry}")
             with open(tmp / f"{entry}.json", "w+") as fp:
                 json.dump(getattr(self, entry), fp)
 
@@ -110,7 +117,7 @@ class TypeCollection:
             self.anonymous += 1
             is_anonymous_type = True
 
-        if key in self.all:
+        if key in self.all or not key:
             return key
         
         match type.type_class.value:
@@ -120,12 +127,12 @@ class TypeCollection:
                 self.integers[key]["signed"] = type.signed.value
             case TypeClass.StructureTypeClass.value:
                 match type.type.value:
-                    case StructureVariant.StructStructureType:
+                    case StructureVariant.StructStructureType.value:
                         target = self.structs
-                    case StructureVariant.UnionStructureType:
+                    case StructureVariant.UnionStructureType.value:
                         target = self.unions
-                    case _:
-                        exit(f"unknown structure type")
+                    case StructureVariant.ClassStructureType.value:
+                        target = self.structs
                 target[key] = {}
                 target[key]["size"] = len(type)
                 target[key]["anon"] = is_anonymous_type
@@ -160,6 +167,10 @@ class TypeCollection:
             case TypeClass.FloatTypeClass.value:
                 self.floats[key] = {}
                 self.floats[key]["size"] = len(type)
+            case TypeClass.BoolTypeClass.value:
+                self.integers[key] = {}
+                self.integers[key]["size"] = len(type)
+                self.integers[key]["signed"] = False
             case _:
                 raise NotImplementedError(f"unknown type: {type}, name: {name}")
 

@@ -10,11 +10,7 @@ __pycache__/
 # ignore this, random testing files
 log.txt
 elfutils/
-devpro
-failed.txt
-libc-paths.txt
-patched.txt
-thing.sh
-wtf
 stuff/
 other/
+dist/
+kmod/

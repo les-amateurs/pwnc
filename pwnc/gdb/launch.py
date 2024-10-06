@@ -6,8 +6,8 @@ import threading
 import os
 import subprocess
 import shutil
+import inspect
 from os import path
-from xml.dom import NotFoundErr
 from pwnlib.util.misc import run_in_new_terminal
 from pwnlib import gdb as gdbutils
 from pwnlib import elf
@@ -16,6 +16,7 @@ from rpyc import BgServingThread
 
 from ..commands import unstrip
 from ..util import *
+from .. import config
 
 # hack to get intellisense
 try:
@@ -110,7 +111,7 @@ class Objfiles:
 
 """ Gdb copied from pwntools """
 class Gdb:
-    def __init__(self, conn, binary: elf.ELF = None, resolve_debuginfo: bool = True):
+    def __init__(self, conn, binary: elf.ELF = None, resolve_debuginfo: bool = True, **kwargs):
         gdbref = self
         self.conn = conn
         self.gdb: "gdb" = conn.root.gdb
@@ -141,7 +142,7 @@ class Gdb:
             @property
             def objfile(self):
                 if not self._objfile:
-                    raise NotFoundErr("objfile not loaded yet")
+                    raise FileNotFoundError("objfile not loaded yet")
                 return self._objfile
                 
             @property
@@ -227,8 +228,38 @@ class Gdb:
 def on(option: bool):
     return "on" if option else "off"
 
+def collect_options(fn, kwargs: dict):
+    options = {}
+    for name, param in inspect.signature(fn).parameters.items():
+        if name == "options":
+            continue
+        
+        if param.kind == param.POSITIONAL_OR_KEYWORD and param.default != param.empty:
+            val = kwargs.get(name, None) or param.default
+            if val is None:
+                try:
+                    val = config.load(config.Key("gdb") / name.replace("_", "-"))
+                except KeyError:
+                    pass
+
+            options[name] = val
+    return options
+
+def with_options(fn):
+    def wrapper(cls, *args, **kwargs):
+        options = collect_options(fn, kwargs)
+        return fn(cls, *args, **kwargs, options=options)
+    
+    return wrapper
+
+def select_terminal(headless: bool):
+    if headless:
+        return "sh"
+    else:
+        return "kitty"
+
 class Bridge:
-    def __init__(self, aslr: bool = True):
+    def __init__(self, aslr: bool = True, index_cache: bool = None, index_cache_path: bool = None, **kwargs):
         self.gdbscript = []
         self.launch_directory = pathlib.Path(mkdtemp())
         self.socket_path = str(self.launch_directory / "socket")
@@ -239,8 +270,13 @@ class Bridge:
 
         if aslr is not None:
             self.gdbscript.append("set disable-randomization {:s}".format(on(not aslr)))
+        if index_cache is not None:
+            if index_cache_path is not None:
+                self.gdbscript.append("set index-cache directory {:s}".format(index_cache_path))
+            self.gdbscript.append("set index-cache enabled {:s}".format(on(index_cache)))
+
         self.gdbscript.append("python socket_path = {!r}".format(self.socket_path))
-        self.gdbscript.append("source {!s}".format(self.bridge_path))
+        self.gdbscript.append("source {:s}".format(self.bridge_path))
 
     def finalize_gdbscript(self):
         with open(self.gdbscript_path, "w+") as fp:
@@ -259,35 +295,58 @@ class Bridge:
         self.background_server = BgServingThread(connection, callback=lambda: None)
         return connection
 
-def attach(command: str, aslr: bool = True, elf: elf.ELF = None, resolve_debuginfo: bool = False):
+@with_options
+def attach(command: str,
+    elf: elf.ELF = None,
+
+    headless: bool = False,
+    aslr: bool = True,
+    resolve_debuginfo: bool = False,
+    index_cache: bool = None,
+
+    options: dict = None,
+):
     pids = subprocess.run(["pgrep", "-f", command], check=False, capture_output=True, encoding="utf-8").stdout.splitlines()
     if len(pids) == 0:
-        raise NotFoundErr("process {!r} not found".format(command))
+        raise FileNotFoundError("process {!r} not found".format(command))
     
     if len(pids) != 1:
         print("selecting newest pid")
 
     pid = pids[-1]
-    bridge = Bridge(aslr=None)
+    bridge = Bridge(**options)
     bridge.gdbscript.append("set sysroot /proc/{:s}/root/".format(pid))
     bridge.finalize_gdbscript()
     
     command = [bridge.gdb_path]
     if elf is not None:
         command += [elf.path]
-    command += ["-p", str(pid), "-x", bridge.gdbscript_path, "-readnow"]
+    command += ["-p", str(pid), "-x", bridge.gdbscript_path]
 
-    run_in_new_terminal(command, terminal="kitty", args=[], kill_at_exit=True)
+    terminal = select_terminal(headless)
+    run_in_new_terminal(command, terminal=terminal, args=[], kill_at_exit=True)
 
     conn = bridge.connect()
-    return Gdb(conn, binary=elf, resolve_debuginfo=resolve_debuginfo)
+    return Gdb(conn, binary=elf, **options)
 
-""" copied from pwntools """
-def launch(elf: elf.ELF, headless: bool = False, aslr: bool = True, resolve_debuginfo: bool = False):
-    bridge = Bridge(aslr=aslr)
+@with_options
+def debug(
+    elf: elf.ELF,
+
+    headless: bool = False,
+    aslr: bool = True,
+    resolve_debuginfo: bool = False,
+    index_cache: bool = None,
+
+    options: dict = None
+):
+    bridge = Bridge(**options)
+    bridge.finalize_gdbscript()
+
     command = [bridge.gdb_path, str(elf.path), "-x", bridge.gdbscript_path]
 
-    run_in_new_terminal(command, terminal="kitty", args=[], kill_at_exit=True)
+    terminal = select_terminal(headless)
+    run_in_new_terminal(command, terminal=terminal, args=[], kill_at_exit=True)
 
     conn = bridge.connect()
-    return Gdb(conn, binary=elf, resolve_debuginfo=resolve_debuginfo)
+    return Gdb(conn, binary=elf, **options)

@@ -3,9 +3,8 @@ from binaryninja import (
     BinaryView,
     PluginCommand,
 )
-
-from .config import *
-from .server import start_server, update_server
+from .teemo.config import *
+from .teemo.server import start_server, stop_server, update_server
 
 class MenuPath:
     def __init__(self, name: str):
@@ -36,5 +35,5 @@ PluginCommand.register(
 PluginCommand.register(
     MenuPath(NAME) / "stop server",
     "",
-    lambda bv: None,
+    stop_server,
 )

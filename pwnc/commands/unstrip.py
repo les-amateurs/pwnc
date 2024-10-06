@@ -3,8 +3,6 @@ from pathlib import Path
 from .scrape import locate_package
 from .. import minelf
 import shutil
-import atexit
-import os
 
 # https://wiki.archlinux.org/title/Debuginfod
 DEBUGINFOD_SERVERS = [

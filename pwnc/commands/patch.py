@@ -1,5 +1,4 @@
 from ..util import *
-from .. import err
 from ..minelf import ELF
 from ctypes import sizeof
 

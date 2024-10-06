@@ -1,5 +1,4 @@
 from ...util import *
-from ... import err
 import shutil
 from tempfile import NamedTemporaryFile
 from ... import minelf

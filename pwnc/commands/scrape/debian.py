@@ -1,4 +1,4 @@
-from ...cache import locate_cache
+from ...cache import locate_global_cache
 from ... import err
 from ... import minelf
 from .package import Package
@@ -8,7 +8,7 @@ import json
 import re
 
 DISTRO = "debian"
-CACHE = locate_cache() / "scrape" / DISTRO
+CACHE = locate_global_cache() / "scrape" / DISTRO
 ROOT = "http://snapshot.debian.org/"
 VERSION = re.compile(rb"GLIBC (\d+\.\d+.*)\)")
 

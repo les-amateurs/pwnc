@@ -1,8 +1,8 @@
-from ...cache import locate_cache
+from ...cache import locate_global_cache
 import shelve
 
 SHELVES = {}
-CACHE = locate_cache() / "shelves"
+CACHE = locate_global_cache() / "shelves"
 CACHE.mkdir(parents=True, exist_ok=True)
 
 class Index:

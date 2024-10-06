@@ -1,8 +1,9 @@
 use gimli::write::{
     Address, AttributeValue, CallFrameInstruction, CommonInformationEntry, DwarfUnit, EndianVec,
-    Expression, FrameTable, Location, LocationList, Sections, UnitEntryId,
+    Expression, FileInfo, FrameTable, LineProgram, LineString, Location, LocationList, Sections,
+    UnitEntryId,
 };
-use gimli::{Encoding, Register};
+use gimli::{Encoding, LineEncoding, Register};
 use goblin::elf::section_header::{SHF_ALLOC, SHT_PROGBITS};
 use goblin::elf64::{
     header::*, program_header as segment, section_header as section, sym as symbol,
@@ -118,14 +119,15 @@ struct GlobalVariable {
 }
 
 #[derive(Serialize, Deserialize)]
-enum ArgumentLocation {
+enum VariableLocation {
     Register(String),
     StackVariable(i64),
+    None,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Argument {
-    location: ArgumentLocation,
+    location: VariableLocation,
     name: String,
     typename: String,
 }
@@ -134,13 +136,19 @@ struct Argument {
 struct Local {
     name: String,
     typename: String,
-    offset: i64,
+    location: VariableLocation,
 }
 
 #[derive(Serialize, Deserialize)]
 struct CallInformation {
     return_pc: u64,
     target: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Label {
+    name: String,
+    address: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -154,6 +162,9 @@ struct Function {
     locals: Option<Vec<Local>>,
     frame: Option<Vec<(u32, i32)>>,
     calls: Option<Vec<CallInformation>>,
+    labels: Option<Vec<Label>>,
+    lineinfo: Option<Vec<(u64, u64)>>,
+    source: Option<String>,
     section: Option<String>,
 }
 
@@ -302,8 +313,63 @@ fn visit(
     }
 }
 
+const XMM_REGNUM_00_07: u16 = 17;
+const XMM_REGNUM_08_0F: u16 = 25;
+const XMM_REGNUM_10_1F: u16 = 69;
+
 fn translate_register(register: String) -> Register {
-    return gimli::X86_64::name_to_register(&register).unwrap();
+    if let Some(reg) = gimli::X86_64::name_to_register(&register) {
+        reg
+    } else {
+        if register.starts_with("temp") {
+            // binja temp registers do not actually exist
+            return Register(0xffff);
+        }
+
+        match register.as_str() {
+            "zmm0" => Register(XMM_REGNUM_00_07 + 0),
+            "zmm1" => Register(XMM_REGNUM_00_07 + 1),
+            "zmm2" => Register(XMM_REGNUM_00_07 + 2),
+            "zmm3" => Register(XMM_REGNUM_00_07 + 3),
+            "zmm4" => Register(XMM_REGNUM_00_07 + 4),
+            "zmm5" => Register(XMM_REGNUM_00_07 + 5),
+            "zmm6" => Register(XMM_REGNUM_00_07 + 6),
+            "zmm7" => Register(XMM_REGNUM_00_07 + 7),
+            "zmm8" => Register(XMM_REGNUM_08_0F + 0),
+            "zmm9" => Register(XMM_REGNUM_08_0F + 1),
+            "zmm10" => Register(XMM_REGNUM_08_0F + 2),
+            "zmm11" => Register(XMM_REGNUM_08_0F + 3),
+            "zmm12" => Register(XMM_REGNUM_08_0F + 4),
+            "zmm13" => Register(XMM_REGNUM_08_0F + 5),
+            "zmm14" => Register(XMM_REGNUM_08_0F + 6),
+            "zmm15" => Register(XMM_REGNUM_08_0F + 7),
+            "zmm16" => Register(XMM_REGNUM_10_1F + 0),
+            "zmm17" => Register(XMM_REGNUM_10_1F + 1),
+            "zmm18" => Register(XMM_REGNUM_10_1F + 2),
+            "zmm19" => Register(XMM_REGNUM_10_1F + 3),
+            "zmm20" => Register(XMM_REGNUM_10_1F + 4),
+            "zmm21" => Register(XMM_REGNUM_10_1F + 5),
+            "zmm22" => Register(XMM_REGNUM_10_1F + 6),
+            "zmm23" => Register(XMM_REGNUM_10_1F + 7),
+            "zmm24" => Register(XMM_REGNUM_10_1F + 8),
+            "zmm25" => Register(XMM_REGNUM_10_1F + 9),
+            "zmm26" => Register(XMM_REGNUM_10_1F + 10),
+            "zmm27" => Register(XMM_REGNUM_10_1F + 11),
+            "zmm28" => Register(XMM_REGNUM_10_1F + 12),
+            "zmm29" => Register(XMM_REGNUM_10_1F + 13),
+            "zmm30" => Register(XMM_REGNUM_10_1F + 14),
+            "zmm31" => Register(XMM_REGNUM_10_1F + 15),
+
+            "fsbase" => Register(58),
+            "gsbase" => Register(59),
+
+            // used by xsave, xgetbv and xsetbv
+            // no official dwarf register number???
+            "xcr0" => Register(0xffff),
+
+            _ => panic!("unknown register: {register}"),
+        }
+    }
 }
 
 pub fn main() -> Err {
@@ -346,13 +412,44 @@ pub fn main() -> Err {
         // Choose the encoding parameters.
         let encoding = gimli::Encoding {
             format: gimli::Format::Dwarf32,
-            version: 5,
+            version: 4,
             address_size: 8,
         };
 
         // Create a container for a single compilation unit.
         let mut dwarf = DwarfUnit::new(encoding);
         let root = dwarf.unit.root();
+
+        // set CU attributes
+        let sources = tmp.to_path_buf().join("sources");
+        let comp_dir_name_id = dwarf.strings.add(sources.to_str().unwrap());
+        dwarf.unit.get_mut(root).set(
+            gimli::DW_AT_comp_dir,
+            AttributeValue::StringRef(comp_dir_name_id),
+        );
+        let comp_file_name_id = dwarf.strings.add("teemo.c");
+        dwarf.unit.get_mut(root).set(
+            gimli::DW_AT_name,
+            AttributeValue::StringRef(comp_file_name_id),
+        );
+        dwarf.unit.get_mut(root).set(
+            gimli::DW_AT_language,
+            AttributeValue::Language(gimli::DW_LANG_C),
+        );
+        dwarf.unit.get_mut(root).set(
+            gimli::DW_AT_producer,
+            AttributeValue::StringRef(dwarf.strings.add(":3")),
+        );
+        dwarf.unit.line_program = LineProgram::new(
+            encoding,
+            LineEncoding::default(),
+            LineString::StringRef(comp_dir_name_id),
+            LineString::StringRef(comp_file_name_id),
+            None,
+        );
+        let sources = dwarf.unit.line_program.add_directory(LineString::String(
+            dwarf.strings.get(comp_dir_name_id).to_vec(),
+        ));
 
         let type_mapping = collect_types(tmp.to_path_buf())?;
         let global_variables = collect_variables(tmp.to_path_buf())?;
@@ -375,7 +472,7 @@ pub fn main() -> Err {
                         sh_addralign: 0,
                         sh_entsize: 0,
                     },
-                    raw: None,
+                    raw: None, // Some(vec![0; *size as usize]),
                     off: 0,
                 },
             );
@@ -685,6 +782,9 @@ pub fn main() -> Err {
                 locals,
                 frame: _frame,
                 calls: _calls,
+                labels,
+                lineinfo,
+                source,
                 section,
             },
         ) in functions.into_iter()
@@ -720,47 +820,52 @@ pub fn main() -> Err {
                     gimli::DW_AT_name,
                     AttributeValue::StringRef(dwarf.strings.add(name)),
                 );
-                dwarf.unit.get_mut(id).set(
-                    gimli::DW_AT_type,
-                    AttributeValue::UnitRef(*dwarf_types.get(&typename).unwrap()),
-                );
-                let mut loclist = LocationList(Vec::new());
+                if typename.len() > 0 {
+                    dwarf.unit.get_mut(id).set(
+                        gimli::DW_AT_type,
+                        AttributeValue::UnitRef(*dwarf_types.get(&typename).unwrap()),
+                    );
+                }
+                // let mut loclist = LocationList(Vec::new());
                 let mut expression = Expression::new();
 
                 match location {
-                    ArgumentLocation::Register(regname) => {
+                    VariableLocation::Register(regname) => {
                         let mut register = Expression::new();
                         register.op_reg(translate_register(regname));
                         expression.op_entry_value(register);
                         expression.op(gimli::DW_OP_stack_value);
                     }
-                    ArgumentLocation::StackVariable(offset) => {
+                    VariableLocation::StackVariable(offset) => {
                         expression.op_fbreg(offset - 8);
                     }
+                    VariableLocation::None => {}
                 }
 
-                loclist.0.push(Location::OffsetPair {
-                    begin: start,
-                    end: end,
-                    data: expression,
-                });
-                let locid = dwarf.unit.locations.add(loclist);
-                dwarf.unit.get_mut(id).set(
-                    gimli::DW_AT_location,
-                    AttributeValue::LocationListRef(locid),
-                );
+                // loclist.0.push(Location::OffsetPair {
+                //     begin: start,
+                //     end: end,
+                //     data: expression,
+                // });
+                // let locid = dwarf.unit.locations.add(loclist);
+                dwarf
+                    .unit
+                    .get_mut(id)
+                    .set(gimli::DW_AT_location, AttributeValue::Exprloc(expression));
             }
 
-            // for call in calls {
-            //     let id = dwarf.unit.add(fid, gimli::DW_TAG_call_site);
-            //     let unit = dwarf.unit.get_mut(id);
+            // if let Some(calls) = calls {
+            //     for call in calls {
+            //         let id = dwarf.unit.add(fid, gimli::DW_TAG_call_site);
+            //         let unit = dwarf.unit.get_mut(id);
 
-            //     unit.set(
-            //         gimli::DW_AT_call_return_pc,
-            //         AttributeValue::Udata(call.return_pc),
-            //     );
-            //     if let Some(target) = dwarf_functions.get(&call.target) {
-            //         unit.set(gimli::DW_AT_call_target, AttributeValue::UnitRef(*target));
+            //         unit.set(
+            //             gimli::DW_AT_call_return_pc,
+            //             AttributeValue::Udata(call.return_pc),
+            //         );
+            //         if let Some(target) = dwarf_functions.get(&call.target) {
+            //             unit.set(gimli::DW_AT_call_target, AttributeValue::UnitRef(*target));
+            //         }
             //     }
             // }
 
@@ -772,7 +877,7 @@ pub fn main() -> Err {
                 for Local {
                     name,
                     typename,
-                    offset,
+                    location,
                 } in locals
                 {
                     let id = dwarf.unit.add(fid, gimli::DW_TAG_variable);
@@ -788,10 +893,76 @@ pub fn main() -> Err {
                         );
                     }
 
-                    let mut location = Expression::new();
-                    location.op_fbreg(offset - 8);
-                    unit.set(gimli::DW_AT_location, AttributeValue::Exprloc(location));
+                    let mut expression = Expression::new();
+                    match location {
+                        VariableLocation::Register(regname) => {
+                            expression.op_reg(translate_register(regname));
+                        }
+                        VariableLocation::StackVariable(offset) => {
+                            expression.op_fbreg(offset - 8);
+                        }
+                        VariableLocation::None => {}
+                    }
+
+                    unit.set(gimli::DW_AT_location, AttributeValue::Exprloc(expression));
                 }
+            }
+
+            if let Some(labels) = labels {
+                for Label { name, address } in labels {
+                    let id = dwarf.unit.add(fid, gimli::DW_TAG_label);
+                    let unit = dwarf.unit.get_mut(id);
+                    unit.set(
+                        gimli::DW_AT_name,
+                        AttributeValue::StringRef(dwarf.strings.add(name)),
+                    );
+                    unit.set(
+                        gimli::DW_AT_low_pc,
+                        AttributeValue::Address(Address::Constant(address)),
+                    );
+                }
+            }
+
+            if let Some(lineinfo) = lineinfo {
+                let file_id = dwarf.unit.line_program.add_file(
+                    LineString::String(source.unwrap().into_bytes()),
+                    sources,
+                    None,
+                );
+
+                let start = lineinfo[0].0;
+                dwarf
+                    .unit
+                    .line_program
+                    .begin_sequence(Some(Address::Constant(start)));
+                for (address, line) in lineinfo {
+                    dwarf.unit.line_program.row().file = file_id;
+                    dwarf.unit.line_program.row().address_offset = address - start;
+                    dwarf.unit.line_program.row().is_statement = true;
+                    dwarf.unit.line_program.row().line = line;
+                    dwarf.unit.line_program.generate_row();
+                }
+                dwarf.unit.line_program.end_sequence(0);
+
+                // let directory_id = dwarf.unit.line_program.add_directory(LineString::String(
+                //     dwarf.strings.get(comp_dir_name_id).to_vec(),
+                // ));
+                // let file_id = dwarf.unit.line_program.add_file(
+                //     LineString::String(dwarf.strings.get(comp_file_name_id).to_vec()),
+                //     directory_id,
+                //     None,
+                // );
+                // dwarf
+                //     .unit
+                //     .line_program
+                //     .begin_sequence(Some(Address::Constant(0)));
+                // dwarf.unit.line_program.row().file = file_id;
+                // dwarf.unit.line_program.row().address_offset = 0;
+                // dwarf.unit.line_program.row().is_statement = true;
+                // dwarf.unit.line_program.row().line = 13;
+                // dwarf.unit.line_program.row().column = 69;
+                // dwarf.unit.line_program.generate_row();
+                // dwarf.unit.line_program.end_sequence(4);
             }
 
             // if let Some(frame) = frame {
@@ -833,51 +1004,6 @@ pub fn main() -> Err {
                 },
             );
         }
-
-        // set CU attributes
-        let comp_dir_name_id = dwarf.strings.add("teemo");
-        dwarf.unit.get_mut(root).set(
-            gimli::DW_AT_comp_dir,
-            AttributeValue::StringRef(comp_dir_name_id),
-        );
-        let comp_file_name_id = dwarf.strings.add("teemo.c");
-        dwarf.unit.get_mut(root).set(
-            gimli::DW_AT_name,
-            AttributeValue::StringRef(comp_file_name_id),
-        );
-        dwarf.unit.get_mut(root).set(
-            gimli::DW_AT_language,
-            AttributeValue::Language(gimli::DW_LANG_C),
-        );
-
-        let producer = String::from(":3");
-        let producer_id = dwarf.strings.add(producer);
-        dwarf.unit.get_mut(root).set(
-            gimli::DW_AT_producer,
-            AttributeValue::StringRef(producer_id),
-        );
-
-        // dwarf.unit.line_program =
-        //     LineProgram::new(encoding, LineEncoding::default(), comp_dir, comp_file, None);
-        // let directory_id = dwarf.unit.line_program.add_directory(LineString::String(
-        //     dwarf.strings.get(comp_dir_name_id).to_vec(),
-        // ));
-        // let file_id = dwarf.unit.line_program.add_file(
-        //     LineString::String(dwarf.strings.get(comp_file_name_id).to_vec()),
-        //     directory_id,
-        //     None,
-        // );
-        // dwarf
-        //     .unit
-        //     .line_program
-        //     .begin_sequence(Some(Address::Constant(0)));
-        // dwarf.unit.line_program.row().file = file_id;
-        // dwarf.unit.line_program.row().address_offset = 0;
-        // dwarf.unit.line_program.row().is_statement = true;
-        // dwarf.unit.line_program.row().line = 13;
-        // dwarf.unit.line_program.row().column = 69;
-        // dwarf.unit.line_program.generate_row();
-        // dwarf.unit.line_program.end_sequence(4);
 
         // Create a `Vec` for each DWARF section.
         let mut dwarf_sections = Sections::new(EndianVec::new(gimli::LittleEndian));
@@ -1041,7 +1167,7 @@ pub fn main() -> Err {
         // write rest of sections
         for (_, section) in sections.iter() {
             // println!("section name: {}", name);
-            println!("section size: {}", section.hdr.sh_size);
+            // println!("section size: {}", section.hdr.sh_size);
             file.write(&transmute::<_, [u8; section::SIZEOF_SHDR]>(section.hdr))?;
         }
 

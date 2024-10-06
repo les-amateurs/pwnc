@@ -5,4 +5,4 @@ NAME = "teemo"
 TMPDIR = Path("/tmp") / NAME
 MAIN_SERVER_DIR = TMPDIR / "main.sock"
 # UNIX_SOCK_DIR = TMPDIR / NAME / "sock"
-UNIX_SOCK_PATH = TMPDIR / NAME / "comm.sock"
+UNIX_SOCK_PATH = TMPDIR / "comm.sock"
