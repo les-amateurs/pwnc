@@ -35,6 +35,13 @@ def find_config():
         
     return cwd / CONFIG_FILE
 
+def find_or_init_config():
+    p = find_config()
+    if p is None:
+        load_config(True)
+        return Path(".") / CONFIG_FILE
+    return p
+
 _global_config_ = load_global_config()
 _local_config_ = None
 _local_config_path_ = None
@@ -121,6 +128,12 @@ def load(key: Key):
         return traverse(_global_config_, key, False)[key.name()]
     except KeyError:
         raise KeyError(key)
+    
+def maybe(key: Key):
+    try:
+        return load(key)
+    except KeyError:
+        return None
     
 def exists(key: Key):
     config = load_config(False)

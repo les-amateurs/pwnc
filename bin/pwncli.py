@@ -60,7 +60,17 @@ def get_main_parser():
     subparser.add_argument("-o", type=PathArg)
     subparser.add_argument("file", type=PathArg)
 
-    subparser = kernel.add_parser("compress", help="compress rootfs back into initramfs")
+    subparser = kernel.add_parser("compress", help="compress rootfs into initramfs file")
+    subparser.add_argument("--rootfs", type=PathArg, required=False)
+    subparser.add_argument("--initramfs", type=PathArg, required=False)
+    subparser.add_argument("--gzipped", action="store_true")
+    subparser.add_argument("--gzip-level", choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+    subparser = kernel.add_parser("decompress", help="decompress initramfs file into rootfs")
+    subparser.add_argument("--rootfs", type=PathArg, required=False)
+    subparser.add_argument("--initramfs", type=PathArg, required=False)
+    subparser.add_argument("--ignore", action="store_true")
+    subparser.add_argument("--save", action="store_true")
 
     return parser
 
@@ -86,6 +96,8 @@ match command.get("subcommand"):
             case "init":
                 pwnc.commands.kernel.init.command(args)
             case "compress":
-                pass
+                pwnc.commands.kernel.compress.command(args)
+            case "decompress":
+                pwnc.commands.kernel.decompress.command(args)
             case "module":
                 pwnc.commands.kernel.module.command(args)

@@ -9,8 +9,8 @@ from os.path import expanduser
 from . import err
 from . import config
 
-def run(cmd: str, check=True, capture_output=False, encoding="utf-8", cwd=None):
-    return subprocess.run(cmd, shell=True, check=check, capture_output=capture_output, encoding=encoding, cwd=cwd)
+def run(cmd: str, check: bool = True, capture_output: bool = False, encoding: str | None = "utf-8", cwd: Path | None = None, shell: bool = True, input: bytes | None = None):
+    return subprocess.run(cmd, shell=shell, check=check, capture_output=capture_output, encoding=encoding, cwd=cwd, input=input)
 
 def backup(file: Path):
     backup_directory = Path("_backup")

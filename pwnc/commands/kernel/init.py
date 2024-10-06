@@ -2,6 +2,7 @@ from ...util import *
 from tempfile import NamedTemporaryFile
 import gzip
 import shutil
+from . import decompress
 
 def command(args: Args):
     if args.initramfs is None:
@@ -15,22 +16,6 @@ def command(args: Args):
     else:
         initramfs = args.initramfs
 
-    gzipped = False
-    with NamedTemporaryFile() as tempfile:
-        shutil.copyfile(initramfs, tempfile.name)
-        try:
-            with gzip.open(tempfile.name) as fp:
-                decompressed = fp.read()
-            with open(tempfile.name, "wb") as fp:
-                fp.write(decompressed)
-            gzipped = True
-        except gzip.BadGzipFile:
-            pass
-
-        rootfs = Path(".") / "rootfs"
-        rootfs.mkdir(exist_ok=True)
-        run(f"cpio -idmu < {tempfile.name}", cwd=rootfs)
-
-    config_initramfs = config.Key("kernel") / "initramfs"
-    config.save(config_initramfs / "path", str(initramfs))
-    config.save(config_initramfs / "gzip", gzipped)
+    rootfs = config.find_or_init_config().parent / "rootfs"
+    gzipped = decompress.do_decompress(initramfs, rootfs)
+    decompress.save_parameters(initramfs, rootfs, gzipped)
