@@ -4,8 +4,10 @@ import gzip
 
 def do_compress(rootfs: Path, destination: Path, gzipped: bool, gzip_level: int = 0):
     files = rootfs.glob("**/*")
+    files = map(lambda p: p.relative_to(rootfs), files)
+    files = list(files)
     delimited = b"\x00".join(map(lambda file: str(file).encode(), files))
-    handle = run("cpio --null -o --format=newc --owner=root", input=delimited, capture_output=True, encoding=None)
+    handle = run("cpio --null -o --format=newc --owner=root", input=delimited, capture_output=True, encoding=None, cwd=rootfs)
     archive = handle.stdout
     if gzipped:
         archive = gzip.compress(archive, gzip_level)
