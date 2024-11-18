@@ -22,6 +22,9 @@ wrapper for userfaultfd, io_uring, bpf apis
 
 check for unintendeds
 
+kernel gdb scripting
+- searching for constant sections from kbase/absolute locations (LDT, IDT)
+
 ## gdb scripting
 
 better gdb api interaction from solve scripts
