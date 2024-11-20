@@ -6,6 +6,7 @@ __pycache__/
 **.symvers
 **.order
 *.o
+*.pkl
 
 **/.venv
 
