@@ -335,8 +335,15 @@ class ELF:
             offset += 1
         return contents[section.name:offset]
 
-    def section_content(self, section: "ELF.Section"):
-        return memoryview(self.raw_elf_bytes)[section.offset:section.offset+section.size]
+    def section_content(self, section: "ELF.Section", element = None):
+        content = memoryview(self.raw_elf_bytes)[section.offset:section.offset+section.size]
+        if element is None:
+            return content
+        else:
+            elements = []
+            for i in range(0, len(content), ctypes.sizeof(element)):
+                elements.append(element.from_buffer(content, i))
+            return elements
     
     def notes(self, content: bytes):
         offset = 0
