@@ -1,3 +1,4 @@
+from re import T
 from .. util import *
 from pathlib import Path
 from .scrape import locate_package
@@ -11,7 +12,6 @@ DEBUGINFOD_SERVERS = [
 
 def unstrip(stripped: Path, debuginfo: Path):
     err.info(f"debuginfo path = {debuginfo}")
-
     if not shutil.which("eu-unstrip"):
         err.require("eu-unstrip")
 
@@ -31,17 +31,50 @@ def unstrip_from_package(file: Path, save: bool):
         err.fatal(f"failed to locate package for {file}")
     err.info(package.storage)
     package.unpack()
+
+    debuginfo_path = None
+
     buildid: str = elf.buildid.hex()
+    err.info(f"using buildid strategy ({buildid})")
     file = f"{buildid[:2]}/{buildid[2:]}.debug"
     debuginfo = package.find(file)
-    if len(debuginfo) == 0:
-        err.fatal(f"failed to find {file} in {package.storage}")
-    debuginfo_path = debuginfo[0]
+    
+    if len(debuginfo) == 1:
+        debuginfo_path = debuginfo[0]
+    else:
+        err.warn(f"failed to find {file} in {package.storage}")
+
+    if debuginfo_path is None:
+        err.warn("recursively searching files for match")
+        files = list(package.storage.rglob("*.so*"))
+        for file in files:
+            with open(file, "rb") as fp:
+                file_bytes = fp.read()
+            maybe_elf = minelf.ELF(file_bytes)
+            try:
+                maybe_elf.check()
+            except:
+                err.warn(f"malformed elf {file}")
+                continue
+
+            if maybe_elf.buildid == elf.buildid:
+                err.info(f"found match {file}")
+                debuginfo_path = file
+                break
+        else:
+            err.warn("recursive search failed")
+
+    if debuginfo_path is None:
+        err.fatal("failed to find debuginfo file")
 
     if save:
         cache = Path("_cache") / buildid
         cache.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(package.storage, cache, dirs_exist_ok=True)
+        try:
+            shutil.copytree(package.storage, cache, dirs_exist_ok=True, ignore_dangling_symlinks=True)
+        except:
+            import os
+            os.system("/bin/zsh")
 
     return debuginfo_path
 

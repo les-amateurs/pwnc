@@ -213,6 +213,10 @@ class ELF:
             if prop.startswith("cached_"):
                 setattr(self, prop, None)
 
+    def check(self):
+        if bytes(self.ident.magic) != b"\x7fELF":
+            raise Exception("bad elf magic")
+
     @property
     def Header(self):
         if not self.cached_header_type:

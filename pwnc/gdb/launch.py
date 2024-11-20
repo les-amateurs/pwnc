@@ -115,7 +115,6 @@ class Gdb:
         gdbref = self
         self.conn = conn
         self.gdb: "gdb" = conn.root.gdb
-        self.pid = int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
 
         self.stopped = threading.Event()
         def stop_handler(event):
@@ -125,6 +124,27 @@ class Gdb:
         class ProxyBreakpoint(gdbutils.Breakpoint):
             def __init__(self, *args, **kwargs):
                 super().__init__(conn, *args, **kwargs)
+                self.count = 0
+
+            def stop(self):
+                val = self.hit()
+                self.count += 1
+                if val not in [True, False]:
+                    return True
+                return val
+            
+            def wait(self, fn):
+                def wrapper(*args, **kwargs):
+                    count = self.count
+                    fn(*args, **kwargs)
+                    while self.count == count:
+                        time.sleep(0.1)
+
+                return wrapper
+            
+            def hit(self):
+                return True
+
         class ProxyFinishBreakpoint(gdbutils.Breakpoint):
             def __init__(self, *args, **kwargs):
                 super().__init__(conn, *args, **kwargs)
@@ -158,7 +178,8 @@ class Gdb:
             self.file = None
 
         if resolve_debuginfo:
-            libraries = self.gdb.execute("info sharedlibrary", to_string=True).strip().splitlines()[1:]
+            libraries = self.gdb.execute("info sharedlibrary", to_string=True)
+            libraries = libraries.strip().splitlines()[1:-1]
             libraries = map(lambda line: line.split(), libraries)
             libraries = filter(lambda line: not (len(line) == 4 and "*" not in line[2]), libraries)
             libraries = map(lambda line: pathlib.Path(line[-1]), libraries)
@@ -171,16 +192,22 @@ class Gdb:
             mappings = map(lambda line: line if len(line) == 6 else line + ["[anon]"], mappings)
             mappings = list(mappings)
             mappings = {pathlib.Path(line[-1]).name: int(line[0], 16) for line in reversed(mappings)}
+            pid = self.pid()
 
             for library in libraries:
                 if library not in loaded:
                     cache.mkdir(exist_ok=True)
                     cached = cache / pathlib.Path(library).name
                     if not cached.exists():
-                        remote_root = pathlib.Path("/") / "proc" / str(self.pid) / "root"
-                        remote_path = remote_root / library.relative_to("/")
+                        remote_root = pathlib.Path("/") / "proc" / str(pid) / "root"
+                        print(library)
+                        print(remote_root)
+                        if str(library).startswith(str(remote_root)):
+                            remote_path = library
+                        else:
+                            remote_path = remote_root / library.relative_to("/")
                         if remote_path.is_symlink():
-                            remote_path = remote_root / remote_path.readlink().relative_to("/")
+                            remote_path = (remote_path.parent / remote_path.readlink())
 
                         shutil.copy(remote_path, cached, follow_symlinks=True)
 
@@ -207,6 +234,9 @@ class Gdb:
         self.gdb.execute("ctx")
         self.gdb.write(self.gdb.prompt_hook(lambda: None))
 
+    def pid(self):
+        return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
+
     def wait(self):
         self.stopped.wait()
         self.stopped.clear()
@@ -214,13 +244,26 @@ class Gdb:
     def interrupt(self):
         self.gdb.execute("interrupt")
 
-    def bp(self, location):
+    def bp(self, location, callback = None):
         kind = str(type(location))
         if "gdb.Value" in kind:
             spec = location.format_string(raw=True, styling=False, address=False)
             if spec.startswith("<") and spec.endswith(">"):
                 spec = spec[1:-1]
+        elif kind == "<class 'str'>":
+            spec = location
+
+        if callback is not None:
+            class Bp(self.Breakpoint):
+                def hit(self):
+                    return callback()
+            return Bp(spec)
+        else:
             return self.Breakpoint(spec)
+
+    def execute(self, cmd: str, to_string: bool = False, from_tty: bool = False):
+        self.conn.root.gdb.execute(cmd, to_string=to_string, from_tty=from_tty)
+        self.conn.root.gdb.write(self.conn.root.gdb.prompt_hook(lambda: None))
 
     def __getattr__(self, item):
         return getattr(self.conn.root.gdb, item)
@@ -306,7 +349,7 @@ def attach(command: str,
 
     options: dict = None,
 ):
-    pids = subprocess.run(["pgrep", "-f", command], check=False, capture_output=True, encoding="utf-8").stdout.splitlines()
+    pids = subprocess.run(["pgrep", "-fx", command], check=False, capture_output=True, encoding="utf-8").stdout.splitlines()
     if len(pids) == 0:
         raise FileNotFoundError("process {!r} not found".format(command))
     

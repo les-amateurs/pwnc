@@ -38,7 +38,9 @@ class Client:
     
     def push_update(self, epoch: int):
         try:
+            print("pushing update")
             self.conn.root.update_debuginfo(epoch)
+            print("done pushing update")
         except Exception as e:
             print(f"error with communication: {e}")
 
@@ -63,6 +65,8 @@ class Service(rpyc.Service):
         self.functions = dict()
         self.sections = dict()
 
+        self.exposed_relocatable = self.bv.relocatable
+
         self.visit_all_types()
         self.visit_all_variables()
         self.visit_all_functions()
@@ -86,7 +90,7 @@ class Service(rpyc.Service):
     def function_updated(self, addr: int):
         fn = self.bv.get_function_at(addr)
         self.visit_function(fn)
-        self.visit_function_full(fn)
+        # self.visit_function_full(fn)
         self.push_update()
 
     @rpyc.exposed
@@ -132,14 +136,14 @@ class Service(rpyc.Service):
 
     def request_functions(self, addrs: list[int]):
         self.stopped_functions = addrs
+        print(f"received {addrs}")
+        return
         
-        if self.epoch > self.last_requested_epoch:
-            for addr in addrs:
-                for fn in self.bv.get_functions_containing(addr):
-                    self.visit_function_full(fn)
-            self.generate()
-            self.push_update()
-            self.last_requested_epoch = self.epoch
+        for addr in addrs:
+            for fn in self.bv.get_functions_containing(addr + self.bv.start):
+                self.visit_function_full(fn)
+        self.generate()
+        self.push_update()
 
     def push_update(self):
         self.generate()
@@ -234,6 +238,8 @@ class Service(rpyc.Service):
             self.visit_function_full(function)
 
     def visit_function_full(self, function: Function):
+        print(f"visiting function full: {function}")
+
         key = function.start
         self.updates = True
 
@@ -289,24 +295,23 @@ class Service(rpyc.Service):
             self.functions[key]["locals"] = locals
         
         lines = dict()
+
+        roots = dict()
+        for line in function.hlil.root.lines:
+            roots[line.il_instruction] = str(line)
         
-        # in order for the hlil index to match up with sources lines, some cleaning is required
-        hlil_line_blacklist = ["else"]
-        hlil = list(function.hlil.instructions)
         source = str(function.hlil)
+        hlil = list(function.hlil.instructions)
         index = 0
         # line 0 doesnt exist, line numbers are one indexed
         # line 1 is reserved for function signature
         sourceline = 2
-        for line in source.splitlines():
-            currentline = sourceline
-            sourceline += 1
-            stripped = line.strip()
-            if not stripped or stripped in hlil_line_blacklist:
-                continue
-
-            lines[index] = { "line": currentline, "text": stripped, "scope": (len(line) - len(stripped)) // 4 }
+        for insn in hlil:
+            if insn in roots:
+                text = roots[insn]
+            lines[index] = { "line": sourceline, "text": text, "scope": (len(line) - len(text)) // 4 }
             index += 1
+            sourcelines += 1
 
         if len(lines) != len(hlil):
             clean = "\n".join(map(lambda line: line["text"], lines.values()))

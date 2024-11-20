@@ -15,7 +15,7 @@ MAX_CONCURRENT = 5
 BATCH_SIZE = 100
 RETRIES = 10
 # ARCHITECTURES = ["amd64", "arm64", "armel", "armhf", "i386"]
-ARCHITECTURES = ["amd64"]
+ARCHITECTURES = ["i386"]
 
 session, sem = None, None
 async def request(url):
@@ -163,7 +163,7 @@ async def asynchronous_locate(elf: minelf.ELF):
             if version not in versions:
                 err.fatal(f"unable to find {version} in {DISTRO} snapshot")
 
-            arch = "amd64"
+            arch = "i386"
             builds = await request_build_pages(package, version)
             if arch not in builds:
                 err.fatal(f"architecture amd64 not supported by {package} {version}")

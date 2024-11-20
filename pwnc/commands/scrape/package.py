@@ -1,4 +1,5 @@
 import tempfile
+import atexit
 from ...util import *
 from ... import err
 
@@ -8,13 +9,14 @@ class Package:
         self.package = package
         self.version = version
         self.contents = contents
-        self.handle = tempfile.TemporaryDirectory()
-        self.tempdir = Path(self.handle.name)
+        self.tempdir = Path(tempfile.mkdtemp())
         self.unpacked = False
         self.storage = Path(self.tempdir / "storage")
 
+        atexit.register(lambda: self.close())
+
     def close(self):
-        self.handle.close()
+        shutil.rmtree(self.tempdir)
 
     def files(self) -> list[str]:
         self.extract()

@@ -4,6 +4,7 @@ from argparse import ArgumentParser, BooleanOptionalAction
 import argcomplete
 from pathlib import Path
 import logging
+import pwnc.commands.docker.extract
 import pwnc.config
 
 logging.basicConfig(level=logging.INFO)
@@ -50,8 +51,7 @@ def get_main_parser():
     subparser = subparsers.add_parser("errno", help="interpret errno code")
     subparser.add_argument("code")
 
-    kernel = subparsers.add_parser("kernel", help="kernel pwn setup")
-    kernel = kernel.add_subparsers()
+    kernel = subparsers.add_parser("kernel", help="kernel pwn setup").add_subparsers()
     kernel.required = True
     kernel.dest = "subcommand.kernel"
 
@@ -74,6 +74,13 @@ def get_main_parser():
     subparser.add_argument("--initramfs", type=PathArg, required=False)
     subparser.add_argument("--ignore", action="store_true")
     subparser.add_argument("--save", action="store_true")
+
+    docker = subparsers.add_parser("docker", help="docker utils").add_subparsers()
+    docker.required = True
+    docker.dest = "subcommand.docker"
+
+    subparser = docker.add_parser("extract", help="extract files from docker image")
+    subparser.add_argument("-i", type=str, dest="image")
 
     return parser
 
@@ -107,3 +114,8 @@ match command.get("subcommand"):
                 pwnc.commands.kernel.decompress.command(args)
             case "module":
                 pwnc.commands.kernel.module.command(args)
+    case "docker":
+        import pwnc.commands.docker
+        match command.get("subcommand.docker"):
+            case "extract":
+                pwnc.commands.docker.extract.command(args)

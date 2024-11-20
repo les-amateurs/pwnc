@@ -280,16 +280,17 @@ class BinjaCommand(gdb.Command):
         self.previous_loaded_debuginfo = None
         self.epoch = -1
         self.last_stopped_epoch = -1
+        self.ready = False
 
     def update_debuginfo(self, epoch: int):
-        if epoch > self.epoch:
-            self.epoch = epoch
-            return self.do_update_debuginfo()
-        return False
+        return self.do_update_debuginfo()
 
     def do_update_debuginfo(self):
         debuginfo = os.path.join("/tmp", config.NAME, "info.debug")
         command = f"add-symbol-file {debuginfo} {self.sections}"
+
+        if gdb.selected_thread() is None:
+            return False
         if gdb.selected_thread().is_running():
             return False
         
@@ -300,25 +301,25 @@ class BinjaCommand(gdb.Command):
         return True
 
     def debugger_stopped(self):
-        if self.epoch > self.last_stopped_epoch:
-            addrs = []
-            frame = gdb.selected_frame()
-            while frame != None:
-                addrs.append(frame.pc() - self.binbase)
-                frame = frame.older()
-            self.service.root.request_functions(addrs)
-            self.do_update_debuginfo()
-            self.last_stopped_epoch = self.epoch
+        addrs = []
+        frame = gdb.selected_frame()
+        while frame != None:
+            addrs.append(frame.pc() - self.binbase)
+            frame = frame.older()
+        self.service.root.request_functions(addrs)
+        self.do_update_debuginfo()
 
     def invoke(self, args, from_tty):
+        self.ready = False
+        
         self_reference = self
-
         class Client(rpyc.Service):
             # this is required, otherwise gdb dies with recursive internal error
             _protocol = connection.GdbConnection
 
             def exposed_update_debuginfo(self, epoch: int):
-                self_reference.update_debuginfo(epoch)
+                if self_reference.ready:
+                    self_reference.update_debuginfo(epoch)
 
         if self.service is None:
             self.service = unix_connect(str(config.UNIX_SOCK_PATH), service=Client)
@@ -342,7 +343,10 @@ class BinjaCommand(gdb.Command):
             for section in self.elf.iter_sections():
                 address = section["sh_addr"]
                 if address > 0:
-                    self.sections.append(f"-s {section.name} {self.binbase + address:#x}")
+                    if self.service.root.relocatable:
+                        address += self.binbase
+                    self.sections.append(f"-s {section.name} {address:#x}")
             self.sections = " ".join(self.sections)
 
         gdb.events.stop.connect(lambda e: self.debugger_stopped())
+        self.ready = True
