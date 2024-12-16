@@ -9,6 +9,7 @@ __pycache__/
 *.pkl
 
 **/.venv
+.ropeproject
 
 # ignore this, random testing files
 log.txt
