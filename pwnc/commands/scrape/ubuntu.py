@@ -6,6 +6,7 @@ import functools
 from ...util import *
 from .index import Index
 from ...import minelf
+from ...minelf.types.header import Machine
 from .package import Package
 
 DISTRO = "ubuntu"
@@ -14,8 +15,21 @@ VERSION = re.compile(rb"GLIBC (\d+\.\d+.*)\)")
 MAX_CONCURRENT = 5
 BATCH_SIZE = 100
 RETRIES = 10
-# ARCHITECTURES = ["amd64", "arm64", "armel", "armhf", "i386"]
-ARCHITECTURES = ["i386"]
+MACHINES = [Machine.AMD64, Machine.X86, Machine.ARM64, Machine.ARM, Machine.RISCV]
+
+def elf_to_architecture(elf: minelf.ELF):
+    match elf.header.machine:
+        case Machine.AMD64:
+            return "amd64"
+        case Machine.X86:
+            return "i386"
+        case Machine.ARM64:
+            return "arm64"
+        case Machine.ARM:
+            return "armhf"
+        case Machine.RISCV:
+            if elf.bits == 64:
+                return "riscv64"
 
 session, sem = None, None
 async def request(url):
@@ -82,7 +96,7 @@ async def request_versions(package: str, batch_start: int, batch_end: int):
     index[key] = paths
     return paths
 
-async def request_build_pages(package: str, version: str):
+async def request_build_pages(package: str, version: str, architectures: list[str]):
     index = Index(f"{DISTRO}-build_pages-{package}-{version}")
     url = f"{ROOT}/ubuntu/+source/{package}/{version}"
     if url in index:
@@ -104,7 +118,7 @@ async def request_build_pages(package: str, version: str):
     links = list(links)
     for i, tag in enumerate(links):
         architecture = tag.text
-        if architecture in ARCHITECTURES:
+        if architecture in architectures:
             builds[architecture] = tag["href"]
 
     return builds
@@ -134,7 +148,13 @@ def parse_libc_version(elf: minelf.ELF):
     return m.group(1).decode()
 
 def provides(elf: minelf.ELF):
-    return DISTRO.encode("utf-8") in elf.raw_elf_bytes and (parse_libc_version(elf) != None)
+    if DISTRO.encode("utf-8") not in elf.raw_elf_bytes:
+        return False
+    if parse_libc_version(elf) is None:
+        return False
+    if elf.header.machine not in MACHINES:
+        return False
+    return True
 
 async def asynchronous_locate(elf: minelf.ELF):
     global session, sem
@@ -151,7 +171,6 @@ async def asynchronous_locate(elf: minelf.ELF):
     sem = asyncio.Queue(maxsize=MAX_CONCURRENT)
     async with aiohttp.ClientSession() as session:
         for package in packages:
-
             num_published = await request_num_published(package)
 
             ranges = list(range(0, num_published, BATCH_SIZE)) + [num_published]
@@ -163,10 +182,10 @@ async def asynchronous_locate(elf: minelf.ELF):
             if version not in versions:
                 err.fatal(f"unable to find {version} in {DISTRO} snapshot")
 
-            arch = "i386"
-            builds = await request_build_pages(package, version)
+            arch = elf_to_architecture(elf)
+            builds = await request_build_pages(package, version, [arch])
             if arch not in builds:
-                err.fatal(f"architecture amd64 not supported by {package} {version}")
+                err.fatal(f"architecture {arch} not supported by {package} {version}")
 
             contents = await request_deb(names[package], version, arch, builds[arch])
             if contents is not None:

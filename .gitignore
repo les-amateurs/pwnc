@@ -18,3 +18,5 @@ stuff/
 other/
 dist/
 kmod/
+tests/
+scripts/

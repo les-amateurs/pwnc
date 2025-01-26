@@ -55,7 +55,7 @@ class Service(rpyc.Service):
         self.updates = True
         self.epoch = 0
         self.last_requested_epoch = 0
-        self.stopped_functions = []
+        self.stopped_functions = set()
 
         self.first_client = True
         self.clients = dict()
@@ -74,13 +74,12 @@ class Service(rpyc.Service):
         print("service started!")
 
     def on_connect(self, conn):
-        if self.first_client:
-            self.first_client = False
-            Client(conn)
-        else:
+        if hasattr(conn.root, "update_debuginfo"):
             client = Client(conn)
             self.clients[conn] = client
             client.push_update(self.epoch)
+        else:
+            Client(conn)
 
     def on_disconnect(self, conn):
         if conn in self.clients:
@@ -135,13 +134,14 @@ class Service(rpyc.Service):
         self.push_update()
 
     def request_functions(self, addrs: list[int]):
-        self.stopped_functions = addrs
-        print(f"received {addrs}")
-        return
-        
+        self.stopped_functions = set()
+    
         for addr in addrs:
-            for fn in self.bv.get_functions_containing(addr + self.bv.start):
+            if self.bv.relocatable:
+                addr += self.bv.start
+            for fn in self.bv.get_functions_containing(addr):
                 self.visit_function_full(fn)
+                self.stopped_functions.add(fn.start)
         self.generate()
         self.push_update()
 
@@ -203,6 +203,9 @@ class Service(rpyc.Service):
     def visit_function(self, function: Function):
         if function.symbol.type.value != SymbolType.FunctionSymbol.value:
             return
+        
+        print(f"visiting function normal: {function}")
+        print(self.stopped_functions)
 
         key = function.start
         self.updates = True
@@ -268,7 +271,11 @@ class Service(rpyc.Service):
         
         locals = []
         localmap = dict()
-        for var in function.hlil.vars + function.hlil.aliased_vars:
+        arch_specific_vars = []
+        for var in function.vars:
+            if var.name in ["__saved_rbp", "__return_addr"]:
+                arch_specific_vars.append(var)
+        for var in function.hlil.vars + function.hlil.aliased_vars + arch_specific_vars:
             if var in function.parameter_vars:
                 continue
 
@@ -294,94 +301,94 @@ class Service(rpyc.Service):
         if len(locals) > 0:
             self.functions[key]["locals"] = locals
         
-        lines = dict()
+        # lines = dict()
 
-        roots = dict()
-        for line in function.hlil.root.lines:
-            roots[line.il_instruction] = str(line)
+        # roots = dict()
+        # for line in function.hlil.root.lines:
+        #     roots[line.il_instruction] = str(line)
         
-        source = str(function.hlil)
-        hlil = list(function.hlil.instructions)
-        index = 0
-        # line 0 doesnt exist, line numbers are one indexed
-        # line 1 is reserved for function signature
-        sourceline = 2
-        for insn in hlil:
-            if insn in roots:
-                text = roots[insn]
-            lines[index] = { "line": sourceline, "text": text, "scope": (len(line) - len(text)) // 4 }
-            index += 1
-            sourcelines += 1
+        # source = str(function.hlil)
+        # hlil = list(function.hlil.instructions)
+        # index = 0
+        # # line 0 doesnt exist, line numbers are one indexed
+        # # line 1 is reserved for function signature
+        # sourceline = 2
+        # for insn in hlil:
+        #     if insn in roots:
+        #         text = roots[insn]
+        #     lines[index] = { "line": sourceline, "text": text, "scope": (len(line) - len(text)) // 4 }
+        #     index += 1
+        #     sourcelines += 1
 
-        if len(lines) != len(hlil):
-            clean = "\n".join(map(lambda line: line["text"], lines.values()))
-            with open(TMPDIR / "clean.txt", "w+") as fp:
-                fp.write(clean)
-            with open(TMPDIR / "hlil.txt", "w+") as fp:
-                fp.write("\n".join(map(str, hlil)))
-            raise RuntimeError(f"cleaned up lines({len(lines)}) do not match hlil({len(hlil)})")
+        # if len(lines) != len(hlil):
+        #     clean = "\n".join(map(lambda line: line["text"], lines.values()))
+        #     with open(TMPDIR / "clean.txt", "w+") as fp:
+        #         fp.write(clean)
+        #     with open(TMPDIR / "hlil.txt", "w+") as fp:
+        #         fp.write("\n".join(map(str, hlil)))
+        #     raise RuntimeError(f"cleaned up lines({len(lines)}) do not match hlil({len(hlil)})")
 
-        labels = []
-        lineinfo = {}
-        scopes = {}
-        prev_scope = 0
+        # labels = []
+        # lineinfo = {}
+        # scopes = {}
+        # prev_scope = 0
 
-        for insn in function.hlil.instructions:
-            curr_scope = lines[insn.instr_index]["scope"]
-            scopes.setdefault(curr_scope, [])
+        # for insn in function.hlil.instructions:
+        #     curr_scope = lines[insn.instr_index]["scope"]
+        #     scopes.setdefault(curr_scope, [])
 
-            if curr_scope < prev_scope:
-                for scope in scopes[prev_scope]:
-                    print(f"scope ending for {scope["var"]} @ {insn}")
-                    scope["end"] = insn.address
-                del scopes[prev_scope]
-            prev_scope = curr_scope
+        #     if curr_scope < prev_scope:
+        #         for scope in scopes[prev_scope]:
+        #             print(f"scope ending for {scope["var"]} @ {insn}")
+        #             scope["end"] = insn.address
+        #         del scopes[prev_scope]
+        #     prev_scope = curr_scope
 
-            match insn.operation.value:
-                case HighLevelILOperation.HLIL_LABEL:
-                    label = {}
-                    label["address"] = insn.address
-                    label["name"] = insn.target.name
-                    labels.append(label)
-                case HighLevelILOperation.HLIL_VAR_DECLARE:
-                    if insn.var in localmap:
-                        scope = {}
-                        scope["start"] = insn.address
-                        scope["var"] = insn.var
-                        scopes[curr_scope].append(scope)
-                case HighLevelILOperation.HLIL_VAR_INIT:
-                    if insn.dest in localmap:
-                        scope = {}
-                        scope["start"] = insn.address
-                        scope["var"] = insn.dest
-                        scopes[curr_scope].append(scope)
+        #     match insn.operation.value:
+        #         case HighLevelILOperation.HLIL_LABEL:
+        #             label = {}
+        #             label["address"] = insn.address
+        #             label["name"] = insn.target.name
+        #             labels.append(label)
+        #         case HighLevelILOperation.HLIL_VAR_DECLARE:
+        #             if insn.var in localmap:
+        #                 scope = {}
+        #                 scope["start"] = insn.address
+        #                 scope["var"] = insn.var
+        #                 scopes[curr_scope].append(scope)
+        #         case HighLevelILOperation.HLIL_VAR_INIT:
+        #             if insn.dest in localmap:
+        #                 scope = {}
+        #                 scope["start"] = insn.address
+        #                 scope["var"] = insn.dest
+        #                 scopes[curr_scope].append(scope)
 
-            parts = hlil_filter(set(insn.traverse(lambda node: node)))
-            for llil in insn.llils:
-                parent = llil.hlil
-                llil = function.get_low_level_il_at(llil.address)
-                if parent is None:
-                    refs = hlil_filter(set(llil.hlils))
-                    if len(refs) == 0 or not refs.issubset(parts):
-                        continue
-                else:
-                    insn = parent
+        #     parts = hlil_filter(set(insn.traverse(lambda node: node)))
+        #     for llil in insn.llils:
+        #         parent = llil.hlil
+        #         llil = function.get_low_level_il_at(llil.address)
+        #         if parent is None:
+        #             refs = hlil_filter(set(llil.hlils))
+        #             if len(refs) == 0 or not refs.issubset(parts):
+        #                 continue
+        #         else:
+        #             insn = parent
 
-                line = lines[insn.instr_index]["line"]
-                print(f"{llil} for {insn} @ {line}")
-                lineinfo[llil.address] = line
+        #         line = lines[insn.instr_index]["line"]
+        #         print(f"{llil} for {insn} @ {line}")
+        #         lineinfo[llil.address] = line
 
-        if len(lineinfo) > 0:
-            self.functions[key]["lineinfo"] = sorted(lineinfo.items(), key=lambda info: info[0])
-        if len(labels) > 0:
-            self.functions[key]["labels"] = labels
+        # if len(lineinfo) > 0:
+        #     self.functions[key]["lineinfo"] = sorted(lineinfo.items(), key=lambda info: info[0])
+        # if len(labels) > 0:
+        #     self.functions[key]["labels"] = labels
 
-        sourcepath = self.sources / f"{key:x}.c"
-        source = [str(function)] + ["    " + line for line in source.splitlines()]
-        source = "\n".join(source)
-        with open(sourcepath, "w+") as fp:
-            fp.write(source)
-        self.functions[key]["source"] = sourcepath.name
+        # sourcepath = self.sources / f"{key:x}.c"
+        # source = [str(function)] + ["    " + line for line in source.splitlines()]
+        # source = "\n".join(source)
+        # with open(sourcepath, "w+") as fp:
+        #     fp.write(source)
+        # self.functions[key]["source"] = sourcepath.name
 
         """
         Normally this would be used to compute a Frame Descriptor Entry for the

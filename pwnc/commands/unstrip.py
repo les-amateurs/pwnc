@@ -1,4 +1,3 @@
-from re import T
 from .. util import *
 from pathlib import Path
 from .scrape import locate_package
@@ -65,6 +64,8 @@ def unstrip_from_package(file: Path, save: bool):
             err.warn("recursive search failed")
 
     if debuginfo_path is None:
+        import os
+        os.system("/bin/zsh")
         err.fatal("failed to find debuginfo file")
 
     if save:
@@ -82,7 +83,11 @@ def handle_unstrip(file: Path, save: bool = False):
     debuginfo_path = None
 
     if debuginfo_path is None and not save:
-        handle = run(f"debuginfod-find debuginfo {file}", check=False, capture_output=True)
+        cmd = f"debuginfod-find debuginfo {str(file)}"
+        # fix issue with DEBUGINFOD_URLS not set when run as root
+        handle = run(cmd, check=False, capture_output=True, extra_env={
+            "DEBUGINFOD_URLS": "https://debuginfod.elfutils.org/"
+        })
 
         if handle.returncode == 0:
             debuginfo_path = Path(handle.stdout.strip())

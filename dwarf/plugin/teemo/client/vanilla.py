@@ -288,6 +288,7 @@ class BinjaCommand(gdb.Command):
     def do_update_debuginfo(self):
         debuginfo = os.path.join("/tmp", config.NAME, "info.debug")
         command = f"add-symbol-file {debuginfo} {self.sections}"
+        # print(command)
 
         if gdb.selected_thread() is None:
             return False
@@ -301,17 +302,20 @@ class BinjaCommand(gdb.Command):
         return True
 
     def debugger_stopped(self):
+        # print("debugger stopped")
         addrs = []
         frame = gdb.selected_frame()
         while frame != None:
-            addrs.append(frame.pc() - self.binbase)
+            addr = frame.pc()
+            if self.service.root.relocatable:
+                addr -= self.binbase
+            addrs.append(addr)
             frame = frame.older()
         self.service.root.request_functions(addrs)
         self.do_update_debuginfo()
 
     def invoke(self, args, from_tty):
         self.ready = False
-        
         self_reference = self
         class Client(rpyc.Service):
             # this is required, otherwise gdb dies with recursive internal error
@@ -321,24 +325,39 @@ class BinjaCommand(gdb.Command):
                 if self_reference.ready:
                     self_reference.update_debuginfo(epoch)
 
-        if self.service is None:
-            self.service = unix_connect(str(config.UNIX_SOCK_PATH), service=Client)
-            spawn(self.service.serve_all)
-
         if self.binbase is None:
+            auxv = gdb.execute("info auxv", to_string=True).splitlines()
+            auxv = map(lambda line: line.split(maxsplit=1)[1], auxv)
+            try:
+                auxv = next(filter(lambda line: line.startswith("AT_ENTRY"), auxv))
+            except StopIteration:
+                err("failed to find binary entrypoint")
+                
+            entrypoint = int(auxv.rsplit(maxsplit=1)[-1], 16)
+            print(f"{entrypoint = :#x}")
+
             filepath = PathUtil.get_filepath()
             mappings = gdb.execute("info proc mappings", to_string=True) # lazy
-            mappings = mappings.splitlines()[3:]
+            mappings = mappings.splitlines()
+            mappings = filter(lambda line: line.strip().startswith("0x"), mappings)
             mappings = map(lambda line: line.split(maxsplit=5), mappings)
-            mappings = filter(lambda map: map[5].endswith(filepath), mappings)
-            try:
-                mapping = next(mappings)
-                self.binbase = int(mapping[0], 16)
-            except:
+            mappings = list(mappings)
+            for start, end, size, offset, perms, objfile in mappings:
+                start, end, offset = int(start, 16), int(end, 16), int(offset, 16)
+                if offset == 0:
+                    base = start
+                if start <= entrypoint and entrypoint < end:
+                    break
+            else:
                 err("failed to find binary base")
-                return
             
+            print(f"{base = :#x}")
+            self.binbase = base
             self.elf = ELFFile(open(filepath, "rb"))
+
+            if self.service is None:
+                self.service = unix_connect(str(config.UNIX_SOCK_PATH), service=Client)
+                spawn(self.service.serve_all)
             
             for section in self.elf.iter_sections():
                 address = section["sh_addr"]
@@ -350,3 +369,5 @@ class BinjaCommand(gdb.Command):
 
         gdb.events.stop.connect(lambda e: self.debugger_stopped())
         self.ready = True
+        self.service.root.request_functions([])
+        print("binja initialized")

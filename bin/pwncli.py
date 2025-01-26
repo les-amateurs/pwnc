@@ -82,6 +82,17 @@ def get_main_parser():
     subparser = docker.add_parser("extract", help="extract files from docker image")
     subparser.add_argument("-i", type=str, dest="image")
 
+    subparser = subparsers.add_parser("shellc", help="compile c to shellcode")
+    subparser.add_argument("backend", type=str, choices=["gcc", "musl", "zig"], default="gcc", help="compiler backend")
+    subparser.add_argument("files", nargs="*", help="input files")
+    subparser.add_argument("-o", type=PathArg, required=True, dest="output", help="output file")
+    group = subparser.add_mutually_exclusive_group()
+    group.set_defaults(pie=True)
+    group.add_argument("-pie", action="store_true", dest="pie", help="build position independent executable")
+    group.add_argument("-no-pie", action="store_false", dest="pie", help="do not build position independent executable")
+
+    subparser.add_argument("-target", type=str, help="target triple")
+
     return parser
 
 parser = get_main_parser()
@@ -119,3 +130,6 @@ match command.get("subcommand"):
         match command.get("subcommand.docker"):
             case "extract":
                 pwnc.commands.docker.extract.command(args)
+    case "shellc":
+        import pwnc.commands.shellc
+        pwnc.commands.shellc.command(args)

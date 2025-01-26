@@ -1,6 +1,6 @@
-from ...cache import locate_global_cache
-from ... import err
+from ...util import *
 from ... import minelf
+from ...minelf.types.header import Machine
 from .package import Package
 from .index import Index
 import requests
@@ -8,9 +8,24 @@ import json
 import re
 
 DISTRO = "debian"
-CACHE = locate_global_cache() / "scrape" / DISTRO
+CACHE = cache.locate_global_cache() / "scrape" / DISTRO
 ROOT = "http://snapshot.debian.org/"
 VERSION = re.compile(rb"GLIBC (\d+\.\d+.*)\)")
+MACHINES = [Machine.AMD64, Machine.X86, Machine.ARM64, Machine.ARM, Machine.RISCV]
+
+def elf_to_architecture(elf: minelf.ELF):
+    match elf.header.machine:
+        case Machine.AMD64:
+            return "amd64"
+        case Machine.X86:
+            return "i386"
+        case Machine.ARM64:
+            return "arm64"
+        case Machine.ARM:
+            return "armhf"
+        case Machine.RISCV:
+            if elf.bits == 64:
+                return "riscv64"
 
 def request(url: str):
     err.info(f"requesting {url}")
@@ -59,10 +74,19 @@ def parse_libc_version(elf: minelf.ELF):
     return m.group(1).decode()
 
 def provides(elf: minelf.ELF):
-    return DISTRO.encode("utf-8") in elf.raw_elf_bytes and (parse_libc_version(elf) != None)
+    if DISTRO.encode("utf-8") not in elf.raw_elf_bytes:
+        return False
+    if parse_libc_version(elf) is None:
+        return False
+    if elf.header.machine not in MACHINES:
+        return False
+    return True
 
 def locate(elf: minelf.ELF):
     package = "glibc"
+    arch = elf_to_architecture(elf)
+    if arch is None:
+        err.fatal(f"unsupported architecture") 
 
     versions = request_versions(package)
     version = parse_libc_version(elf)
@@ -74,8 +98,8 @@ def locate(elf: minelf.ELF):
         err.fatal(f"unable to find libc6-dbg package for debuginfo")
 
     binfiles = request_binfiles(package, "libc6-dbg", version)
-    if "amd64" not in binfiles:
-        err.fatal(f"architecture amd64 not supported by {package} {version}")
+    if arch not in binfiles:
+        err.fatal(f"architecture {arch} not supported by {package} {version}")
 
-    contents = download(binfiles["amd64"])
+    contents = download(binfiles[arch])
     return Package(DISTRO, package, version, contents)

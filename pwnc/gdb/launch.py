@@ -179,42 +179,53 @@ class Gdb:
 
         if resolve_debuginfo:
             libraries = self.gdb.execute("info sharedlibrary", to_string=True)
-            libraries = libraries.strip().splitlines()[1:-1]
+            libraries = libraries.strip().splitlines()[1:]
+            if len(libraries) > 0 and not libraries[-1].startswith("0x"):
+                libraries = libraries[:-1]
             libraries = map(lambda line: line.split(), libraries)
-            libraries = filter(lambda line: not (len(line) == 4 and "*" not in line[2]), libraries)
             libraries = map(lambda line: pathlib.Path(line[-1]), libraries)
             libraries = list(libraries)
             loaded = list(map(lambda obj: obj.filename, self.gdb.objfiles()))
-            cache = pathlib.Path("_cache")
 
             mappings = self.gdb.execute("info proc mappings", to_string=True).strip().splitlines()[4:]
+            print(mappings)
             mappings = map(lambda line: line.split(), mappings)
             mappings = map(lambda line: line if len(line) == 6 else line + ["[anon]"], mappings)
             mappings = list(mappings)
             mappings = {pathlib.Path(line[-1]).name: int(line[0], 16) for line in reversed(mappings)}
+
+            cache = pathlib.Path("_cache")
+            working_directory = Path(self.gdb.execute("info proc cwd", to_string=True).strip()[:-1].split("cwd = '", maxsplit=1)[1])
+            print(working_directory)
             pid = self.pid()
 
             for library in libraries:
                 if library not in loaded:
                     cache.mkdir(exist_ok=True)
                     cached = cache / pathlib.Path(library).name
+                    
+                    if not str(library).startswith("/"):
+                        library = working_directory / library
+
                     if not cached.exists():
                         remote_root = pathlib.Path("/") / "proc" / str(pid) / "root"
-                        print(library)
-                        print(remote_root)
                         if str(library).startswith(str(remote_root)):
                             remote_path = library
                         else:
                             remote_path = remote_root / library.relative_to("/")
                         if remote_path.is_symlink():
-                            remote_path = (remote_path.parent / remote_path.readlink())
+                            linked = remote_path.readlink()
+                            if str(linked).startswith("/"):
+                                remote_path = remote_root / linked.relative_to("/")
+                            else:
+                                remote_path = (remote_path.parent / remote_path.readlink())
 
                         shutil.copy(remote_path, cached, follow_symlinks=True)
 
                     lib = elf.ELF(cached, checksec=False)
-                    if not lib.has_dwarf_info():
+                    if not bool(lib.get_section_by_name('.debug_info') or lib.get_section_by_name('.zdebug_info')):
                         try:
-                            unstrip.handle_unstrip(cached)
+                            unstrip.handle_unstrip(cached.absolute())
                             err.info(f"unstripped {lib}")
                         except Exception as e:
                             err.warn(f"failed to unstrip {lib}: {e}")
@@ -222,20 +233,35 @@ class Gdb:
                         err.info(f"{lib} is already unstripped")
 
                     cmd = ["add-symbol-file", str(cached.absolute())]
-                    base = mappings[library.name]
+                    if library.name in mappings:
+                        base = mappings[library.name]
+                    else:
+                        for mapping in mappings.keys():
+                            if mapping.startswith(library.name):
+                                base = mappings[mapping]
+                                break
+                        else:
+                            print(f"failed to locate library {library.name}")
 
                     for section in lib.sections:
                         # SHF_ALLOC
                         if section.header.sh_flags & 2 != 0:
                             cmd += ["-s", section.name, "{:#x}".format(base + section.header.sh_addr)]
 
-                    self.gdb.execute(" ".join(cmd), to_string=True)
+                    cmd = " ".join(cmd)
+                    # print(cmd)
+                    self.gdb.execute(cmd)
 
         self.gdb.execute("ctx")
         self.gdb.write(self.gdb.prompt_hook(lambda: None))
 
     def pid(self):
         return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
+    
+    def wait_for_stop(self):
+        if self.gdb.selected_thread().is_stopped():
+            return
+        self.wait()
 
     def wait(self):
         self.stopped.wait()
@@ -346,6 +372,7 @@ def attach(command: str,
     aslr: bool = True,
     resolve_debuginfo: bool = False,
     index_cache: bool = None,
+    script: str = "",
 
     options: dict = None,
 ):
@@ -359,6 +386,7 @@ def attach(command: str,
     pid = pids[-1]
     bridge = Bridge(**options)
     bridge.gdbscript.append("set sysroot /proc/{:s}/root/".format(pid))
+    bridge.gdbscript.extend(script.strip().splitlines())
     bridge.finalize_gdbscript()
     
     command = [bridge.gdb_path]
