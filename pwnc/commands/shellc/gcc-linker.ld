@@ -11,15 +11,23 @@ SECTIONS {
     .bss    : { *(.bss.*) }
 
     /* remove all useless sections */
-    /DISCARD/ : { *(.comment*)   }
-    /DISCARD/ : { *(.note.*)     }
-    /DISCARD/ : { *(.gnu.*)      }
-    /DISCARD/ : { *(.eh_frame*)  }
-    /DISCARD/ : { *(.rela.*)     }
-    /DISCARD/ : { *(.dynsym.*)   }
-    /DISCARD/ : { *(.dynstr.*)   }
-    /DISCARD/ : { *(.symtab.*)   }
-    /DISCARD/ : { *(.strtab.*)   }
-    /DISCARD/ : { *(.shstrtab.*) }
-    /DISCARD/ : { *(.dynamic)    }
+    /DISCARD/ : {
+        *(.interp)
+        *(.comment*)
+        *(.note.*)
+        *(.gnu.*)
+        *(.gnu_*)
+        *(.eh_frame*)
+        *(.rela.*)
+        *(.dynsym)
+        *(.dynstr)
+        *(.symtab)
+        *(.strtab)
+        *(.shstrtab)
+        *(.dynamic)
+        *(.debug_*)
+        *(.ARM.*)
+        *(.hash)
+        *(.hash.*)
+    }
 }

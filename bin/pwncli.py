@@ -112,6 +112,7 @@ def get_main_parser():
     subparser.add_argument("backend", type=str, choices=["gcc", "musl", "zig"], default="gcc", help="compiler backend")
     subparser.add_argument("files", nargs="*", help="input files")
     subparser.add_argument("-o", type=PathArg, required=True, dest="output", help="output file")
+    
     group = subparser.add_mutually_exclusive_group()
     group.set_defaults(pie=True)
     group.add_argument("-pie", action="store_true", dest="pie", help="build position independent executable")
