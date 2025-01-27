@@ -2,12 +2,38 @@
 
 from argparse import ArgumentParser, BooleanOptionalAction
 import argcomplete
+import colorama
 from pathlib import Path
 import logging
 import pwnc.commands.docker.extract
 import pwnc.config
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("pwnc")
+logger.setLevel(logging.INFO)
+channel = logging.StreamHandler()
+class CustomFormatter(logging.Formatter):
+    """Logging Formatter to add colors and count warning / errors"""
+
+    ERROR = colorama.Fore.WHITE + colorama.Back.RED + "ERROR" + colorama.Fore.RESET + colorama.Back.RESET
+    WARNING = colorama.Fore.YELLOW + "!" + colorama.Fore.RESET
+    INFO = colorama.Fore.BLUE + "*" + colorama.Fore.RESET
+    DEBUG = colorama.Fore.GREEN + "+" + colorama.Fore.RESET
+
+    FORMATS = {
+        logging.ERROR: f"[{ERROR}] %(msg)s",
+        logging.WARNING: f"[{WARNING}] %(msg)s",
+        logging.INFO: f"[{INFO}] %(msg)s",
+        logging.DEBUG: f"[{DEBUG}] %(msg)s",
+        "DEFAULT": "%(msg)s",
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno, self.FORMATS['DEFAULT'])
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+channel.setFormatter(CustomFormatter())
+logger.addHandler(channel)
 
 usage = """\
 pwnc (options) [command]
@@ -97,7 +123,7 @@ def get_main_parser():
 
 parser = get_main_parser()
 argcomplete.autocomplete(parser)
-args = parser.parse_args()
+args, extra = parser.parse_known_args()
 
 command = dict(args._get_kwargs())
 
@@ -132,4 +158,4 @@ match command.get("subcommand"):
                 pwnc.commands.docker.extract.command(args)
     case "shellc":
         import pwnc.commands.shellc
-        pwnc.commands.shellc.command(args)
+        pwnc.commands.shellc.command(args, extra)
