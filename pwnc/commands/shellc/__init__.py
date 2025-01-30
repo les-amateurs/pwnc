@@ -18,7 +18,7 @@ DISCARD = [
     ".ARM.*",
     ".hash", ".hash.*",
 ]
-KEEP = [ ".entry", ".text", ".rodata", ".data", ".bss" ]
+KEEP = [ ".entry.init", ".entry", ".text", ".rodata", ".data", ".entry.data", ".bss" ]
 
 gcc_linker_script = (Path(__file__).parent / "gcc-linker.ld").absolute()
 zig_linker_script = (Path(__file__).parent / "zig-linker.ld").absolute()
@@ -27,7 +27,7 @@ def command(args: Args, extra: list[str]):
     if len(extra) != 0 and extra[0] == "--":
         extra = extra[1:]
 
-    flags = "-fno-stack-protector -fomit-frame-pointer -Wl,-e,main -ffunction-sections -fdata-sections -Wl,--gc-sections -flto -masm=intel -static"
+    flags = "-fno-stack-protector -fomit-frame-pointer -Wl,-e,entrypoint -ffunction-sections -fdata-sections -Wl,--gc-sections -flto -masm=intel -static"
     pie = "-pie" if args.pie else "-no-pie"
     files = " ".join(["{!r}".format(file) for file in args.files])
     output = "{!r}".format(str(args.output))

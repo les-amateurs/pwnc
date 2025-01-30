@@ -120,6 +120,12 @@ def get_main_parser():
 
     subparser.add_argument("-target", type=str, help="target triple")
 
+    subparser = subparsers.add_parser("elf", help="build elf from shellcode")
+    subparser.add_argument("-m", type=str, required=True,  dest="machine", help="elf machine")
+    subparser.add_argument("-b", type=int, required=False, dest="bits", choices=[32, 64], help="elf bits")
+    subparser.add_argument("-e", type=str, required=False, dest="endian", choices=["little", "big"], help="elf endianness")
+    subparser.add_argument("file", type=PathArg)
+
     return parser
 
 parser = get_main_parser()
@@ -160,3 +166,6 @@ match command.get("subcommand"):
     case "shellc":
         import pwnc.commands.shellc
         pwnc.commands.shellc.command(args, extra)
+    case "elf":
+        import pwnc.commands.elf
+        pwnc.commands.elf.command(args)

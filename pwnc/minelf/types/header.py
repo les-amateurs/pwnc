@@ -13,6 +13,17 @@ class Machine:
     ARM64 = 0xb7
     RISCV = 0xf3
 
+class Type:
+    NONE = 0x00
+    REL = 0x01
+    EXEC = 0x02
+    DYN = 0x03
+    CORE = 0x04
+    LOOS = 0xFE00
+    HIOS = 0xFEFF
+    LOPROC = 0xFF00
+    HIPROC = 0xFFFF
+
 class IdentStructure(ctypes.Structure):
     class Magic(ctypes.Union):
         _fields_ = [
@@ -22,12 +33,12 @@ class IdentStructure(ctypes.Structure):
 
     _fields_ = [
         ("magic", Magic),
-        ("bits", ctypes.c_uint8),
-        ("endianness", ctypes.c_uint8),
-        ("version", ctypes.c_uint8),
-        ("osabi", ctypes.c_uint8),
-        ("abiversion", ctypes.c_uint8),
-        ("padding", 7 * ctypes.c_uint8),
+        ("bits", u8),
+        ("endianness", u8),
+        ("version", u8),
+        ("osabi", u8),
+        ("abiversion", u8),
+        ("padding", 7 * u8),
     ]
 
 def generate(bits: int, little_endian: bool):
@@ -53,6 +64,7 @@ def generate(bits: int, little_endian: bool):
         _fields_ = fields
 
         Machine = Machine
+        Type = Type
     return Header
 
 class Magic:
