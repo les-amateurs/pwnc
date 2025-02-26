@@ -2,12 +2,38 @@
 
 from argparse import ArgumentParser, BooleanOptionalAction
 import argcomplete
+import colorama
 from pathlib import Path
 import logging
 import pwnc.config
 from pwnc import util
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("pwnc")
+logger.setLevel(logging.INFO)
+channel = logging.StreamHandler()
+class CustomFormatter(logging.Formatter):
+    """Logging Formatter to add colors and count warning / errors"""
+
+    ERROR = colorama.Fore.WHITE + colorama.Back.RED + "ERROR" + colorama.Fore.RESET + colorama.Back.RESET
+    WARNING = colorama.Fore.YELLOW + "!" + colorama.Fore.RESET
+    INFO = colorama.Fore.BLUE + "*" + colorama.Fore.RESET
+    DEBUG = colorama.Fore.GREEN + "+" + colorama.Fore.RESET
+
+    FORMATS = {
+        logging.ERROR: f"[{ERROR}] %(msg)s",
+        logging.WARNING: f"[{WARNING}] %(msg)s",
+        logging.INFO: f"[{INFO}] %(msg)s",
+        logging.DEBUG: f"[{DEBUG}] %(msg)s",
+        "DEFAULT": "%(msg)s",
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno, self.FORMATS['DEFAULT'])
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+channel.setFormatter(CustomFormatter())
+logger.addHandler(channel)
 
 usage = """\
 pwnc (options) [command]
@@ -96,6 +122,7 @@ def get_main_parser():
     subparser.add_argument("backend", type=str, choices=["gcc", "musl", "zig"], default="gcc", help="compiler backend")
     subparser.add_argument("files", nargs="*", help="input files")
     subparser.add_argument("-o", type=PathArg, required=True, dest="output", help="output file")
+    
     group = subparser.add_mutually_exclusive_group()
     group.set_defaults(pie=True)
     group.add_argument("-pie", action="store_true", dest="pie", help="build position independent executable")
@@ -103,11 +130,17 @@ def get_main_parser():
 
     subparser.add_argument("-target", type=str, help="target triple")
 
+    subparser = subparsers.add_parser("elf", help="build elf from shellcode")
+    subparser.add_argument("-m", type=str, required=True,  dest="machine", help="elf machine")
+    subparser.add_argument("-b", type=int, required=False, dest="bits", choices=[32, 64], help="elf bits")
+    subparser.add_argument("-e", type=str, required=False, dest="endian", choices=["little", "big"], help="elf endianness")
+    subparser.add_argument("file", type=PathArg)
+
     return parser
 
 parser = get_main_parser()
 argcomplete.autocomplete(parser)
-args = parser.parse_args()
+args, extra = parser.parse_known_args()
 
 command = dict(args._get_kwargs())
 
@@ -142,4 +175,7 @@ match command.get("subcommand"):
                 pwnc.commands.docker.extract.command(args)
     case "shellc":
         import pwnc.commands.shellc
-        pwnc.commands.shellc.command(args)
+        pwnc.commands.shellc.command(args, extra)
+    case "elf":
+        import pwnc.commands.elf
+        pwnc.commands.elf.command(args)
