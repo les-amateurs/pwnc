@@ -4,8 +4,8 @@ from argparse import ArgumentParser, BooleanOptionalAction
 import argcomplete
 from pathlib import Path
 import logging
-import pwnc.commands.docker.extract
 import pwnc.config
+from pwnc import util
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,6 +19,15 @@ description = """\
 
 def PathArg(file):
     return Path(file)
+
+def DockerImageArg(**kwargs):
+    try:
+        out: str = util.run("docker images", capture_output=True).stdout
+    except:
+        return None
+    lines = out.splitlines()[1:]
+    images = list(map(lambda l: ":".join(l.split(maxsplit=2)[:2]), lines))
+    return images    
 
 def get_main_parser():
     parser = ArgumentParser(
@@ -80,7 +89,8 @@ def get_main_parser():
     docker.dest = "subcommand.docker"
 
     subparser = docker.add_parser("extract", help="extract files from docker image")
-    subparser.add_argument("-i", type=str, dest="image")
+    subparser.add_argument("image", type=str).completer = DockerImageArg
+    subparser.add_argument("file", type=str)
 
     subparser = subparsers.add_parser("shellc", help="compile c to shellcode")
     subparser.add_argument("backend", type=str, choices=["gcc", "musl", "zig"], default="gcc", help="compiler backend")
@@ -126,7 +136,7 @@ match command.get("subcommand"):
             case "module":
                 pwnc.commands.kernel.module.command(args)
     case "docker":
-        import pwnc.commands.docker
+        import pwnc.commands.docker.extract
         match command.get("subcommand.docker"):
             case "extract":
                 pwnc.commands.docker.extract.command(args)

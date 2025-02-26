@@ -10,7 +10,7 @@ from . import err
 from . import config
 from . import cache
 
-def run(cmd: str, check: bool = True, capture_output: bool = False, encoding: str | None = "utf-8", cwd: Path | None = None, shell: bool = True, input: bytes | None = None, extra_env: dict = None):
+def run(cmd: str | list[str], check: bool = True, capture_output: bool = False, encoding: str | None = "utf-8", cwd: Path | None = None, shell: bool = True, input: bytes | None = None, extra_env: dict = None):
     env = os.environ.copy()
     if extra_env is not None:
         env.update(extra_env)
