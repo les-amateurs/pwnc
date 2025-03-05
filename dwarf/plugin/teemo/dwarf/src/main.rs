@@ -316,6 +316,7 @@ fn visit(
 const XMM_REGNUM_00_07: u16 = 17;
 const XMM_REGNUM_08_0F: u16 = 25;
 const XMM_REGNUM_10_1F: u16 = 69;
+const X86_REGNUM: u16 = 33;
 
 fn translate_register(register: String) -> Register {
     if let Some(reg) = gimli::X86_64::name_to_register(&register) {
@@ -326,49 +327,60 @@ fn translate_register(register: String) -> Register {
             return Register(0xffff);
         }
 
-        match register.as_str() {
-            "zmm0" => Register(XMM_REGNUM_00_07 + 0),
-            "zmm1" => Register(XMM_REGNUM_00_07 + 1),
-            "zmm2" => Register(XMM_REGNUM_00_07 + 2),
-            "zmm3" => Register(XMM_REGNUM_00_07 + 3),
-            "zmm4" => Register(XMM_REGNUM_00_07 + 4),
-            "zmm5" => Register(XMM_REGNUM_00_07 + 5),
-            "zmm6" => Register(XMM_REGNUM_00_07 + 6),
-            "zmm7" => Register(XMM_REGNUM_00_07 + 7),
-            "zmm8" => Register(XMM_REGNUM_08_0F + 0),
-            "zmm9" => Register(XMM_REGNUM_08_0F + 1),
-            "zmm10" => Register(XMM_REGNUM_08_0F + 2),
-            "zmm11" => Register(XMM_REGNUM_08_0F + 3),
-            "zmm12" => Register(XMM_REGNUM_08_0F + 4),
-            "zmm13" => Register(XMM_REGNUM_08_0F + 5),
-            "zmm14" => Register(XMM_REGNUM_08_0F + 6),
-            "zmm15" => Register(XMM_REGNUM_08_0F + 7),
-            "zmm16" => Register(XMM_REGNUM_10_1F + 0),
-            "zmm17" => Register(XMM_REGNUM_10_1F + 1),
-            "zmm18" => Register(XMM_REGNUM_10_1F + 2),
-            "zmm19" => Register(XMM_REGNUM_10_1F + 3),
-            "zmm20" => Register(XMM_REGNUM_10_1F + 4),
-            "zmm21" => Register(XMM_REGNUM_10_1F + 5),
-            "zmm22" => Register(XMM_REGNUM_10_1F + 6),
-            "zmm23" => Register(XMM_REGNUM_10_1F + 7),
-            "zmm24" => Register(XMM_REGNUM_10_1F + 8),
-            "zmm25" => Register(XMM_REGNUM_10_1F + 9),
-            "zmm26" => Register(XMM_REGNUM_10_1F + 10),
-            "zmm27" => Register(XMM_REGNUM_10_1F + 11),
-            "zmm28" => Register(XMM_REGNUM_10_1F + 12),
-            "zmm29" => Register(XMM_REGNUM_10_1F + 13),
-            "zmm30" => Register(XMM_REGNUM_10_1F + 14),
-            "zmm31" => Register(XMM_REGNUM_10_1F + 15),
+        Register(match register.as_str() {
+            "x87_r0" => X86_REGNUM + 0,
+            "x87_r1" => X86_REGNUM + 1,
+            "x87_r2" => X86_REGNUM + 2,
+            "x87_r3" => X86_REGNUM + 3,
+            "x87_r4" => X86_REGNUM + 4,
+            "x87_r5" => X86_REGNUM + 5,
+            "x87_r6" => X86_REGNUM + 6,
+            "x87_r7" => X86_REGNUM + 7,
 
-            "fsbase" => Register(58),
-            "gsbase" => Register(59),
+            "zmm0" => XMM_REGNUM_00_07 + 0,
+            "zmm1" => XMM_REGNUM_00_07 + 1,
+            "zmm2" => XMM_REGNUM_00_07 + 2,
+            "zmm3" => XMM_REGNUM_00_07 + 3,
+            "zmm4" => XMM_REGNUM_00_07 + 4,
+            "zmm5" => XMM_REGNUM_00_07 + 5,
+            "zmm6" => XMM_REGNUM_00_07 + 6,
+            "zmm7" => XMM_REGNUM_00_07 + 7,
+
+            "zmm8" => XMM_REGNUM_08_0F + 0,
+            "zmm9" => XMM_REGNUM_08_0F + 1,
+            "zmm10" => XMM_REGNUM_08_0F + 2,
+            "zmm11" => XMM_REGNUM_08_0F + 3,
+            "zmm12" => XMM_REGNUM_08_0F + 4,
+            "zmm13" => XMM_REGNUM_08_0F + 5,
+            "zmm14" => XMM_REGNUM_08_0F + 6,
+            "zmm15" => XMM_REGNUM_08_0F + 7,
+
+            "zmm16" => XMM_REGNUM_10_1F + 0,
+            "zmm17" => XMM_REGNUM_10_1F + 1,
+            "zmm18" => XMM_REGNUM_10_1F + 2,
+            "zmm19" => XMM_REGNUM_10_1F + 3,
+            "zmm20" => XMM_REGNUM_10_1F + 4,
+            "zmm21" => XMM_REGNUM_10_1F + 5,
+            "zmm22" => XMM_REGNUM_10_1F + 6,
+            "zmm23" => XMM_REGNUM_10_1F + 7,
+            "zmm24" => XMM_REGNUM_10_1F + 8,
+            "zmm25" => XMM_REGNUM_10_1F + 9,
+            "zmm26" => XMM_REGNUM_10_1F + 10,
+            "zmm27" => XMM_REGNUM_10_1F + 11,
+            "zmm28" => XMM_REGNUM_10_1F + 12,
+            "zmm29" => XMM_REGNUM_10_1F + 13,
+            "zmm30" => XMM_REGNUM_10_1F + 14,
+            "zmm31" => XMM_REGNUM_10_1F + 15,
+
+            "fsbase" => 58,
+            "gsbase" => 59,
 
             // used by xsave, xgetbv and xsetbv
             // no official dwarf register number???
-            "xcr0" => Register(0xffff),
+            "xcr0" => 0xffff,
 
             _ => panic!("unknown register: {register}"),
-        }
+        })
     }
 }
 
@@ -590,6 +602,7 @@ pub fn main() -> Err {
                     }
                 }
                 BinjaType::Typedef(Typedef { target }) => {
+                    println!("target = `{}`", target);
                     let unit = dwarf.unit.get_mut(*dwarf_types.get(&name).unwrap());
                     unit.set(
                         gimli::DW_AT_name,
