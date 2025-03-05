@@ -253,7 +253,7 @@ class Gdb:
                     self.gdb.execute(cmd)
 
         self.gdb.execute("ctx")
-        self.gdb.write(self.gdb.prompt_hook(lambda: None))
+        self.gdb.write(self.gdb.prompt_hook(lambda _: ""))
 
     def pid(self):
         return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])

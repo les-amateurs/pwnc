@@ -5,8 +5,8 @@ import argcomplete
 import colorama
 from pathlib import Path
 import logging
-import pwnc.commands.docker.extract
 import pwnc.config
+from pwnc import util
 
 logger = logging.getLogger("pwnc")
 logger.setLevel(logging.INFO)
@@ -55,6 +55,16 @@ description = """\
 
 def PathArg(file):
     return Path(file)
+
+
+def DockerImageArg(**kwargs):
+    try:
+        out: str = util.run("docker images", capture_output=True).stdout
+    except:
+        return None
+    lines = out.splitlines()[1:]
+    images = list(map(lambda l: ":".join(l.split(maxsplit=2)[:2]), lines))
+    return images
 
 
 def get_main_parser():
@@ -134,7 +144,8 @@ def get_main_parser():
     docker.dest = "subcommand.docker"
 
     subparser = docker.add_parser("extract", help="extract files from docker image")
-    subparser.add_argument("-i", type=str, dest="image")
+    subparser.add_argument("image", type=str).completer = DockerImageArg
+    subparser.add_argument("file", type=str)
 
     subparser = subparsers.add_parser("shellc", help="compile c to shellcode")
     subparser.add_argument(
@@ -224,7 +235,7 @@ match command.get("subcommand"):
             case "template":
                 pwnc.commands.kernel.template.command(args)
     case "docker":
-        import pwnc.commands.docker
+        import pwnc.commands.docker.extract
 
         match command.get("subcommand.docker"):
             case "extract":
