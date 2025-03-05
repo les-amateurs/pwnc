@@ -3,6 +3,7 @@
 ## dwarf[WIP]
 
 ### type info
+
 - [x] structs
 - [x] unions
 - [x] integers
@@ -13,13 +14,18 @@
 - [ ] classes
 
 ### global variables
+
 - [x] typeinfo
-- [ ] correct section index
+- [x] correct section index
 
 ### functions
-- [ ] parameters
-- [ ] local variables
-- [ ] line information (maybe)
 
-## client/server[WIP]
-Take a look at how decomp2dbg handles the client/server communication.
+- [x] parameters
+- [x] local variables
+- [x] line information
+
+## client/server
+
+GDB client that adds a `binja` command to connect to the plugin server. Updates in binaryninja are pushed to GDB in real time.
+
+The client is loaded by running `source plugin/gdbinit.py`.
