@@ -1,8 +1,7 @@
 from ...util import *
 from tempfile import NamedTemporaryFile
-import gzip
-import shutil
 from . import decompress
+
 
 def command(args: Args):
     if args.initramfs is None:

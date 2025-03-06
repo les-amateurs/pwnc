@@ -11,10 +11,18 @@ from pwnc import util
 logger = logging.getLogger("pwnc")
 logger.setLevel(logging.INFO)
 channel = logging.StreamHandler()
+
+
 class CustomFormatter(logging.Formatter):
     """Logging Formatter to add colors and count warning / errors"""
 
-    ERROR = colorama.Fore.WHITE + colorama.Back.RED + "ERROR" + colorama.Fore.RESET + colorama.Back.RESET
+    ERROR = (
+        colorama.Fore.WHITE
+        + colorama.Back.RED
+        + "ERROR"
+        + colorama.Fore.RESET
+        + colorama.Back.RESET
+    )
     WARNING = colorama.Fore.YELLOW + "!" + colorama.Fore.RESET
     INFO = colorama.Fore.BLUE + "*" + colorama.Fore.RESET
     DEBUG = colorama.Fore.GREEN + "+" + colorama.Fore.RESET
@@ -28,9 +36,10 @@ class CustomFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno, self.FORMATS['DEFAULT'])
+        log_fmt = self.FORMATS.get(record.levelno, self.FORMATS["DEFAULT"])
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
+
 
 channel.setFormatter(CustomFormatter())
 logger.addHandler(channel)
@@ -43,8 +52,10 @@ description = """\
 
 """
 
+
 def PathArg(file):
     return Path(file)
+
 
 def DockerImageArg(**kwargs):
     try:
@@ -53,7 +64,8 @@ def DockerImageArg(**kwargs):
         return None
     lines = out.splitlines()[1:]
     images = list(map(lambda l: ":".join(l.split(maxsplit=2)[:2]), lines))
-    return images    
+    return images
+
 
 def get_main_parser():
     parser = ArgumentParser(
@@ -67,18 +79,24 @@ def get_main_parser():
     subparsers.required = True
     subparsers.dest = "subcommand"
 
-    subparser = subparsers.add_parser("unpack", help="unpack and initialize from distribution")
+    subparser = subparsers.add_parser(
+        "unpack", help="unpack and initialize from distribution"
+    )
     subparser.add_argument("file", type=PathArg)
 
-    subparser = subparsers.add_parser("unstrip", help="unstrip binaries by adding debuginfo")
+    subparser = subparsers.add_parser(
+        "unstrip", help="unstrip binaries by adding debuginfo"
+    )
     subparser.add_argument("file", type=PathArg)
     subparser.add_argument("--libc", action="store_true")
     subparser.add_argument("--save", action="store_true")
 
     subparser = subparsers.add_parser("patch", help="patch binaries")
     subparser.add_argument("--bits", choices=[32, 64], help="override elf 32 or 64")
-    subparser.add_argument("--endian", choices=["big", "little"], help="override endianness")
-    subparser.add_argument("--rpath", type=str, help="new rpath") 
+    subparser.add_argument(
+        "--endian", choices=["big", "little"], help="override endianness"
+    )
+    subparser.add_argument("--rpath", type=str, help="new rpath")
     subparser.add_argument("--interp", type=str, help="new interpreter path")
     subparser.add_argument("file", type=PathArg)
     subparser.add_argument("outfile", type=PathArg, nargs="?")
@@ -91,24 +109,35 @@ def get_main_parser():
     kernel.dest = "subcommand.kernel"
 
     subparser = kernel.add_parser("init", help="kernel pwn setup")
-    subparser.add_argument("-i", type=PathArg, help="path to initramfs", dest="initramfs")
+    subparser.add_argument(
+        "-i", type=PathArg, help="path to initramfs", dest="initramfs"
+    )
 
     subparser = kernel.add_parser("module", help="kernel module helpers")
-    subparser.add_argument("--set", type=str, action='append', nargs=2, default=[])
+    subparser.add_argument("--set", type=str, action="append", nargs=2, default=[])
     subparser.add_argument("-o", type=PathArg)
     subparser.add_argument("file", type=PathArg)
 
-    subparser = kernel.add_parser("compress", help="compress rootfs into initramfs file")
+    subparser = kernel.add_parser(
+        "compress", help="compress rootfs into initramfs file"
+    )
     subparser.add_argument("--rootfs", type=PathArg, required=False)
     subparser.add_argument("--initramfs", type=PathArg, required=False)
     subparser.add_argument("--gzipped", action="store_true")
-    subparser.add_argument("--gzip-level", type=int, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    subparser.add_argument(
+        "--gzip-level", type=int, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    )
 
-    subparser = kernel.add_parser("decompress", help="decompress initramfs file into rootfs")
+    subparser = kernel.add_parser(
+        "decompress", help="decompress initramfs file into rootfs"
+    )
     subparser.add_argument("--rootfs", type=PathArg, required=False)
     subparser.add_argument("--initramfs", type=PathArg, required=False)
     subparser.add_argument("--ignore", action="store_true")
     subparser.add_argument("--save", action="store_true")
+
+    subparser = kernel.add_parser("template", help="kernel exploit template")
+    subparser.add_argument("kind", type=str, choices=["common"])
 
     docker = subparsers.add_parser("docker", help="docker utils").add_subparsers()
     docker.required = True
@@ -119,24 +148,54 @@ def get_main_parser():
     subparser.add_argument("file", type=str)
 
     subparser = subparsers.add_parser("shellc", help="compile c to shellcode")
-    subparser.add_argument("backend", type=str, choices=["gcc", "musl", "zig"], default="gcc", help="compiler backend")
+    subparser.add_argument(
+        "backend",
+        type=str,
+        choices=["gcc", "musl", "zig"],
+        default="gcc",
+        help="compiler backend",
+    )
     subparser.add_argument("files", nargs="*", help="input files")
-    subparser.add_argument("-o", type=PathArg, required=True, dest="output", help="output file")
-    
+    subparser.add_argument(
+        "-o", type=PathArg, required=True, dest="output", help="output file"
+    )
+
     group = subparser.add_mutually_exclusive_group()
     group.set_defaults(pie=True)
-    group.add_argument("-pie", action="store_true", dest="pie", help="build position independent executable")
-    group.add_argument("-no-pie", action="store_false", dest="pie", help="do not build position independent executable")
+    group.add_argument(
+        "-pie",
+        action="store_true",
+        dest="pie",
+        help="build position independent executable",
+    )
+    group.add_argument(
+        "-no-pie",
+        action="store_false",
+        dest="pie",
+        help="do not build position independent executable",
+    )
 
     subparser.add_argument("-target", type=str, help="target triple")
 
     subparser = subparsers.add_parser("elf", help="build elf from shellcode")
-    subparser.add_argument("-m", type=str, required=True,  dest="machine", help="elf machine")
-    subparser.add_argument("-b", type=int, required=False, dest="bits", choices=[32, 64], help="elf bits")
-    subparser.add_argument("-e", type=str, required=False, dest="endian", choices=["little", "big"], help="elf endianness")
+    subparser.add_argument(
+        "-m", type=str, required=True, dest="machine", help="elf machine"
+    )
+    subparser.add_argument(
+        "-b", type=int, required=False, dest="bits", choices=[32, 64], help="elf bits"
+    )
+    subparser.add_argument(
+        "-e",
+        type=str,
+        required=False,
+        dest="endian",
+        choices=["little", "big"],
+        help="elf endianness",
+    )
     subparser.add_argument("file", type=PathArg)
 
     return parser
+
 
 parser = get_main_parser()
 argcomplete.autocomplete(parser)
@@ -147,18 +206,23 @@ command = dict(args._get_kwargs())
 match command.get("subcommand"):
     case "unpack":
         import pwnc.commands.unpack
+
         pwnc.commands.unpack.command(args)
     case "unstrip":
         import pwnc.commands.unstrip
+
         pwnc.commands.unstrip.command(args)
     case "patch":
         import pwnc.commands.patch
+
         pwnc.commands.patch.command(args)
     case "errno":
         import pwnc.commands.errno
+
         pwnc.commands.errno.command(args)
     case "kernel":
         import pwnc.commands.kernel
+
         match command.get("subcommand.kernel"):
             case "init":
                 pwnc.commands.kernel.init.command(args)
@@ -168,14 +232,19 @@ match command.get("subcommand"):
                 pwnc.commands.kernel.decompress.command(args)
             case "module":
                 pwnc.commands.kernel.module.command(args)
+            case "template":
+                pwnc.commands.kernel.template.command(args)
     case "docker":
         import pwnc.commands.docker.extract
+
         match command.get("subcommand.docker"):
             case "extract":
                 pwnc.commands.docker.extract.command(args)
     case "shellc":
         import pwnc.commands.shellc
+
         pwnc.commands.shellc.command(args, extra)
     case "elf":
         import pwnc.commands.elf
+
         pwnc.commands.elf.command(args)
