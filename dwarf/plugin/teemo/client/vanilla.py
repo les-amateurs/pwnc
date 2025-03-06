@@ -15,7 +15,7 @@ def err(msg):
     """The wrapper of gef_print for error level message."""
     print("[!] {}".format(msg))
     return
-    
+
 def is_alive():
     """GDB mode determination function for running."""
     try:
@@ -35,7 +35,7 @@ def is_remote_debug():
         # before gdb 11.x: AttributeError: 'gdb.Inferior' object has no attribute 'connection'
         res = gdb.execute("maintenance print target-stack", to_string=True)
         return "remote" in res
-    
+
 def is_pin():
     """GDB mode determination function for pin and SDE."""
     if not is_remote_debug():
@@ -274,9 +274,9 @@ class PathUtil:
 class BinjaCommand(gdb.Command):
     def __init__(self):
         super().__init__("binja", gdb.COMMAND_USER)
-        self.binbase = None
+        self.binbase: int | None = None
         self.sections = []
-        self.service = None
+        self.service: rpyc.Service = None
         self.previous_loaded_debuginfo = None
         self.epoch = -1
         self.last_stopped_epoch = -1
@@ -294,15 +294,14 @@ class BinjaCommand(gdb.Command):
             return False
         if gdb.selected_thread().is_running():
             return False
-        
+
         if self.previous_loaded_debuginfo:
             gdb.execute(f"remove-symbol-file {self.previous_loaded_debuginfo}")
         gdb.execute(command, to_string=True)
         self.previous_loaded_debuginfo = debuginfo
         return True
 
-    def debugger_stopped(self):
-        # print("debugger stopped")
+    def frame_addrs(self):
         addrs = []
         frame = gdb.selected_frame()
         while frame != None:
@@ -311,8 +310,28 @@ class BinjaCommand(gdb.Command):
                 addr -= self.binbase
             addrs.append(addr)
             frame = frame.older()
-        self.service.root.request_functions(addrs)
-        self.do_update_debuginfo()
+        return addrs
+
+    def debugger_stopped(self):
+        try:
+            print("debugger stopped")
+            self.service.root.request_functions(self.frame_addrs())
+            self.do_update_debuginfo()
+        except KeyboardInterrupt:
+            print("debuginfo update interrupted")
+
+    def disconnect(self):
+        print(f"disconnecting...")
+        self.service.close()
+        gdb.events.stop.disconnect(self.gdb_stop_handler)
+        gdb.events.exited.disconnect(self.gdb_exit_handler)
+        gdb.events.gdb_exiting.disconnect(self.gdb_exit_handler)
+
+    def gdb_stop_handler(self, e):
+        self.debugger_stopped()
+
+    def gdb_exit_handler(self, e):
+        self.disconnect()
 
     def invoke(self, args, from_tty):
         self.ready = False
@@ -332,7 +351,7 @@ class BinjaCommand(gdb.Command):
                 auxv = next(filter(lambda line: line.startswith("AT_ENTRY"), auxv))
             except StopIteration:
                 err("failed to find binary entrypoint")
-                
+
             entrypoint = int(auxv.rsplit(maxsplit=1)[-1], 16)
             print(f"{entrypoint = :#x}")
 
@@ -350,7 +369,7 @@ class BinjaCommand(gdb.Command):
                     break
             else:
                 err("failed to find binary base")
-            
+
             print(f"{base = :#x}")
             self.binbase = base
             self.elf = ELFFile(open(filepath, "rb"))
@@ -358,7 +377,7 @@ class BinjaCommand(gdb.Command):
             if self.service is None:
                 self.service = unix_connect(str(config.UNIX_SOCK_PATH), service=Client)
                 spawn(self.service.serve_all)
-            
+
             for section in self.elf.iter_sections():
                 address = section["sh_addr"]
                 if address > 0:
@@ -367,7 +386,13 @@ class BinjaCommand(gdb.Command):
                     self.sections.append(f"-s {section.name} {address:#x}")
             self.sections = " ".join(self.sections)
 
-        gdb.events.stop.connect(lambda e: self.debugger_stopped())
+        gdb.events.stop.connect(self.gdb_stop_handler)
+        gdb.events.exited.connect(self.gdb_exit_handler)
+        gdb.events.gdb_exiting.connect(self.gdb_exit_handler)
         self.ready = True
-        self.service.root.request_functions([])
+        self.service.root.request_functions(self.frame_addrs())
         print("binja initialized")
+
+"""
+
+"""

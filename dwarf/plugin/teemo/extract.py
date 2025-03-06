@@ -1,10 +1,17 @@
 from calendar import c
 from binaryninja import (
+    ArrayType,
+    EnumerationType,
+    FunctionType,
+    IntegerType,
+    NamedTypeReferenceType,
+    PointerType,
     QualifiedName,
     Type,
     StructureVariant,
     TypeClass,
     BinaryView,
+    StructureType
 )
 from collections import ChainMap
 from pathlib import Path
@@ -22,18 +29,21 @@ def escape(name: QualifiedName):
 def extract_typename(type: Type | None, name: str | QualifiedName | None = None):
     if type is None:
         return ""
-    
-    if name is not None and builtins.type(name) != str:
-        name = escape(name)
+
+    if name is not None and builtins.type(name) == QualifiedName:
+            name = escape(name)
 
     match type.type_class.value:
         case TypeClass.IntegerTypeClass.value:
             return name or type.get_string()
         case TypeClass.StructureTypeClass.value:
+            assert isinstance(type, StructureType)
+
             if type.registered_name is None:
                 name = None
             else:
                 name = escape(type.registered_name.name)
+
             match type.type.value:
                 case StructureVariant.StructStructureType.value:
                     return name
@@ -46,12 +56,20 @@ def extract_typename(type: Type | None, name: str | QualifiedName | None = None)
         case TypeClass.PointerTypeClass.value:
             return name or type.get_string()
         case TypeClass.NamedTypeReferenceClass.value:
+            print(type)
+            if name is not None:
+                return name
             return escape(type.name)
         case TypeClass.EnumerationTypeClass.value:
+            # anonymous enum
+            if type.registered_name is None:
+                return None
             return escape(type.registered_name.name)
         case TypeClass.FunctionTypeClass.value:
             return type.get_string()
         case TypeClass.ArrayTypeClass.value:
+            assert isinstance(type, ArrayType)
+
             return f"{extract_typename(type.element_type)}[{type.count}]"
         case TypeClass.VoidTypeClass.value:
             return ""
@@ -108,8 +126,11 @@ class TypeCollection:
         key = extract_typename(type, name)
         if key in self.all:
             del self.all[key]
-        
-    def visit(self, type: Type, name: str | None = None):
+
+    def visit(self, type: Type, name: QualifiedName | str | None = None):
+        if name is not None and builtins.type(name) == QualifiedName:
+            name = escape(name)
+
         is_anonymous_type = False
         key = extract_typename(type, name)
         if key is None:
@@ -119,13 +140,17 @@ class TypeCollection:
 
         if key in self.all or not key:
             return key
-        
+
         match type.type_class.value:
             case TypeClass.IntegerTypeClass.value:
+                assert isinstance(type, IntegerType)
+
                 self.integers[key] = {}
                 self.integers[key]["size"] = len(type)
                 self.integers[key]["signed"] = type.signed.value
             case TypeClass.StructureTypeClass.value:
+                assert isinstance(type, StructureType)
+
                 match type.type.value:
                     case StructureVariant.StructStructureType.value:
                         target = self.structs
@@ -136,29 +161,58 @@ class TypeCollection:
                 target[key] = {}
                 target[key]["size"] = len(type)
                 target[key]["anon"] = is_anonymous_type
-                target[key]["fields"] = list(map(lambda field: (field.offset, field.name, self.visit(field.type)), type.members))
+                # print(type)
+                target[key]["fields"] = [(field.offset, field.name, self.visit(field.type, field.name)) for field in type.members]
             case TypeClass.PointerTypeClass.value:
+                assert isinstance(type, PointerType)
+
                 self.pointers[key] = {}
                 self.pointers[key]["size"] = len(type)
                 self.pointers[key]["target"] = self.visit(type.target)
             case TypeClass.NamedTypeReferenceClass.value:
-                target = self.visit(type.target(self.bv))
+                assert isinstance(type, NamedTypeReferenceType)
+                target = type.target(self.bv)
+                # if target is None:
+                #     print(builtins.type(name))
+                #     if type.name is None or escape(type.name) == name:
+                #         raise RuntimeError()
+                #         # print(type)
+                #         return key
+                #     # print(type, type.name)
+                #     target = self.bv.get_type_by_name(type.name)
+                targetkey = self.visit(target)
                 # sometimes struct fields generate a random NamedTypeReference ???
-                if key == target:
+                if key == targetkey:
                     return key
+                # print(type, "+", type.type_class, "+", key, "+", targetkey, "+", type.target(self.bv))
+                # print(builtins.type(key))
                 self.typedefs[key] = {}
-                self.typedefs[key]["target"] = target
+                self.typedefs[key]["target"] = targetkey
             case TypeClass.EnumerationTypeClass.value:
+                assert isinstance(type, EnumerationType)
+
                 self.enums[key] = {}
                 self.enums[key]["size"] = len(type)
                 self.enums[key]["signed"] = type.signed.value
-                self.enums[key]["fields"] = list(map(lambda field: (field.name, field.value), type.members))
+                fields = [[field.name, field.value] for field in type.members]
+                base = 0
+                for i, field in enumerate(type.members):
+                    if field.value is None:
+                        fields[i][1] = base
+                        base += 1
+                    else:
+                        base = field.value
+                self.enums[key]["fields"] = fields
             case TypeClass.FunctionTypeClass.value:
+                assert isinstance(type, FunctionType)
+
                 self.prototypes[key] = {}
-                self.prototypes[key]["parameters"] = list(map(lambda p: (p.name, self.visit(p.type)), type.parameters))
+                self.prototypes[key]["parameters"] = [(p.name, self.visit(p.type)) for p in type.parameters]
                 self.prototypes[key]["ellipsis"] = type.has_variable_arguments.value
                 self.prototypes[key]["returntype"] =self. visit(type.return_value)
             case TypeClass.ArrayTypeClass.value:
+                assert isinstance(type, ArrayType)
+
                 self.arrays[key] = {}
                 self.arrays[key]["count"] = type.count
                 self.arrays[key]["target"] = self.visit(type.element_type)
