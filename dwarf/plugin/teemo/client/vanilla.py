@@ -283,6 +283,7 @@ class BinjaCommand(gdb.Command):
         self.ready = False
 
     def update_debuginfo(self, epoch: int):
+        print("updating debuginfo")
         return self.do_update_debuginfo()
 
     def do_update_debuginfo(self):
@@ -391,6 +392,7 @@ class BinjaCommand(gdb.Command):
         gdb.events.gdb_exiting.connect(self.gdb_exit_handler)
         self.ready = True
         self.service.root.request_functions(self.frame_addrs())
+        self.update_debuginfo(0)
         print("binja initialized")
 
 """
