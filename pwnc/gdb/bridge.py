@@ -2,7 +2,7 @@
 import gdb
 
 import socket
-from threading import Condition
+from threading import Condition, Event
 import time
 
 from rpyc.core.protocol import Connection
@@ -13,71 +13,14 @@ from rpyc.utils.server import ThreadedServer
 
 print("bridge loaded")
 
-class ServeResult:
-    """Result of serving requests on GDB thread."""
+class Result:
     def __init__(self):
-        self.cv = Condition()
-        self.done = False
-        self.exc = None
-
-    def set(self, exc):
-        with self.cv:
-            self.done = True
-            self.exc = exc
-            self.cv.notify()
-
-    def wait(self):
-        with self.cv:
-            while not self.done:
-                self.cv.wait()
-            if self.exc is not None:
-                raise self.exc
-
-
-class GdbConnection(Connection):
-    """A Connection implementation that serves requests on GDB thread.
-
-    Serving on GDB thread might not be ideal from the responsiveness
-    perspective, however, it is simple and reliable.
-    """
-    SERVE_TIME = 0.1  # Number of seconds to serve.
-    IDLE_TIME = 0.1  # Number of seconds to wait after serving.
-
-    def serve_gdb_thread(self, serve_result):
-        """Serve requests on GDB thread."""
-        try:
-            deadline = time.time() + self.SERVE_TIME
-            while True:
-                timeout = deadline - time.time()
-                if timeout < 0:
-                    break
-                super().serve(timeout=timeout)
-        except Exception as exc:
-            serve_result.set(exc)
-        else:
-            serve_result.set(None)
-
-    def serve_all(self):
-        """Modified version of rpyc.core.protocol.Connection.serve_all."""
-        try:
-            while not self.closed:
-                serve_result = ServeResult()
-                gdb.post_event(lambda: self.serve_gdb_thread(serve_result))
-                serve_result.wait()
-                time.sleep(self.IDLE_TIME)
-        except (socket.error, select_error, IOError):
-            if not self.closed:
-                raise
-        except EOFError:
-            pass
-        finally:
-            self.close()
-
+        self.event = Event()
+        self.item = None
 
 class GdbService(Service):
     """A public interface for Pwntools."""
 
-    _protocol = GdbConnection  # Connection subclass.
     exposed_gdb = gdb  # ``gdb`` module.
 
     def exposed_set_breakpoint(self, client, has_stop, *args, **kwargs):
@@ -87,8 +30,9 @@ class GdbService(Service):
                 def stop(self):
                     return client.stop()
 
-            return Breakpoint(*args, **kwargs)
-        return gdb.Breakpoint(*args, **kwargs)
+            Breakpoint(*args, **kwargs)
+        else:
+            gdb.Breakpoint(*args, **kwargs)
 
     def exposed_set_finish_breakpoint(self, client, has_stop, has_out_of_scope, *args, **kwargs):
         """Create a finish breakpoint and connect it with the client-side mirror."""
@@ -100,6 +44,16 @@ class GdbService(Service):
                 def out_of_scope(self):
                     client.out_of_scope()
         return FinishBreakpoint(*args, **kwargs)
+    
+    def exposed_execute(self, cmd, to_string = False, from_tty = False):
+        result = Result()
+        def execute():
+            res = gdb.execute(cmd, to_string=to_string, from_tty=from_tty)
+            result.item = res
+            result.event.set()
+        gdb.post_event(lambda: execute())
+        result.event.wait()
+        return result.item
 
     def exposed_quit(self):
         """Terminate GDB."""

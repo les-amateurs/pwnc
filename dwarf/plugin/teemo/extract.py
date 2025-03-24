@@ -4,6 +4,7 @@ from binaryninja import (
     EnumerationType,
     FunctionType,
     IntegerType,
+    NamedTypeReferenceClass,
     NamedTypeReferenceType,
     PointerType,
     QualifiedName,
@@ -17,6 +18,8 @@ from collections import ChainMap
 from pathlib import Path
 import json
 import builtins
+
+import binaryninja
 
 def escape(name: QualifiedName):
     return "::".join(name.name)
@@ -56,7 +59,7 @@ def extract_typename(type: Type | None, name: str | QualifiedName | None = None)
         case TypeClass.PointerTypeClass.value:
             return name or type.get_string()
         case TypeClass.NamedTypeReferenceClass.value:
-            print(type)
+            # print(type)
             if name is not None:
                 return name
             return escape(type.name)
@@ -172,6 +175,10 @@ class TypeCollection:
             case TypeClass.NamedTypeReferenceClass.value:
                 assert isinstance(type, NamedTypeReferenceType)
                 target = type.target(self.bv)
+
+                if type.named_type_class != NamedTypeReferenceClass.TypedefNamedTypeClass:
+                    return self.visit(target)
+
                 # if target is None:
                 #     print(builtins.type(name))
                 #     if type.name is None or escape(type.name) == name:
@@ -181,9 +188,7 @@ class TypeCollection:
                 #     # print(type, type.name)
                 #     target = self.bv.get_type_by_name(type.name)
                 targetkey = self.visit(target)
-                # sometimes struct fields generate a random NamedTypeReference ???
-                if key == targetkey:
-                    return key
+
                 # print(type, "+", type.type_class, "+", key, "+", targetkey, "+", type.target(self.bv))
                 # print(builtins.type(key))
                 self.typedefs[key] = {}

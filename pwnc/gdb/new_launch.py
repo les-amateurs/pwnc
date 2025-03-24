@@ -12,8 +12,6 @@ from pwnlib.util import misc
 from pwnlib import gdb as gdbutils
 from pwnlib import elf
 from pwnlib.tubes.process import process
-from rpyc.utils.factory import unix_connect
-from rpyc import BgServingThread
 
 from ..commands import unstrip
 from ..util import *
@@ -139,150 +137,150 @@ class Gdb:
     def __init__(self, conn, binary: elf.ELF = None, resolve_debuginfo: bool = True, **kwargs):
         gdbref = self
         self.conn = conn
-        self.gdb: "gdb" = conn.root.gdb
-        self.regs = Registers(self)
+        # self.gdb: "gdb" = conn.root.gdb
+        # self.regs = Registers(self)
 
-        self.stopped = threading.Event()
-        def stop_handler(event):
-            self.stopped.set()
-        self.events.stop.connect(stop_handler)
+        # self.stopped = threading.Event()
+        # def stop_handler(event):
+        #     self.stopped.set()
+        # self.events.stop.connect(stop_handler)
         
-        class ProxyBreakpoint(gdbutils.Breakpoint):
-            def __init__(self, *args, **kwargs):
-                super().__init__(conn, *args, **kwargs)
-                self.count = 0
+        # class ProxyBreakpoint(Breakpoint):
+        #     def __init__(self, *args, **kwargs):
+        #         super().__init__(conn, *args, **kwargs)
+        #         self.count = 0
 
-            def stop(self):
-                val = self.hit()
-                self.count += 1
-                if val not in [True, False]:
-                    return True
-                return val
+        #     def stop(self):
+        #         val = self.hit()
+        #         self.count += 1
+        #         if val not in [True, False]:
+        #             return True
+        #         return val
             
-            def wait(self, fn):
-                def wrapper(*args, **kwargs):
-                    count = self.count
-                    fn(*args, **kwargs)
-                    while self.count == count:
-                        time.sleep(0.1)
+        #     def wait(self, fn):
+        #         def wrapper(*args, **kwargs):
+        #             count = self.count
+        #             fn(*args, **kwargs)
+        #             while self.count == count:
+        #                 time.sleep(0.1)
 
-                return wrapper
+        #         return wrapper
             
-            def hit(self):
-                return True
+        #     def hit(self):
+        #         return True
 
-        class ProxyFinishBreakpoint(gdbutils.Breakpoint):
-            def __init__(self, *args, **kwargs):
-                super().__init__(conn, *args, **kwargs)
+        # class ProxyFinishBreakpoint(gdbutils.Breakpoint):
+        #     def __init__(self, *args, **kwargs):
+        #         super().__init__(conn, *args, **kwargs)
 
-        self.Breakpoint = ProxyBreakpoint
-        self.FinishBreakpoint = ProxyFinishBreakpoint
-        self.objfiles = Objfiles(self.gdb)
+        # self.Breakpoint = ProxyBreakpoint
+        # self.FinishBreakpoint = ProxyFinishBreakpoint
+        # self.objfiles = Objfiles(self.gdb)
 
-        class ELF(elf.ELF):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self._objfile: Objfile = None
-                gdbref.objfiles.register_elf(self)
+        # class ELF(elf.ELF):
+        #     def __init__(self, *args, **kwargs):
+        #         super().__init__(*args, **kwargs)
+        #         self._objfile: Objfile = None
+        #         gdbref.objfiles.register_elf(self)
 
-            @property
-            def objfile(self):
-                if not self._objfile:
-                    raise FileNotFoundError("objfile not loaded yet")
-                return self._objfile
+        #     @property
+        #     def objfile(self):
+        #         if not self._objfile:
+        #             raise FileNotFoundError("objfile not loaded yet")
+        #         return self._objfile
                 
-            @property
-            def libc(self):
-                for lib in self.libs:
-                    if '/libc.' in lib or '/libc-' in lib:
-                        return ELF(lib)
+        #     @property
+        #     def libc(self):
+        #         for lib in self.libs:
+        #             if '/libc.' in lib or '/libc-' in lib:
+        #                 return ELF(lib)
                 
-        self.ELF = ELF
-        if binary is not None:
-            self.file = ELF(binary.path)
-        else:
-            self.file = None
+        # self.ELF = ELF
+        # if binary is not None:
+        #     self.file = ELF(binary.path)
+        # else:
+        #     self.file = None
 
-        if resolve_debuginfo:
-            libraries = self.conn.root.execute("info sharedlibrary", to_string=True)
-            libraries = libraries.strip().splitlines()[1:]
-            if len(libraries) > 0 and not libraries[-1].startswith("0x"):
-                libraries = libraries[:-1]
-            libraries = map(lambda line: line.split(), libraries)
-            libraries = map(lambda line: pathlib.Path(line[-1]), libraries)
-            libraries = list(libraries)
-            loaded = list(map(lambda obj: obj.filename, self.gdb.objfiles()))
+        # if resolve_debuginfo:
+        #     libraries = self.gdb.execute("info sharedlibrary", to_string=True)
+        #     libraries = libraries.strip().splitlines()[1:]
+        #     if len(libraries) > 0 and not libraries[-1].startswith("0x"):
+        #         libraries = libraries[:-1]
+        #     libraries = map(lambda line: line.split(), libraries)
+        #     libraries = map(lambda line: pathlib.Path(line[-1]), libraries)
+        #     libraries = list(libraries)
+        #     loaded = list(map(lambda obj: obj.filename, self.gdb.objfiles()))
 
-            mappings = self.conn.root.execute("info proc mappings", to_string=True).strip().splitlines()[4:]
-            print(mappings)
-            mappings = map(lambda line: line.split(), mappings)
-            mappings = map(lambda line: line if len(line) == 6 else line + ["[anon]"], mappings)
-            mappings = list(mappings)
-            mappings = {pathlib.Path(line[-1]).name: int(line[0], 16) for line in reversed(mappings)}
+        #     mappings = self.gdb.execute("info proc mappings", to_string=True).strip().splitlines()[4:]
+        #     print(mappings)
+        #     mappings = map(lambda line: line.split(), mappings)
+        #     mappings = map(lambda line: line if len(line) == 6 else line + ["[anon]"], mappings)
+        #     mappings = list(mappings)
+        #     mappings = {pathlib.Path(line[-1]).name: int(line[0], 16) for line in reversed(mappings)}
 
-            cache = pathlib.Path("_cache")
-            working_directory = Path(self.conn.root.execute("info proc cwd", to_string=True).strip()[:-1].split("cwd = '", maxsplit=1)[1])
-            print(working_directory)
-            pid = self.pid()
+        #     cache = pathlib.Path("_cache")
+        #     working_directory = Path(self.gdb.execute("info proc cwd", to_string=True).strip()[:-1].split("cwd = '", maxsplit=1)[1])
+        #     print(working_directory)
+        #     pid = self.pid()
 
-            for library in libraries:
-                if library not in loaded:
-                    cache.mkdir(exist_ok=True)
-                    cached = cache / pathlib.Path(library).name
+        #     for library in libraries:
+        #         if library not in loaded:
+        #             cache.mkdir(exist_ok=True)
+        #             cached = cache / pathlib.Path(library).name
                     
-                    if not str(library).startswith("/"):
-                        library = working_directory / library
+        #             if not str(library).startswith("/"):
+        #                 library = working_directory / library
 
-                    if not cached.exists():
-                        remote_root = pathlib.Path("/") / "proc" / str(pid) / "root"
-                        if str(library).startswith(str(remote_root)):
-                            remote_path = library
-                        else:
-                            remote_path = remote_root / library.relative_to("/")
-                        if remote_path.is_symlink():
-                            linked = remote_path.readlink()
-                            if str(linked).startswith("/"):
-                                remote_path = remote_root / linked.relative_to("/")
-                            else:
-                                remote_path = (remote_path.parent / remote_path.readlink())
+        #             if not cached.exists():
+        #                 remote_root = pathlib.Path("/") / "proc" / str(pid) / "root"
+        #                 if str(library).startswith(str(remote_root)):
+        #                     remote_path = library
+        #                 else:
+        #                     remote_path = remote_root / library.relative_to("/")
+        #                 if remote_path.is_symlink():
+        #                     linked = remote_path.readlink()
+        #                     if str(linked).startswith("/"):
+        #                         remote_path = remote_root / linked.relative_to("/")
+        #                     else:
+        #                         remote_path = (remote_path.parent / remote_path.readlink())
 
-                        shutil.copy(remote_path, cached, follow_symlinks=True)
+        #                 shutil.copy(remote_path, cached, follow_symlinks=True)
 
-                    lib = elf.ELF(cached, checksec=False)
-                    if not bool(lib.get_section_by_name('.debug_info') or lib.get_section_by_name('.zdebug_info')):
-                        try:
-                            unstrip.handle_unstrip(cached.absolute())
-                            err.info(f"unstripped {lib}")
-                        except Exception as e:
-                            err.warn(f"failed to unstrip {lib}: {e}")
-                    else:
-                        err.info(f"{lib} is already unstripped")
+        #             lib = elf.ELF(cached, checksec=False)
+        #             if not bool(lib.get_section_by_name('.debug_info') or lib.get_section_by_name('.zdebug_info')):
+        #                 try:
+        #                     unstrip.handle_unstrip(cached.absolute())
+        #                     err.info(f"unstripped {lib}")
+        #                 except Exception as e:
+        #                     err.warn(f"failed to unstrip {lib}: {e}")
+        #             else:
+        #                 err.info(f"{lib} is already unstripped")
 
-                    cmd = ["add-symbol-file", str(cached.absolute())]
-                    if library.name in mappings:
-                        base = mappings[library.name]
-                    else:
-                        for mapping in mappings.keys():
-                            if mapping.startswith(library.name):
-                                base = mappings[mapping]
-                                break
-                        else:
-                            print(f"failed to locate library {library.name}")
+        #             cmd = ["add-symbol-file", str(cached.absolute())]
+        #             if library.name in mappings:
+        #                 base = mappings[library.name]
+        #             else:
+        #                 for mapping in mappings.keys():
+        #                     if mapping.startswith(library.name):
+        #                         base = mappings[mapping]
+        #                         break
+        #                 else:
+        #                     print(f"failed to locate library {library.name}")
 
-                    for section in lib.sections:
-                        # SHF_ALLOC
-                        if section.header.sh_flags & 2 != 0:
-                            cmd += ["-s", section.name, "{:#x}".format(base + section.header.sh_addr)]
+        #             for section in lib.sections:
+        #                 # SHF_ALLOC
+        #                 if section.header.sh_flags & 2 != 0:
+        #                     cmd += ["-s", section.name, "{:#x}".format(base + section.header.sh_addr)]
 
-                    cmd = " ".join(cmd)
-                    # print(cmd)
-                    self.conn.root.execute(cmd)
+        #             cmd = " ".join(cmd)
+        #             # print(cmd)
+        #             self.gdb.execute(cmd)
 
-        self.conn.root.execute("ctx")
-        self.gdb.write(self.gdb.prompt_hook(lambda _: ""))
+        # self.gdb.execute("ctx")
+        # self.gdb.write(self.gdb.prompt_hook(lambda _: ""))
 
     def pid(self):
-        return int(self.conn.root.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
+        return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
     
     def wait_for_stop(self):
         if self.gdb.selected_thread().is_stopped():
@@ -302,7 +300,7 @@ class Gdb:
         self.prompt()
 
     def interrupt(self):
-        self.conn.root.execute("interrupt")
+        self.gdb.execute("interrupt")
 
     def prompt(self):
         self.conn.root.gdb.write(self.conn.root.gdb.prompt_hook(lambda: None))
@@ -331,7 +329,7 @@ class Gdb:
             self.conn.root.gdb.write(f"{cmd}\n")
 
         try:
-            self.conn.root.execute(cmd, to_string=to_string, from_tty=from_tty)
+            self.conn.root.gdb.execute(cmd, to_string=to_string, from_tty=from_tty)
         except Exception as e:
             msg = e.args[0]
             err.warn(f"failed to execute cmd (`{cmd}`): {msg}")
@@ -381,12 +379,14 @@ def select_terminal(headless: bool):
     else:
         return "kitty"
 
+from .protocol import Server
+
 class Bridge:
     def __init__(self, aslr: bool = True, index_cache: bool = None, index_cache_path: bool = None, **kwargs):
         self.gdbscript = []
         self.launch_directory = pathlib.Path(mkdtemp())
         self.socket_path = str(self.launch_directory / "socket")
-        self.bridge_path = str(pathlib.Path(__file__).parent / "bridge.py")
+        self.bridge_path = str(pathlib.Path(__file__).parent / "new_bridge.py")
         self.gdbscript_path = str(self.launch_directory / "gdbscript")
         self.gdb_path = str(gdbutils.binary())
         self.background_server = None
@@ -408,14 +408,13 @@ class Bridge:
     def connect(self):
         for i in range(20):
             try:
-                connection = unix_connect(self.socket_path)
+                connection = Server("script", self.socket_path, False)
                 break
             except FileNotFoundError:
                 time.sleep(0.5)
         else:
             print("failed to connect")
 
-        self.background_server = BgServingThread(connection, callback=lambda: None)
         return connection
 
 @with_options
@@ -460,7 +459,7 @@ def attach(
     command += ["-x", bridge.gdbscript_path]
 
     terminal = select_terminal(headless)
-    misc.run_in_new_terminal(command, terminal=terminal, args=[], kill_at_exit=True)
+    misc.run_in_new_terminal(command, terminal=terminal, args=["--hold"], kill_at_exit=True)
 
     conn = bridge.connect()
     return Gdb(conn, binary=elf, **options)

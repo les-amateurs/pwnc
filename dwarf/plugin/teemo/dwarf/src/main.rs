@@ -463,7 +463,7 @@ pub fn main() -> Err {
             dwarf.strings.get(comp_dir_name_id).to_vec(),
         ));
 
-        let type_mapping = collect_types(tmp.to_path_buf())?;
+        let mut type_mapping = collect_types(tmp.to_path_buf())?;
         let global_variables = collect_variables(tmp.to_path_buf())?;
         let functions = collect_functions(tmp.to_path_buf())?;
         let mut dwarf_functions: HashMap<u64, UnitEntryId> = HashMap::new();
@@ -491,11 +491,30 @@ pub fn main() -> Err {
         }
 
         let mut dwarf_types: HashMap<String, UnitEntryId> = HashMap::new();
+        for bytes in [1, 2, 4, 8] {
+            let signed = format!("int{}_t", bytes * 8);
+            let unsigned = format!("uint{}_t", bytes * 8);
+            type_mapping.insert(
+                signed,
+                BinjaType::Integer(Integer {
+                    size: bytes,
+                    signed: true,
+                }),
+            );
+            type_mapping.insert(
+                unsigned,
+                BinjaType::Integer(Integer {
+                    size: bytes,
+                    signed: false,
+                }),
+            );
+        }
         for name in type_mapping.keys() {
             visit(&mut dwarf, &type_mapping, &mut dwarf_types, name);
         }
 
         let base_type = |bytes: u64, signed: bool| {
+            // println!("requesting {bytes} and {signed}");
             return *dwarf_types
                 .get(&format!(
                     "{}int{}_t",
