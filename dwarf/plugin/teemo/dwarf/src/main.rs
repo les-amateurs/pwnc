@@ -484,7 +484,7 @@ pub fn main() -> Err {
                         sh_addralign: 0,
                         sh_entsize: 0,
                     },
-                    raw: None, // Some(vec![0; *size as usize]),
+                    raw: Some(vec![0; *size as usize]),
                     off: 0,
                 },
             );
@@ -758,8 +758,8 @@ pub fn main() -> Err {
             }
             unit.set(gimli::DW_AT_external, AttributeValue::Flag(true));
             let mut location = Expression::new();
-            location.op_addr(Address::Constant(address));
-            unit.set(gimli::DW_AT_location, AttributeValue::Exprloc(location));
+            // location.op_addr(Address::Constant(address));
+            // unit.set(gimli::DW_AT_location, AttributeValue::Exprloc(location));
 
             // let adjust = if let Some(sectname) = &section {
             //     binja_sections.get(sectname).unwrap().addr
@@ -1074,6 +1074,7 @@ pub fn main() -> Err {
             hdr: RawSection {
                 sh_type: section::SHT_SYMTAB,
                 sh_link: 2,
+                sh_info: 1,
                 sh_entsize: symbol::SIZEOF_SYM as u64,
                 ..Default::default()
             },

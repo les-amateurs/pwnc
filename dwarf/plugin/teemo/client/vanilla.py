@@ -314,7 +314,7 @@ class BinjaCommand(gdb.Command):
 
     def debugger_stopped(self):
         try:
-            print("debugger stopped")
+            # print("debugger stopped")
             self.service.root.request_functions(self.frame_addrs())
             self.do_update_debuginfo()
         except KeyboardInterrupt:
