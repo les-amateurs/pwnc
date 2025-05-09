@@ -28,10 +28,12 @@ def load_global_config():
             return toml.load(fp)
 
 def find_config():
-    cwd = Path(".")
+    cwd = Path(".").absolute()
     while not (cwd / CONFIG_FILE).exists():
         if cwd == cwd.parent:
             return None
+
+        cwd = cwd.parent
         
     return cwd / CONFIG_FILE
 

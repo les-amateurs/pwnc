@@ -8,6 +8,7 @@ def command(args):
     ensure_exists(args.file)
 
     storage, name = unpack(args.file.absolute())
+    name = args.name or name
     dest = Path(name)
 
     files = os.listdir(storage)
@@ -29,7 +30,7 @@ def unpack(file: Path):
         case ".gz":
             shutil.copyfile(file, copy)
             run("gzip -d {!r}".format(str(copy)), cwd=storage)
-        case ".tar":
+        case ".tar" | ".tgz":
             run("tar -xf {!r}".format(str(file)), cwd=storage)
         case ".zip":
             run("unzip {!r}".format(str(file)), cwd=storage)

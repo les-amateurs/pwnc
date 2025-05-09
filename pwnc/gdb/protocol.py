@@ -1,7 +1,7 @@
 # class Thing:
 #     def __await__(self):
 #         return (yield self)
-    
+
 # async def a():
 #     val = await Thing()
 #     print(val)
@@ -28,14 +28,14 @@ from typing import Coroutine
 
 class Method:
     def __init__(self, fn, args: list, kwargs: dict):
-        print(fn, args, kwargs)
+        # print(fn, args, kwargs)
         self.fn = fn
         self.args = args
         self.kwargs = kwargs
 
     def __call__(self):
         return self.fn(*self.args, **self.kwargs)
-    
+
 class Callback:
     def __init__(self, method: str, server: "Server"):
         self.server = server
@@ -46,7 +46,7 @@ class Callback:
 
     def __call__(self, *args, **kwargs):
         return self.server.invoke(self.method, *args, **kwargs)
-    
+
 class Result:
     def __init__(self):
         self.event = threading.Event()
@@ -64,6 +64,7 @@ class Server:
         self.reverse_registry = dict()
         self.values = queue.LifoQueue()
         self.routines = list()
+        self.thread: threading.Thread = None
 
         if listen:
             try:
@@ -78,7 +79,13 @@ class Server:
         else:
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.sock.connect(socket_path)
-        threading.Thread(target=self.receiver, daemon=True).start()
+
+    def start(self):
+        self.thread = threading.Thread(target=self.receiver, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.sock.send(base64.b64encode(b"stop") + b"\n" + b"A" * 512)
 
     def register(self, name: str, fn):
         self.registry[name] = fn
@@ -88,12 +95,15 @@ class Server:
         if isinstance(val, str):
             tag = b"str"
             packet = [base64.b64encode(val.encode())]
+        elif isinstance(val, bytes):
+            tag = b"bytes"
+            packet = [base64.b64encode(val)]
         elif isinstance(val, bool):
             tag = b"bool"
             packet = [base64.b64encode(str(val).encode())]
         elif isinstance(val, int):
             tag = b"int"
-            packet = [base64.b64encode(str(val).encode())]
+            packet = [base64.b64encode(str(int(val)).encode())]
         elif isinstance(val, list) or isinstance(val, tuple):
             if len(val) == 0:
                 tag = b"empty"
@@ -114,12 +124,14 @@ class Server:
 
         packet = [base64.b64encode(tag)] + packet
         return b"\n".join(packet)
-    
+
     def deserialize(self, next_line):
         tag = next_line()
         match tag:
             case b"str":
                 return next_line().decode(errors="ignore")
+            case b"bytes":
+                return next_line()
             case b"int":
                 return int(next_line())
             case b"bool":
@@ -143,18 +155,22 @@ class Server:
                 return Callback(method, self)
             case b"none":
                 return None
-            
+            case b"stop":
+                raise StopIteration
+
     def receiver(self):
         reader = io.BufferedReader(io.FileIO(self.sock.fileno()))
 
         def next_line():
             line = reader.readline()
             if not line:
+                # print("stopping...")
                 raise StopIteration
             line = base64.b64decode(line)
             # print(f"{self.name} got line {line}")
             return line
-        
+
+
         while True:
             try:
                 val = self.deserialize(next_line)
@@ -162,36 +178,41 @@ class Server:
                 break
 
             if isinstance(val, Method):
-                print(f"{self.name} got {self.reverse_registry[val.fn]}")
+                # print(f"{self.name} got {self.reverse_registry[val.fn]}")
                 routine: Coroutine = val()
                 # print(f"{self.name} calling {self.reverse_registry[val.fn]}")
                 assert routine.cr_suspended == False
-                if not routine.cr_suspended:
-                    try:
-                        print("starting routine")
-                        print(dir(routine))
-                        routine.send(None)
-                        print("routine done")
-                        self.routines.append(routine)
-                    except StopIteration as e:
-                        print(f"{self.name} routine finished immediately")
-                        self.send(e.value)
+                self.routines.append(routine)
+
+                # if not routine.cr_suspended:
+                #     try:
+                #         # print("starting routine")
+                #         # print(dir(routine))
+                #         routine.send(None)
+                #         # print("routine done")
+                #         self.routines.append(routine)
+                #     except StopIteration as e:
+                #         # print(f"{self.name} routine finished immediately")
+                #         self.send(e.value)
+                # else:
+                #     self.routines.append(routine)
+
+            # print(f"{self.name} received: {val}")
+            try:
+                routine = self.routines.pop()
+                if routine.cr_suspended == False:
+                    routine.send(None)
                 else:
-                    self.routines.append(routine)
-            else:
-                print(f"{self.name} received: {val}")
-                try:
-                    routine = self.routines.pop()
                     thing = routine.send(val)
-                    print(f"{self.name} thing = {thing}")
-                    self.routines.append(routine)
-                except StopIteration as e:
-                    print(f"{self.name} completed with {e.value}")
-                    print(f"{self.name} routines = {self.routines}")
-                    self.send(e.value)
-                except IndexError:
-                    # means we've exhausted all the routines and we are done
-                    continue
+                # print(f"{self.name} thing = {thing}")
+                self.routines.append(routine)
+            except StopIteration as e:
+                # print(f"{self.name} completed with {e.value}")
+                # print(f"{self.name} routines = {self.routines}")
+                self.send(e.value)
+            except IndexError:
+                # means we've exhausted all the routines and we are done
+                continue
 
             # if self.routines:
             #     routine = self.routines.pop()
@@ -205,6 +226,14 @@ class Server:
             #     else:
             #         self.routines.append(routine)
 
+        try:
+            self.sock.send(base64.b64encode(b"stop") + b"\n" + b"A" * 512)
+        except OSError:
+            # print("peer already stopped")
+            pass
+
+        exit()
+
     def send(self, val):
         packet = self.serialize(val)
         self.sock.send(packet + b"\n")
@@ -215,9 +244,9 @@ class Server:
         try:
             res = routine.send(None)
             self.routines.append(routine)
-            print(f"waiting for completion")
+            # print(f"waiting for completion")
             res.event.wait()
-            print(f"completed")
+            # print(f"completed")
             return res.val
         except StopIteration as e:
             return e.value
