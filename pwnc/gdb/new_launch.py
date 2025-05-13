@@ -4,6 +4,7 @@ import time
 import builtins
 import threading
 import os
+import signal
 import subprocess
 import shutil
 import inspect
@@ -12,6 +13,7 @@ from pwnlib.util import misc
 from pwnlib import gdb as gdbutils
 from pwnlib import elf
 from pwnlib.tubes.process import process
+from pwnlib.tubes.tube import tube
 
 from ..commands import unstrip
 from ..util import *
@@ -38,7 +40,7 @@ class ObjfileSymbols:
 
     def __getattr__(self, symbol):
         return self.symbol_address(symbol)
-    
+
     def __getitem__(self, symbol):
         return self.symbol_address(symbol)
 
@@ -51,7 +53,7 @@ class Objfile:
     @property
     def sym(self):
         return self._sym
-    
+
     @property
     def lookup(self):
         return self._lookup
@@ -104,17 +106,17 @@ class Objfiles:
         if type(objfile) == type(""):
             return self.objfile_for_path(objfile)
         return self.objfiles[objfile]
-    
+
     def __repr__(self):
         return str(list(self.objfiles.values()))
-    
+
 class HexInt(int):
-    def __new__(self, val):
-        return super().__new__(self, val)
-    
+    def __new__(self, val, *args, **kwargs):
+        return super().__new__(self, val, *args, **kwargs)
+
     def __repr__(self):
         return f"{self:#x}"
-    
+
 class Registers:
     gdb: "Gdb"
 
@@ -123,12 +125,9 @@ class Registers:
 
     def __getattr__(self, key: str):
         val = self.gdb.parse_and_eval(f"${key}")
-        if val.type.code == self.gdb.TYPE_CODE_VOID:
-            err.warn(f"unknown register {key}")
-            return None
         val = HexInt(val)
         return val
-    
+
     def __setattr__(self, key: str, val: int):
         val = self.gdb.parse_and_eval(f"${key} = {val}")
 
@@ -138,13 +137,13 @@ class Gdb:
         gdbref = self
         self.conn = conn
         # self.gdb: "gdb" = conn.root.gdb
-        # self.regs = Registers(self)
+        self.regs = Registers(self)
 
         # self.stopped = threading.Event()
         # def stop_handler(event):
         #     self.stopped.set()
         # self.events.stop.connect(stop_handler)
-        
+
         # class ProxyBreakpoint(Breakpoint):
         #     def __init__(self, *args, **kwargs):
         #         super().__init__(conn, *args, **kwargs)
@@ -156,7 +155,7 @@ class Gdb:
         #         if val not in [True, False]:
         #             return True
         #         return val
-            
+
         #     def wait(self, fn):
         #         def wrapper(*args, **kwargs):
         #             count = self.count
@@ -165,7 +164,7 @@ class Gdb:
         #                 time.sleep(0.1)
 
         #         return wrapper
-            
+
         #     def hit(self):
         #         return True
 
@@ -188,13 +187,13 @@ class Gdb:
         #         if not self._objfile:
         #             raise FileNotFoundError("objfile not loaded yet")
         #         return self._objfile
-                
+
         #     @property
         #     def libc(self):
         #         for lib in self.libs:
         #             if '/libc.' in lib or '/libc-' in lib:
         #                 return ELF(lib)
-                
+
         # self.ELF = ELF
         # if binary is not None:
         #     self.file = ELF(binary.path)
@@ -227,7 +226,7 @@ class Gdb:
         #         if library not in loaded:
         #             cache.mkdir(exist_ok=True)
         #             cached = cache / pathlib.Path(library).name
-                    
+
         #             if not str(library).startswith("/"):
         #                 library = working_directory / library
 
@@ -281,29 +280,24 @@ class Gdb:
 
     def pid(self):
         return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
-    
-    def wait_for_stop(self):
-        if self.gdb.selected_thread().is_stopped():
-            return
-        self.wait()
-
-    def wait(self):
-        self.stopped.wait()
-        self.stopped.clear()
 
     def continue_nowait(self):
-        self.execute("continue &", print=False)
+        self.conn.run("continue_nowait")
 
     def continue_and_wait(self):
-        self.continue_nowait()
-        self.wait()
-        self.prompt()
+        self.conn.run("continue")
+
+    def wait_for_stop(self, timeout=None) -> bool:
+        return self.conn.run("wait", timeout=timeout)
+
+    def is_running(self):
+        return self.conn.run("running")
+
+    def is_exited(self):
+        return self.conn.run("exited")
 
     def interrupt(self):
-        self.gdb.execute("interrupt")
-
-    def prompt(self):
-        self.conn.root.gdb.write(self.conn.root.gdb.prompt_hook(lambda: None))
+        self.conn.run("interrupt")
 
     def bp(self, location, callback = None):
         kind = str(type(location))
@@ -324,24 +318,40 @@ class Gdb:
         self.prompt()
         return bp
 
-    def execute(self, cmd: str, to_string: bool = False, from_tty: bool = False, print: bool = True):
-        if print:
-            self.conn.root.gdb.write(f"{cmd}\n")
-
+    def execute(self, cmd: str, to_string: bool = False, from_tty: bool = False) -> str | None:
         try:
-            self.conn.root.gdb.execute(cmd, to_string=to_string, from_tty=from_tty)
+            return self.conn.run("execute", cmd, to_string=to_string, from_tty=from_tty)
         except Exception as e:
             msg = e.args[0]
             err.warn(f"failed to execute cmd (`{cmd}`): {msg}")
-            if print:
-                self.conn.root.gdb.write(f"{msg}\n")
-        self.prompt()
 
-    def parse_and_eval(self, expr: str, **kwargs) -> "gdb.Value":
-        return self.conn.root.gdb.parse_and_eval(expr, **kwargs)
+    def read_memory(self, address: int, length: int) -> bytes:
+        return self.conn.run("read_memory", address, length)
 
-    def __getattr__(self, item):
-        return getattr(self.conn.root.gdb, item)
+    def ni(self):
+        self.conn.run("ni")
+
+    def parse_and_eval(self, expr: str) -> int:
+        return self.conn.run("parse_and_eval", expr)
+
+    def close(self):
+        self.conn.stop()
+        self.closei()
+
+    def closei(self):
+        if isinstance(self.instance, int):
+            os.kill(self.instance, signal.SIGTERM)
+        elif isinstance(self.instance, tube):
+            self.instance.close()
+        else:
+            err.warn(f"unknown instance type: {self.instance}")
+
+    def gui(self):
+        terminal = select_terminal(False)
+        stdout = str(self.inout / "stdout")
+        stderr = str(self.inout / "stderr")
+        stdin  = str(self.inout / "stdin")
+        misc.run_in_new_terminal(["sh", "-c", f"cat {stdout} & cat {stderr} & cat > {stdin}"], terminal=terminal, args=[])
 
 def on(option: bool):
     return "on" if option else "off"
@@ -354,7 +364,7 @@ def collect_options(fn, kwargs: dict):
     for name, param in inspect.signature(fn).parameters.items():
         if name == "options":
             continue
-        
+
         if param.kind == param.POSITIONAL_OR_KEYWORD and param.default != param.empty:
             val = kwargs.get(name, None) or param.default
             if val is None:
@@ -370,7 +380,7 @@ def with_options(fn):
     def wrapper(cls, *args, **kwargs):
         options = collect_options(fn, kwargs)
         return fn(cls, *args, **kwargs, options=options)
-    
+
     return wrapper
 
 def select_terminal(headless: bool):
@@ -406,12 +416,13 @@ class Bridge:
             fp.write("\n".join(self.gdbscript) + "\n")
 
     def connect(self):
-        for i in range(20):
+        for i in range(50):
             try:
                 connection = Server("script", self.socket_path, False)
+                connection.start()
                 break
             except FileNotFoundError:
-                time.sleep(0.5)
+                time.sleep(0.1)
         else:
             print("failed to connect")
 
@@ -426,7 +437,9 @@ def attach(
     aslr: bool = True,
     resolve_debuginfo: bool = False,
     index_cache: bool = None,
-    script: str = "",
+    gdbscript: str = "",
+    args: list = [],
+    targs: list = [],
 
     options: dict = None,
 
@@ -441,7 +454,7 @@ def attach(
         pids = subprocess.run(["pgrep", "-fx", command], check=False, capture_output=True, encoding="utf-8").stdout.splitlines()
         if len(pids) == 0:
             raise FileNotFoundError("process {!r} not found".format(command))
-        
+
         if len(pids) != 1:
             print("selecting newest pid")
 
@@ -453,26 +466,49 @@ def attach(
     else:
         raise Exception(f"unknown target type: {target}")
 
-    bridge.gdbscript.extend(script.strip().splitlines())
+    bridge.gdbscript.extend(gdbscript.strip().splitlines())
     bridge.finalize_gdbscript()
-    
+
+    command += args
     command += ["-x", bridge.gdbscript_path]
 
     terminal = select_terminal(headless)
-    misc.run_in_new_terminal(command, terminal=terminal, args=["--hold"], kill_at_exit=True)
+    inout = None
+    if headless:
+        inout = Path(mkdtemp())
+        os.mkfifo(inout / "stdin")
+        os.mkfifo(inout / "stdout")
+        os.mkfifo(inout / "stderr")
+        a = os.open(inout / "stdin", os.O_RDWR)
+        b = os.open(inout / "stdout", os.O_RDWR)
+        c = os.open(inout / "stderr", os.O_RDWR)
+        instance = process(
+            command,
+            stdin=a,
+            stdout=b,
+            stderr=c
+        )
+    else:
+        instance = misc.run_in_new_terminal(command, terminal=terminal, args=[] + targs, kill_at_exit=True)
 
     conn = bridge.connect()
-    return Gdb(conn, binary=elf, **options)
+    g = Gdb(conn, binary=elf, **options)
+    g.instance = instance
+    g.inout = inout
+    return g
 
 @with_options
 def debug(
-    elf: elf.ELF,
+    target: str,
+    elf: elf.ELF = None,
 
     headless: bool = False,
     aslr: bool = True,
     resolve_debuginfo: bool = False,
     index_cache: bool = None,
-    script: str = "",
+    gdbscript: str = "",
+    args: list = [],
+    targs: list = [],
     port: int = 0,
 
     options: dict = None
@@ -481,7 +517,7 @@ def debug(
     command = ["gdbserver", "--multi", "--no-startup-with-shell"]
     command.append(f"--{no(aslr)}disable-randomization")
     command.append(f"localhost:{port}")
-    command.append(str(elf.path))
+    command.append(target)
 
     p = process(command)
     pid = p.recvline()

@@ -283,7 +283,7 @@ class BinjaCommand(gdb.Command):
         self.ready = False
 
     def update_debuginfo(self, epoch: int):
-        print("updating debuginfo")
+        # print("updating debuginfo")
         return self.do_update_debuginfo()
 
     def do_update_debuginfo(self):
