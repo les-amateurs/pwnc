@@ -16,12 +16,9 @@ from binaryninja import (
     Section,
     NotificationType,
     HighLevelILOperation,
-
     show_message_box,
 )
-from binaryninja.mainthread import (
-    worker_interactive_enqueue
-)
+from binaryninja.mainthread import worker_interactive_enqueue
 from pathlib import Path
 from tempfile import mkdtemp
 import json
@@ -36,6 +33,7 @@ from threading import Lock
 from .config import *
 from .extract import TypeCollection
 
+
 class Client:
     def __init__(self, conn):
         self.conn = conn
@@ -49,10 +47,11 @@ class Client:
         except Exception as e:
             print(f"error with communication: {e}")
 
+
 class Service(rpyc.Service):
     def __init__(self, bv: BinaryView):
         self.bv = bv
-        self.tmp = TMPDIR # communicate path over socket later Path(mkdtemp())
+        self.tmp = TMPDIR  # communicate path over socket later Path(mkdtemp())
         self.tmp.mkdir(parents=True, exist_ok=True)
         self.sources = self.tmp / "sources"
         self.sources.mkdir(parents=True, exist_ok=True)
@@ -180,27 +179,30 @@ class Service(rpyc.Service):
 
     def visit_all_types(self):
         # Ignore existing dwarf types from being auto imported.
+        print("visiting user types")
         for name, type in self.bv.user_type_container.types.values():
             self.visit_type(type, name)
-        # for library in self.bv.type_libraries:
-        #     for name, type in library.type_container.types.values():
-        #         # print(library)
-        #         print(type, type.type_class, name)
-        #         self.visit_type(type, name)
+        print("visiting library types")
+        for library in self.bv.type_libraries:
+            print(f"\tvisiting {library.name}")
+            for name, type in library.type_container.types.values():
+                self.visit_type(type, name)
+        print("visiting platform types")
         for name, type in self.bv.type_container.platform.types.items():
             self.visit_type(type, name)
 
-    def forget_type(self, type: Type, name = None):
+    def forget_type(self, type: Type, name=None):
         self.updated()
         self.types.forget(type, name)
 
-    def visit_type(self, type: Type, name = None):
+    def visit_type(self, type: Type, name=None):
         self.updated()
         return self.types.visit(type, name)
 
     def visit_all_variables(self):
         for name, symbols in self.bv.symbols.items():
             for var in symbols:
+                # print(f"{var = }")
                 self.visit_variable(var)
 
     def forget_variable(self, var: CoreSymbol):
@@ -262,9 +264,13 @@ class Service(rpyc.Service):
                 case VariableSourceType.StackVariableSourceType.value:
                     location["StackVariable"] = parameter.storage
                 case _:
-                    raise NotImplementedError(f"unhandled variable source type: {parameter.source_type}")
+                    raise NotImplementedError(
+                        f"unhandled variable source type: {parameter.source_type}"
+                    )
 
-            arguments.append((location, parameter.name, self.visit_type(parameter.type)))
+            arguments.append(
+                (location, parameter.name, self.visit_type(parameter.type))
+            )
 
         self.functions[key]["arguments"] = arguments
         self.functions[key]["ellipsis"] = function.type.has_variable_arguments.value
@@ -284,6 +290,7 @@ class Service(rpyc.Service):
     def get_source_and_insns(self, function: Function):
         match self.language:
             case "High Level IL":
+
                 def get_insn_for_line(line):
                     if list(map(str, line.tokens)) == ["do"]:
                         return None
@@ -293,7 +300,9 @@ class Service(rpyc.Service):
                 source = ["    " + str(line) for line in function.hlil.root.lines]
                 offset = 1
             case "Pseudo C" | "Pseudo Rust" | "Pseudo Python":
-                lines = function.language_representation(self.language).get_linear_lines(function.hlil.root)
+                lines = function.language_representation(
+                    self.language
+                ).get_linear_lines(function.hlil.root)
                 insns = [h.il_instruction for h in lines]
                 source = [str(line) for line in lines]
                 offset = 1
@@ -358,9 +367,11 @@ class Service(rpyc.Service):
             local["typename"] = self.visit_type(var.type)
             match var.source_type:
                 case VariableSourceType.StackVariableSourceType.value:
-                    local["location"] = { "StackVariable": var.storage }
+                    local["location"] = {"StackVariable": var.storage}
                 case VariableSourceType.RegisterVariableSourceType.value:
-                    local["location"] = { "Register": self.bv.arch.get_reg_name(var.storage) }
+                    local["location"] = {
+                        "Register": self.bv.arch.get_reg_name(var.storage)
+                    }
                 case _:
                     local["location"] = "None"
             local["scope"] = {}
@@ -498,7 +509,9 @@ class Service(rpyc.Service):
         #         lineinfo[llil.address] = line
 
         if len(lineinfo) > 0:
-            self.functions[key]["lineinfo"] = sorted(lineinfo.items(), key=lambda info: info[0])
+            self.functions[key]["lineinfo"] = sorted(
+                lineinfo.items(), key=lambda info: info[0]
+            )
         # if len(labels) > 0:
         #     self.functions[key]["labels"] = labels
 
@@ -551,14 +564,20 @@ class Service(rpyc.Service):
         bin = Path(__file__).parent / "dwarf" / "target" / "release" / "teemo"
         subprocess.run([str(bin), str(self.tmp), str(outpath)], check=True)
 
+
 class Notify(BinaryDataNotification):
     def __init__(self, bv: BinaryView, service: Service):
         super().__init__(
-            NotificationType.FunctionAdded | NotificationType.FunctionRemoved | NotificationType.FunctionUpdated |
-            NotificationType.SymbolUpdated |
-            NotificationType.DataVariableAdded | NotificationType.DataVariableRemoved | NotificationType.DataVariableUpdated |
-            NotificationType.TypeDefined | NotificationType.TypeUndefined |
-            NotificationType.NotificationBarrier
+            NotificationType.FunctionAdded
+            | NotificationType.FunctionRemoved
+            | NotificationType.FunctionUpdated
+            | NotificationType.SymbolUpdated
+            | NotificationType.DataVariableAdded
+            | NotificationType.DataVariableRemoved
+            | NotificationType.DataVariableUpdated
+            | NotificationType.TypeDefined
+            | NotificationType.TypeUndefined
+            | NotificationType.NotificationBarrier
         )
         self.service = service
         self.bv = bv
@@ -568,7 +587,7 @@ class Notify(BinaryDataNotification):
     def __hash__(self):
         return self.bv.__hash__()
 
-    def notification_barrier(self, view: 'BinaryView') -> int:
+    def notification_barrier(self, view: "BinaryView") -> int:
         has_events = self.received_event
         self.received_event = False
 
@@ -589,41 +608,58 @@ class Notify(BinaryDataNotification):
             self.update_lock.acquire()
             fn(*args, **kwargs)
             self.update_lock.release()
+
         return wrapper
 
     @event
     def function_added(self, view, func):
-        worker_interactive_enqueue(self.singleton(self.service.function_added,   func.start))
+        worker_interactive_enqueue(
+            self.singleton(self.service.function_added, func.start)
+        )
 
     @event
     def function_removed(self, view, func):
-        worker_interactive_enqueue(self.singleton(self.service.function_removed, func.start))
+        worker_interactive_enqueue(
+            self.singleton(self.service.function_removed, func.start)
+        )
 
     @event
     def function_updated(self, view, func):
-        worker_interactive_enqueue(self.singleton(self.service.function_updated, func.start))
+        worker_interactive_enqueue(
+            self.singleton(self.service.function_updated, func.start)
+        )
 
     @event
     def data_var_added(self, view, var):
-        worker_interactive_enqueue(self.singleton(self.service.symbol_added,   var.symbol.address))
+        worker_interactive_enqueue(
+            self.singleton(self.service.symbol_added, var.symbol.address)
+        )
 
     @event
     def data_var_removed(self, view, var):
-        worker_interactive_enqueue(self.singleton(self.service.symbol_removed, var.symbol.address))
+        worker_interactive_enqueue(
+            self.singleton(self.service.symbol_removed, var.symbol.address)
+        )
 
     @event
     def data_var_updated(self, view, var):
         # print("queueing data var update")
-        worker_interactive_enqueue(self.singleton(self.service.symbol_updated, var.symbol.address))
+        worker_interactive_enqueue(
+            self.singleton(self.service.symbol_updated, var.symbol.address)
+        )
 
     @event
     def symbol_updated(self, view, sym):
-        worker_interactive_enqueue(self.singleton(self.service.symbol_updated, sym.address))
+        worker_interactive_enqueue(
+            self.singleton(self.service.symbol_updated, sym.address)
+        )
 
     @event
     def type_defined(self, view, name, type):
         # print("defining type")
-        worker_interactive_enqueue(self.singleton(self.service.type_updated, type, name))
+        worker_interactive_enqueue(
+            self.singleton(self.service.type_updated, type, name)
+        )
 
     # not called?
     # @event
@@ -633,9 +669,13 @@ class Notify(BinaryDataNotification):
 
     @event
     def type_undefined(self, view, name, type):
-        worker_interactive_enqueue(self.singleton(self.service.type_removed, type, name))
+        worker_interactive_enqueue(
+            self.singleton(self.service.type_removed, type, name)
+        )
+
 
 registered_servers = {}
+
 
 def start_server(bv: BinaryView):
     if bv not in registered_servers:
@@ -643,10 +683,14 @@ def start_server(bv: BinaryView):
         service = Service(bv)
         UNIX_SOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         UNIX_SOCK_PATH.unlink(missing_ok=True)
-        server = ThreadedServer(service=service, socket_path=str(UNIX_SOCK_PATH), protocol_config={
-            "allow_all_attrs": True,
-            "allow_setattr": True,
-        })
+        server = ThreadedServer(
+            service=service,
+            socket_path=str(UNIX_SOCK_PATH),
+            protocol_config={
+                "allow_all_attrs": True,
+                "allow_setattr": True,
+            },
+        )
         spawn(server.start)
 
         notify = Notify(bv, service)
@@ -658,6 +702,7 @@ def start_server(bv: BinaryView):
         # show_message_box(NAME, "server already started")
         print("server already started")
 
+
 def update_server(bv: BinaryView):
     if bv not in registered_servers:
         show_message_box(NAME, "server not started, starting now")
@@ -665,6 +710,7 @@ def update_server(bv: BinaryView):
     else:
         registered_servers[bv].service.push_update()
         show_message_box(NAME, "regenerated")
+
 
 def stop_server(bv: BinaryView):
     if bv not in registered_servers:
@@ -675,6 +721,7 @@ def stop_server(bv: BinaryView):
         del registered_servers[bv]
         # show_message_box(NAME, "server stopped")
         print("server stopped")
+
 
 def stop_all_servers():
     bvs = list(registered_servers.keys())
