@@ -79,8 +79,19 @@ def unstrip_from_package(file: Path, save: bool):
 
     return debuginfo_path
 
-def handle_unstrip(file: Path, save: bool = False):
+def handle_unstrip(file: Path, save: bool = False, force: bool = False):
     debuginfo_path = None
+
+    with open(file, "rb") as fp:
+        raw_elf_bytes = fp.read()
+    elf = minelf.ELF(raw_elf_bytes)
+
+    # eu-unstrip behaves strangely if the file is already unstripped
+    # eu-unstrip on a stripped file works fine. eu-unstrip again will zero some symbols and break the debuginfo
+    if elf.section_from_name(b".debug_info") and not force:
+        err.warn(".debug_info section exists, file already unstripped")
+        err.warn("unstrip anyways with --force (this may leave the file in strange state)")
+        return
 
     if debuginfo_path is None and not save:
         cmd = f"debuginfod-find debuginfo {str(file)}"
@@ -103,4 +114,11 @@ def command(args: Args):
     if not shutil.which("debuginfod-find"):
         err.require("debuginfod-find")
 
-    handle_unstrip(args.file, save=args.save)
+    handle_unstrip(args.file, save=args.save, force=args.force)
+
+# cut open package with knife
+# get the pork out
+# break it up in the pan
+# turn on the heat to low to medium
+# quarter cup of water
+# after 5 minutes stir fry
