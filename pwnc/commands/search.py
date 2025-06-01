@@ -13,7 +13,7 @@ def command(args: Args):
     for version_set in version_sets:
         versions.extend([version.encode() for version in version_set])
 
-    handle = run(["fzf"], input=b"\n".join(versions), encoding=None, capture_output=True)
+    handle = run(["fzf"], input=b"\n".join(versions), encoding=None, capture_output=True, check=False)
     if handle.returncode != 0:
         err.fatal("search cancelled")
 
