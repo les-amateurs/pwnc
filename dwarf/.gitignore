@@ -3,3 +3,4 @@ target/
 *.dwarf
 *.debug
 *.o
+*.bndb

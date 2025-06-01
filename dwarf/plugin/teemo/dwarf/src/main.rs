@@ -269,6 +269,7 @@ fn visit(
         return;
     }
 
+    println!("name = {name}");
     let binja_type = mappings.get(name).unwrap();
     let tag = match binja_type {
         BinjaType::Structure(_) => gimli::DW_TAG_structure_type,
@@ -704,6 +705,8 @@ pub fn main() -> Err {
                 BinjaType::Array(Array { count, target }) => {
                     let id = *dwarf_types.get(&name).unwrap();
                     let unit = dwarf.unit.get_mut(id);
+
+                    println!("target = {:?}", target);
 
                     unit.set(
                         gimli::DW_AT_type,
