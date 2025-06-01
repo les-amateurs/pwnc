@@ -1,5 +1,4 @@
 from .. util import *
-from pathlib import Path
 from .scrape import locate_package
 from .. import minelf
 import shutil

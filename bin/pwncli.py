@@ -111,6 +111,13 @@ def get_main_parser():
     subparser.add_argument("--force", action="store_true")
 
     """
+    Command: search
+    """
+    subparser = subparsers.add_parser(
+        "search", help="search for libcs"
+    )
+
+    """
     Command: patch
     """
     subparser = subparsers.add_parser("patch", help="patch binaries")
@@ -271,6 +278,10 @@ try:
             import pwnc.commands.unstrip
 
             pwnc.commands.unstrip.command(args)
+        case "search":
+            import pwnc.commands.search
+            
+            pwnc.commands.search.command(args)
         case "patch":
             import pwnc.commands.patch
 
