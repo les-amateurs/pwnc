@@ -3,10 +3,25 @@ from .. import err
 from .types import header, section, segment, symbol, reloc, dyntag, note
 
 """
+different loaders might handler overlapping LOAD segments differently.
+"""
+class MappingStyle:
+    LinuxKernel = 0
+    Glibc = 1
+
+"""
 minimal elf parsing that does basically zero validation
 """
 
 ALLOWED_BITS = [32, 64]
+# TODO: configurable page size
+PAGE_SIZE = 0x1000
+
+def round_down_to_page(addr: int):
+    return addr & ~(PAGE_SIZE - 1)
+
+def round_up_to_page(addr: int):
+    return (addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
 
 class ELF:
     def __init__(self, raw_elf_bytes: bytes, bits: int=None, little_endian: bool=None):
@@ -140,6 +155,29 @@ class ELF:
                 offset += ctypes.sizeof(self.Section)
                 self.cached_sections.append(section)
         return self.cached_sections
+    
+    def virtual_memory_segments(self, mapping_style: MappingStyle, combine: bool):
+        load = self.segments
+        load = filter(lambda segment: segment.type == self.Segment.Type.LOAD, load)
+
+        segments: list[tuple[int, bytes]] = []
+        for segment in load:
+            match mapping_style:
+                case MappingStyle.LinuxKernel:
+                    start = round_down_to_page(segment.virtual_address)
+                    end = round_up_to_page(segment.virtual_address + segment.mem_size)
+                    offset = round_down_to_page(segment.offset)
+
+                    content = self.raw_elf_bytes[offset:segment.offset + segment.file_size]
+                    content = content.ljust(end - start, b"\0")
+
+                case MappingStyle.Glibc:
+                    err.fatal("not implemented")
+
+        return segments
+    
+    def virtual_memory(self, addr: int, mapping_style: MappingStyle = MappingStyle.LinuxKernel):
+        pass
 
     @property
     def buildid(self, section: "ELF.Section" = None):
