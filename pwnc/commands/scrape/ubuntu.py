@@ -79,7 +79,15 @@ async def request_num_published(package: str):
     index[package] = num_published
     return num_published
 
-async def request_versions(package: str, batch_start: int, batch_end: int):
+async def request_versions(num_published: int, package: str):
+    ranges = list(range(0, num_published, BATCH_SIZE)) + [num_published]
+    ranges = [(package, ranges[i], ranges[i+1]) for i in range(len(ranges)-1)]
+    
+    versions = await asyncio.gather(*[asyncio.create_task(request_versions_batched(*version_range)) for version_range in ranges])
+    versions = functools.reduce(lambda a, b: a.union(b), versions)
+    return versions
+
+async def request_versions_batched(package: str, batch_start: int, batch_end: int):
     index = Index(f"{DISTRO}-{package}-versions")
     key = f"{package}-{batch_start}-{batch_end}"
     if key in index:
@@ -156,9 +164,7 @@ def provides(elf: minelf.ELF):
         return False
     return True
 
-async def asynchronous_locate(elf: minelf.ELF):
-    global session, sem
-
+async def async_locate(elf: minelf.ELF):
     # packages = ["glibc", "eglibc", "dietlibc", "musl"]
     packages = ["glibc"]
     names = {
@@ -168,28 +174,31 @@ async def asynchronous_locate(elf: minelf.ELF):
         "musl": "musl",
     }
 
+    for package in packages:
+        num_published = await request_num_published(package)
+        versions = await request_versions(num_published, package)
+
+        version = parse_libc_version(elf)
+        if version not in versions:
+            err.fatal(f"unable to find {version} in {DISTRO} snapshot")
+
+        arch = elf_to_architecture(elf)
+        builds = await request_build_pages(package, version, [arch])
+        if arch not in builds:
+            err.fatal(f"architecture {arch} not supported by {package} {version}")
+
+        contents = await request_deb(names[package], version, arch, builds[arch])
+        if contents is not None:
+            return Package(DISTRO, package, version, contents)
+            
+async def async_setup(fn, *args, **kwargs):
+    global session, sem
+
     sem = asyncio.Queue(maxsize=MAX_CONCURRENT)
     async with aiohttp.ClientSession() as session:
-        for package in packages:
-            num_published = await request_num_published(package)
-
-            ranges = list(range(0, num_published, BATCH_SIZE)) + [num_published]
-            ranges = [(package, ranges[i], ranges[i+1]) for i in range(len(ranges)-1)]
-            
-            versions = await asyncio.gather(*[asyncio.create_task(request_versions(*version_range)) for version_range in ranges])
-            versions = functools.reduce(lambda a, b: a.union(b), versions)
-            version = parse_libc_version(elf)
-            if version not in versions:
-                err.fatal(f"unable to find {version} in {DISTRO} snapshot")
-
-            arch = elf_to_architecture(elf)
-            builds = await request_build_pages(package, version, [arch])
-            if arch not in builds:
-                err.fatal(f"architecture {arch} not supported by {package} {version}")
-
-            contents = await request_deb(names[package], version, arch, builds[arch])
-            if contents is not None:
-                return Package(DISTRO, package, version, contents)
+        return await fn(*args, **kwargs)
 
 def locate(elf: minelf.ELF):
-    return asyncio.get_event_loop().run_until_complete(asynchronous_locate(elf))
+    return asyncio.get_event_loop().run_until_complete(
+        async_setup(async_locate, *(elf,)),
+    )

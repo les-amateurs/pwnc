@@ -14,6 +14,7 @@ from pwnlib import gdb as gdbutils
 from pwnlib import elf
 from pwnlib.tubes.process import process
 from pwnlib.tubes.tube import tube
+import pwn
 
 from ..commands import unstrip
 from ..util import *
@@ -280,12 +281,18 @@ class Gdb:
 
     def pid(self):
         return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
+    
+    def prompt(self):
+        self.conn.run("prompt")
 
     def continue_nowait(self):
         self.conn.run("continue_nowait")
 
     def continue_and_wait(self):
         self.conn.run("continue")
+
+    def cont(self):
+        self.continue_and_wait()
 
     def wait_for_stop(self, timeout=None) -> bool:
         return self.conn.run("wait", timeout=timeout)
@@ -309,14 +316,10 @@ class Gdb:
             spec = location
 
         if callback is not None:
-            class Bp(self.Breakpoint):
-                def hit(self):
-                    return callback()
-            bp = Bp(spec)
+            bp = self.conn.run("set_breakpoint", spec, self.conn.reverse_registry[callback])
         else:
-            bp = self.Breakpoint(spec)
+            bp = self.conn.run("set_breakpoint", spec)
         self.prompt()
-        return bp
 
     def execute(self, cmd: str, to_string: bool = False, from_tty: bool = False) -> str | None:
         try:

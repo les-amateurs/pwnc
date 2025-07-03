@@ -88,6 +88,9 @@ async def my_exited():
 async def my_read_memory(addr: int, size: int):
     return gdb.selected_inferior().read_memory(addr, size).tobytes()
 
+async def my_prompt():
+    gdb.write(gdb.prompt_hook(lambda: None))
+
 callbacks: list[str] = []
 waiters: list[Event] = []
 
@@ -126,6 +129,7 @@ s.register("interrupt", my_interrupt)
 s.register("running", my_running)
 s.register("exited", my_exited)
 s.register("read_memory", my_read_memory)
+s.register("prompt", my_prompt)
 
 gdb.events.stop.connect(stopped)
 gdb.events.exited.connect(exited)
