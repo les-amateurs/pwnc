@@ -160,7 +160,7 @@ def get_main_parser():
     subparser.add_argument("--initramfs", type=PathArg, required=False)
     subparser.add_argument("--gzipped", action="store_true")
     subparser.add_argument(
-        "--gzip-level", type=int, choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        "--gzip-level", type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9], default=1
     )
 
     subparser = kernel.add_parser(
