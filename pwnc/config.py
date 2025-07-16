@@ -1,6 +1,7 @@
 import toml
 import atexit
 import os
+import platform
 from pathlib import Path
 
 CONFIG_FILE = "pwnc.toml"
@@ -11,9 +12,14 @@ index-cache = true
 """
 
 def locate_global_config_directory():
-    if "XDG_CONFIG_HOME" in os.environ:
-        return Path(os.environ["XDG_CONFIG_HOME"])
-    return Path(os.environ["HOME"]) / ".config" / "pwnc"
+    home = Path.home()
+
+    if platform.system() == "Windows":
+        config_root = Path(os.getenv("APPDATA", home / "AppData" / "Roaming"))
+    else:
+        config_root = Path(os.getenv("XDG_CONFIG_HOME", home / ".config"))
+
+    return config_root / "pwnc"
 
 def load_global_config():
     config_path = config = locate_global_config_directory() / CONFIG_FILE
