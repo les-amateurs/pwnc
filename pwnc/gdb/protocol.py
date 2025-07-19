@@ -1,37 +1,23 @@
-# class Thing:
-#     def __await__(self):
-#         return (yield self)
-
-# async def a():
-#     val = await Thing()
-#     print(val)
-#     return 5
-
-# future = a()
-# print(dir(future))
-# print(future.send)
-# print(future.cr_suspended)
-# future.send(None)
-# print(future.cr_suspended)
-# future.send(2)
-
-# exit(0)
-
 import socket
 import os
 import threading
 import io
 import base64
 import queue
-from typing import Coroutine
+import builtins
+from typing import Callable
+from ..util import err
 
 
 class Method:
-    def __init__(self, fn, args: list, kwargs: dict):
-        # print(fn, args, kwargs)
+    def __init__(self, fn, name: str, args: list, kwargs: dict):
         self.fn = fn
+        self.name = name
         self.args = args
         self.kwargs = kwargs
+
+    def __repr__(self):
+        return f"Method(name={self.name})"
 
     def __call__(self):
         return self.fn(*self.args, **self.kwargs)
@@ -46,28 +32,33 @@ class Callback:
         return (yield self)
 
     def __call__(self, *args, **kwargs):
-        return self.server.invoke(self.method, *args, **kwargs)
-
-
-class Result:
-    def __init__(self):
-        self.event = threading.Event()
-        self.val = None
-
-    def __await__(self):
-        return (yield self)
+        return self.server.run(self.method, *args, **kwargs)
 
 
 class Server:
-    def __init__(self, name: str, socket_path: str, listen: bool):
+    class ForwardedException(Exception):
+        pass
+
+    class StopException(Exception):
+        pass
+
+    class EmptyMessageException(Exception):
+        pass
+
+    def __init__(self, name: str, socket_path: str, listen: bool, registry: dict[str, Callable] = {}):
+        # print(f"server pid = {threading.get_native_id()}")
         self.name = name
         self.socket_path = socket_path
         self.listen = listen
-        self.registry = dict()
-        self.reverse_registry = dict()
-        self.values = queue.LifoQueue()
+        self.registry = registry.copy()
+        self.reverse_registry = dict(((v, k) for k, v in registry.items()))
+        self.values = queue.Queue()
         self.routines = list()
         self.thread: threading.Thread = None
+        self.callback_id = 0
+        self.reader: io.BufferedReader = None
+        self.remote = False
+        self.native_id = None
 
         if listen:
             try:
@@ -76,19 +67,20 @@ class Server:
                 pass
             self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.listener.bind(socket_path)
-            print("listening...")
+            err.info("listening...")
             self.listener.listen(1)
             self.sock, _ = self.listener.accept()
         else:
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.sock.connect(socket_path)
+        self.reader = io.BufferedReader(io.FileIO(self.sock.fileno()))
 
     def start(self):
         self.thread = threading.Thread(target=self.receiver, daemon=True)
         self.thread.start()
 
     def stop(self):
-        self.sock.send(base64.b64encode(b"stop") + b"\n" + b"A" * 512)
+        self.sock.send(base64.b64encode(b"stop"))
 
     def register(self, name: str, fn):
         self.registry[name] = fn
@@ -117,155 +109,148 @@ class Server:
                 for v in val:
                     packet.append(self.serialize(v))
         elif callable(val):
+            if val not in self.reverse_registry:
+                callback_id = self.callback_id
+                self.callback_id += 1
+                self.register(f"anon-{callback_id}", val)
             tag = b"callback"
             packet = [self.serialize(self.reverse_registry[val])]
         elif val is None:
             tag = b"none"
             packet = []
         else:
-            raise Exception(f"Unknown type: {type(val)}")
+            raise TypeError(f"Unknown type: {type(val)}")
 
         packet = [base64.b64encode(tag)] + packet
         return b"\n".join(packet)
 
-    def deserialize(self, next_line):
-        tag = next_line()
+    def next_line(self):
+        line = self.reader.readline()
+        if not line:
+            # print("stopping...")
+            raise Server.EmptyMessageException
+        line = base64.b64decode(line)
+        # print(f"{self.name} got line {line}")
+        return line
+
+    def _deserialize(self):
+        tag = self.next_line()
+        # print(f"tag = {tag}")
         match tag:
             case b"str":
-                return next_line().decode(errors="ignore")
+                return self.next_line().decode(errors="ignore")
             case b"bytes":
-                return next_line()
+                return self.next_line()
             case b"int":
-                return int(next_line())
+                return int(self.next_line())
             case b"bool":
-                line = next_line()
+                line = self.next_line()
                 return True if line == b"True" else False
             case b"list":
-                size = self.deserialize(next_line)
-                items = [self.deserialize(next_line) for _ in range(size)]
+                size = self._deserialize()
+                items = [self._deserialize() for _ in range(size)]
                 return items
             case b"empty":
                 return []
             case b"call":
-                method = self.deserialize(next_line)
-                args = self.deserialize(next_line)
-                kwords = self.deserialize(next_line)
-                kwargs = self.deserialize(next_line)
+                method = self._deserialize()
+                args = self._deserialize()
+                kwords = self._deserialize()
+                kwargs = self._deserialize()
                 kwargs = dict(zip(kwords, kwargs))
-                return Method(self.registry[method], args, kwargs)
+                return Method(self.registry[method], method, args, kwargs)
             case b"callback":
-                method = self.deserialize(next_line)
+                method = self._deserialize()
                 return Callback(method, self)
             case b"none":
                 return None
             case b"stop":
-                raise StopIteration
+                raise Server.StopException
+
+    def deserialize(self, from_remote=False):
+        if self.remote and from_remote:
+            return self.values.get()
+
+        val = self._deserialize()
+        if self.remote and not from_remote:
+            print(f"PUTTTING = {val}")
+            self.values.put(val)
+            raise Server.ForwardedException
+        else:
+            return val
 
     def receiver(self):
-        reader = io.BufferedReader(io.FileIO(self.sock.fileno()))
-
-        def next_line():
-            line = reader.readline()
-            if not line:
-                # print("stopping...")
-                raise StopIteration
-            line = base64.b64decode(line)
-            # print(f"{self.name} got line {line}")
-            return line
+        # print(f"thread pid = {threading.get_native_id()}")
+        self.native_id = threading.get_native_id()
 
         while True:
             try:
-                val = self.deserialize(next_line)
-            except StopIteration:
+                val = self.deserialize()
+            except Server.EmptyMessageException:
                 break
-
-            if isinstance(val, Method):
-                # print(f"{self.name} got {self.reverse_registry[val.fn]}")
-                routine: Coroutine = val()
-                # print(f"{self.name} calling {self.reverse_registry[val.fn]}")
-                assert routine.cr_suspended == False
-                self.routines.append(routine)
-
-                # if not routine.cr_suspended:
-                #     try:
-                #         # print("starting routine")
-                #         # print(dir(routine))
-                #         routine.send(None)
-                #         # print("routine done")
-                #         self.routines.append(routine)
-                #     except StopIteration as e:
-                #         # print(f"{self.name} routine finished immediately")
-                #         self.send(e.value)
-                # else:
-                #     self.routines.append(routine)
-
-            # print(f"{self.name} received: {val}")
-            try:
-                routine = self.routines.pop()
-                if routine.cr_suspended == False:
-                    routine.send(None)
-                else:
-                    thing = routine.send(val)
-                # print(f"{self.name} thing = {thing}")
-                self.routines.append(routine)
-            except StopIteration as e:
-                # print(f"{self.name} completed with {e.value}")
-                # print(f"{self.name} routines = {self.routines}")
-                self.send(e.value)
-            except IndexError:
-                # means we've exhausted all the routines and we are done
+            except Server.StopException:
+                break
+            except Server.ForwardedException:
+                print("forwarded value")
                 continue
 
-            # if self.routines:
-            #     routine = self.routines.pop()
-            #     if not routine.cr_suspended:
-            #         try:
-            #             coro = routine.send(None)
-            #             self.routines.append(routine)
-            #         except StopIteration as e:
-            #             # print(f"{self.name} routine finished immediately")
-            #             self.send(e.value)
-            #     else:
-            #         self.routines.append(routine)
+            if isinstance(val, Method):
+                self.send(val())
+            else:
+                err.warn(f"WTF: {val}")
 
+        err.info("stopping...")
         try:
             self.sock.send(base64.b64encode(b"stop") + b"\n" + b"A" * 512)
         except OSError:
-            # print("peer already stopped")
+            err.warn("peer already stopped")
             pass
 
-        exit()
+        builtins.exit()
 
     def send(self, val):
         packet = self.serialize(val)
         self.sock.send(packet + b"\n")
-        # print(f"{self.name} SENT {val}")
+        # builtins.print(f"{self.name} SENT {val}")
 
     def run(self, method: str, *args, **kwargs):
-        routine = self.invoke(method, *args, **kwargs)
-        try:
-            res = routine.send(None)
-            self.routines.append(routine)
-            # print(f"waiting for completion")
-            res.event.wait()
-            # print(f"completed")
-            return res.val
-        except StopIteration as e:
-            return e.value
+        print(method)
+        print(f"remote = {self.remote}")
+        remote_orig = self.remote
+        if threading.get_native_id() != self.native_id:
+            print("setting remote")
+            self.remote = True
 
-    async def invoke(self, method: str, *args, **kwargs):
-        parts = [
-            base64.b64encode(b"call"),
-            self.serialize(method),
-            self.serialize(args),
-            self.serialize(list(kwargs.keys())),
-            self.serialize(list(kwargs.values())),
-        ]
-        packet = b"\n".join(parts)
-        self.sock.send(packet + b"\n")
-        # print(f"{self.name} waiting for response")
-        result = Result()
-        val = await result
-        result.val = val
-        result.event.set()
-        return val
+        try:
+            parts = [
+                base64.b64encode(b"call"),
+                self.serialize(method),
+                self.serialize(args),
+                self.serialize(list(kwargs.keys())),
+                self.serialize(list(kwargs.values())),
+            ]
+            packet = b"\n".join(parts)
+            self.sock.send(packet + b"\n")
+            # print(f"[{self.name}] (RUN) running {method}")
+
+            while True:
+                try:
+                    print("attempting to deserialize value")
+                    print(self.remote)
+                    val = self.deserialize(True)
+                except Server.StopException:
+                    break
+                except Server.EmptyMessageException:
+                    break
+
+                # print(f"[{self.name}] received val = {val}")
+
+                if isinstance(val, Callback):
+                    self.send(val())
+                elif isinstance(val, Method):
+                    self.send(val())
+                else:
+                    # print(f"[{self.name}] (RUN) returning val = {val}")
+                    return val
+        finally:
+            self.remote = remote_orig

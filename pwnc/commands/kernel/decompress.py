@@ -20,7 +20,9 @@ def do_decompress(initramfs: Path, rootfs: Path):
             pass
 
         rootfs.mkdir(exist_ok=True)
-        run(f"cpio -idmu < {tempfile.name}", cwd=rootfs)
+        status = run(f"cpio -idmu < {tempfile.name}", cwd=rootfs, check=False)
+        if status.returncode != 0:
+            err.warn(f"cpio exited with {status.returncode}")
 
     return gzipped
 

@@ -27,6 +27,7 @@ def elf_to_architecture(elf: minelf.ELF):
         case Machine.RISCV:
             if elf.bits == 64:
                 return "riscv64"
+    return None
 
 
 def request(url: str):
