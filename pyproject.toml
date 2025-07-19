@@ -12,6 +12,20 @@ toml = "^0.10.2"
 argcomplete = "^3.5.1"
 colorama = "^0.4.6"
 
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = false
+line-ending = "lf"
+
+[tool.ruff.lint]
+ignore = ["F403", "F405"]
+exclude = ["pwnc/gdb/*"]
+fixable = ["F541"]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

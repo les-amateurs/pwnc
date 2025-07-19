@@ -5,9 +5,12 @@ from .types import header, section, segment, symbol, reloc, dyntag, note
 """
 different loaders might handler overlapping LOAD segments differently.
 """
+
+
 class MappingStyle:
     LinuxKernel = 0
     Glibc = 1
+
 
 """
 minimal elf parsing that does basically zero validation
@@ -17,14 +20,17 @@ ALLOWED_BITS = [32, 64]
 # TODO: configurable page size
 PAGE_SIZE = 0x1000
 
+
 def round_down_to_page(addr: int):
     return addr & ~(PAGE_SIZE - 1)
+
 
 def round_up_to_page(addr: int):
     return (addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
 
+
 class ELF:
-    def __init__(self, raw_elf_bytes: bytes, bits: int=None, little_endian: bool=None):
+    def __init__(self, raw_elf_bytes: bytes, bits: int = None, little_endian: bool = None):
         if bits is not None and bits not in ALLOWED_BITS:
             err.fatal(f"{bits} not one of {ALLOWED_BITS}")
 
@@ -59,7 +65,7 @@ class ELF:
         if not self.cached_header_type:
             self.cached_header_type = header.generate(self.bits, self.little_endian)
         return self.cached_header_type
-    
+
     @property
     def Segment(self):
         if not self.cached_segment_type:
@@ -77,7 +83,7 @@ class ELF:
         if not self.cached_symbol_type:
             self.cached_symbol_type = symbol.generate(self.bits, self.little_endian)
         return self.cached_symbol_type
-    
+
     @property
     def Reloc(self):
         if not self.cached_reloc_type:
@@ -89,13 +95,13 @@ class ELF:
         if not self.cached_reloca_type:
             self.cached_reloca_type = reloc.generate(self.bits, self.little_endian, True)
         return self.cached_reloca_type
-    
+
     @property
     def Dyntag(self):
         if not self.cached_dyntag_type:
             self.cached_dyntag_type = dyntag.generate(self.bits, self.little_endian)
         return self.cached_dyntag_type
-    
+
     @property
     def Note(self):
         if not self.cached_note_type:
@@ -113,9 +119,12 @@ class ELF:
         if not self.cached_bits:
             """ guess bits from ident """
             match self.ident.bits:
-                case 1: self.cached_bits = 32
-                case 2: self.cached_bits = 64
-                case _: err.fatal(f"failed to guess bit width ({self.ident.bits})")
+                case 1:
+                    self.cached_bits = 32
+                case 2:
+                    self.cached_bits = 64
+                case _:
+                    err.fatal(f"failed to guess bit width ({self.ident.bits})")
         return self.cached_bits
 
     @property
@@ -123,9 +132,12 @@ class ELF:
         if not self.cached_little_endian:
             """ guess little endian from ident """
             match self.ident.endianness:
-                case 1: self.cached_little_endian = True
-                case 2: self.cached_little_endian = False
-                case _: err.fatal("failed to guess endianness")
+                case 1:
+                    self.cached_little_endian = True
+                case 2:
+                    self.cached_little_endian = False
+                case _:
+                    err.fatal("failed to guess endianness")
         return self.cached_little_endian
 
     @property
@@ -133,7 +145,7 @@ class ELF:
         if not self.cached_header:
             self.cached_header = self.Header.from_buffer(self.raw_elf_bytes)
         return self.cached_header
-    
+
     @property
     def segments(self) -> list[segment.Segment]:
         if not self.cached_segments:
@@ -155,7 +167,7 @@ class ELF:
                 offset += ctypes.sizeof(self.Section)
                 self.cached_sections.append(section)
         return self.cached_sections
-    
+
     def virtual_memory_segments(self, mapping_style: MappingStyle, combine: bool):
         load = self.segments
         load = filter(lambda segment: segment.type == self.Segment.Type.LOAD, load)
@@ -168,14 +180,14 @@ class ELF:
                     end = round_up_to_page(segment.virtual_address + segment.mem_size)
                     offset = round_down_to_page(segment.offset)
 
-                    content = self.raw_elf_bytes[offset:segment.offset + segment.file_size]
+                    content = self.raw_elf_bytes[offset : segment.offset + segment.file_size]
                     content = content.ljust(end - start, b"\0")
 
                 case MappingStyle.Glibc:
                     err.fatal("not implemented")
 
         return segments
-    
+
     def virtual_memory(self, addr: int, mapping_style: MappingStyle = MappingStyle.LinuxKernel):
         pass
 
@@ -200,10 +212,10 @@ class ELF:
         offset = section.name
         while contents[offset] != 0:
             offset += 1
-        return contents[section.name:offset]
+        return contents[section.name : offset]
 
-    def section_content(self, section: "ELF.Section", element = None):
-        content = memoryview(self.raw_elf_bytes)[section.offset:section.offset+section.size]
+    def section_content(self, section: "ELF.Section", element=None):
+        content = memoryview(self.raw_elf_bytes)[section.offset : section.offset + section.size]
         if element is None:
             return content
         else:
@@ -211,7 +223,7 @@ class ELF:
             for i in range(0, len(content), ctypes.sizeof(element)):
                 elements.append(element.from_buffer(content, i))
             return elements
-    
+
     def notes(self, content: bytes) -> list[note.Note]:
         offset = 0
         length = len(content)
@@ -219,23 +231,23 @@ class ELF:
         while offset < length:
             note = self.Note.from_buffer_copy(content, offset)
             offset += ctypes.sizeof(self.Note)
-            name = content[offset:offset+note.name_size].tobytes()
+            name = content[offset : offset + note.name_size].tobytes()
             offset = (offset + note.name_size) + 3 & ~3
-            description = content[offset:offset+note.description_size].tobytes()
+            description = content[offset : offset + note.description_size].tobytes()
             offset += note.description_size
 
             note.name = name
             note.description = description
             notes.append(note)
-        
+
         return notes
 
     def section_from_name(self, name: bytes):
         for section in self.sections:
             if self.section_name(section) == name:
                 return section
-            
-    def cstr(self, offset: int, maxlen = None):
+
+    def cstr(self, offset: int, maxlen=None):
         start = offset
         if maxlen is None:
             maxlen = len(self.raw_elf_bytes)

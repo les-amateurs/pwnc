@@ -4,6 +4,7 @@ from pwnlib.util.lists import group
 from pwnlib.util.fiddling import b64e
 from pwn import log
 
+
 def remote_upload(conn: tube, contents: bytes, workdir="/tmp", shell_prefix=b" $ ", chunk_size=500):
     exploit = gzip.compress(contents)
     # context.log_level = "debug"

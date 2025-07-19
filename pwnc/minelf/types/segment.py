@@ -1,5 +1,6 @@
 from .util import *
 
+
 class Type:
     NULL = 0
     LOAD = 1
@@ -14,25 +15,27 @@ class Type:
     LOPROC = 0x70000000
     HIPROC = 0x7FFFFFFF
 
+
 class Flags:
     X = 0x01
     W = 0x02
     R = 0x04
 
+
 def generate(bits: int, little_endian: bool):
     addrsize = addrsize_from_bits(bits)
-    fields = [
-        ("type", u32)
-    ]
+    fields = [("type", u32)]
     if bits == 64:
         fields.append(("flags", u32))
-    fields.extend([
-        ("offset", addrsize),
-        ("virtual_address", addrsize),
-        ("physical_address", addrsize),
-        ("file_size", addrsize),
-        ("mem_size", addrsize)
-    ])
+    fields.extend(
+        [
+            ("offset", addrsize),
+            ("virtual_address", addrsize),
+            ("physical_address", addrsize),
+            ("file_size", addrsize),
+            ("mem_size", addrsize),
+        ]
+    )
     if bits == 32:
         fields.append(("flags", u32))
     fields.append(("alignment", addrsize))
@@ -42,7 +45,9 @@ def generate(bits: int, little_endian: bool):
 
         Type = Type
         Flags = Flags
+
     return Segment
+
 
 class Segment:
     type: u32

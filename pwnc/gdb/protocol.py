@@ -20,11 +20,11 @@
 import socket
 import os
 import threading
-import time
 import io
 import base64
 import queue
 from typing import Coroutine
+
 
 class Method:
     def __init__(self, fn, args: list, kwargs: dict):
@@ -35,6 +35,7 @@ class Method:
 
     def __call__(self):
         return self.fn(*self.args, **self.kwargs)
+
 
 class Callback:
     def __init__(self, method: str, server: "Server"):
@@ -47,6 +48,7 @@ class Callback:
     def __call__(self, *args, **kwargs):
         return self.server.invoke(self.method, *args, **kwargs)
 
+
 class Result:
     def __init__(self):
         self.event = threading.Event()
@@ -54,6 +56,7 @@ class Result:
 
     def __await__(self):
         return (yield self)
+
 
 class Server:
     def __init__(self, name: str, socket_path: str, listen: bool):
@@ -170,7 +173,6 @@ class Server:
             # print(f"{self.name} got line {line}")
             return line
 
-
         while True:
             try:
                 val = self.deserialize(next_line)
@@ -257,7 +259,7 @@ class Server:
             self.serialize(method),
             self.serialize(args),
             self.serialize(list(kwargs.keys())),
-            self.serialize(list(kwargs.values()))
+            self.serialize(list(kwargs.values())),
         ]
         packet = b"\n".join(parts)
         self.sock.send(packet + b"\n")

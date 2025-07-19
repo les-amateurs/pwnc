@@ -1,8 +1,10 @@
 """GDB Python API bridge."""
+
 import gdb
 from pwnc.gdb import protocol
 from threading import Event
 import time
+
 
 class Result:
     def __init__(self):
@@ -15,6 +17,7 @@ class Result:
 
     def wait(self):
         self.event.wait()
+
 
 async def my_execute(command, to_string=False, from_tty=True, auto=True):
     # gdb.write(gdb.prompt_hook(lambda: None))
@@ -30,31 +33,40 @@ async def my_execute(command, to_string=False, from_tty=True, auto=True):
     gdb.flush()
     return ret
 
+
 async def my_ni():
     def nexti():
         gdb.execute("ni")
+
     gdb.post_event(lambda: nexti())
 
-async def my_set_breakpoint(loc, callback = None):
+
+async def my_set_breakpoint(loc, callback=None):
     if callback:
+
         class Bp(gdb.Breakpoint):
             def stop(self):
                 Cache.reset_gef_caches()
                 return s.run(callback)
                 # callbacks.append(callback)
                 return True
+
         Bp(loc)
     else:
         gdb.Breakpoint(loc)
 
+
 async def my_eval(expr):
     return int(gdb.parse_and_eval(expr))
+
 
 async def my_interrupt():
     gdb.post_event(lambda: gdb.execute("interrupt"))
 
+
 async def my_continue_nowait():
     gdb.post_event(lambda: gdb.execute("continue &"))
+
 
 async def my_continue_wait():
     # print("continue and wait")
@@ -62,6 +74,7 @@ async def my_continue_wait():
     waiters.append(stopped)
     gdb.post_event(lambda: gdb.execute("continue &"))
     stopped.wait()
+
 
 async def my_wait(timeout=None):
     thread = gdb.selected_thread()
@@ -77,22 +90,28 @@ async def my_wait(timeout=None):
         waiters.pop()
     return tout
 
+
 async def my_running():
     if gdb.selected_thread() is None:
         return False
     return gdb.selected_thread().is_running()
 
+
 async def my_exited():
     return gdb.selected_thread() is None
+
 
 async def my_read_memory(addr: int, size: int):
     return gdb.selected_inferior().read_memory(addr, size).tobytes()
 
+
 async def my_prompt():
     gdb.write(gdb.prompt_hook(lambda: None))
 
+
 callbacks: list[str] = []
 waiters: list[Event] = []
+
 
 def stopped(e: gdb.Event):
     stop = True
@@ -105,17 +124,21 @@ def stopped(e: gdb.Event):
 
     if stop:
         if waiters:
+
             def unblock():
                 for waiter in waiters:
                     waiter.set()
                 waiters.clear()
+
             gdb.post_event(unblock)
     else:
         gdb.post_event(lambda: gdb.execute("continue &"))
 
+
 def exited(e: gdb.Event):
     for waiter in waiters:
         waiter.set()
+
 
 s = protocol.Server("bridge", socket_path, True)
 s.register("execute", my_execute)
@@ -134,8 +157,10 @@ s.register("prompt", my_prompt)
 gdb.events.stop.connect(stopped)
 gdb.events.exited.connect(exited)
 
-def late_start(e = None):
+
+def late_start(e=None):
     gdb.events.before_prompt.disconnect(late_start)
     s.start()
+
 
 gdb.events.before_prompt.connect(late_start)

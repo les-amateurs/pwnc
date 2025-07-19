@@ -5,23 +5,30 @@ DISCARD = [
     ".interp",
     ".comment*",
     ".note.*",
-    ".gnu.*", ".gnu_*",
+    ".gnu.*",
+    ".gnu_*",
     ".eh_frame*",
     ".rela.* ",
-    ".dynsym", ".dynsym.*",
-    ".dynstr", ".dynstr.*",
-    ".symtab", ".symtab.*",
-    ".strtab", ".strtab.*",
+    ".dynsym",
+    ".dynsym.*",
+    ".dynstr",
+    ".dynstr.*",
+    ".symtab",
+    ".symtab.*",
+    ".strtab",
+    ".strtab.*",
     ".shstrtab.*",
     ".dynamic",
     ".debug_*",
     ".ARM.*",
-    ".hash", ".hash.*",
+    ".hash",
+    ".hash.*",
 ]
-KEEP = [ ".entry.init", ".entry", ".text", ".rodata", ".data", ".entry.data", ".bss" ]
+KEEP = [".entry.init", ".entry", ".text", ".rodata", ".data", ".entry.data", ".bss"]
 
 gcc_linker_script = (Path(__file__).parent / "gcc-linker.ld").absolute()
 zig_linker_script = (Path(__file__).parent / "zig-linker.ld").absolute()
+
 
 def command(args: Args, extra: list[str]):
     if len(extra) != 0 and extra[0] == "--":
@@ -41,7 +48,7 @@ def command(args: Args, extra: list[str]):
 
     match args.backend:
         case "gcc":
-            extra = f"-nostdlib -nostartfiles -Os"
+            extra = "-nostdlib -nostartfiles -Os"
         case "zig":
             extra = f"{target} -nostartfiles -Os"
         case _:
@@ -63,7 +70,7 @@ def command(args: Args, extra: list[str]):
 
             payload = b""
             base = None
-            for section in sorted(elf.sections, key = lambda section: section.address):
+            for section in sorted(elf.sections, key=lambda section: section.address):
                 if elf.section_name(section).tobytes().decode() in KEEP:
                     if base is None:
                         base = section.address

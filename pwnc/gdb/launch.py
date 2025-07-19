@@ -25,6 +25,7 @@ try:
 except:
     pass
 
+
 class ObjfileSymbols:
     def __init__(self, objfile: "gdb.Objfile", raw: bool = True):
         self.objfile = objfile
@@ -40,9 +41,10 @@ class ObjfileSymbols:
 
     def __getattr__(self, symbol):
         return self.symbol_address(symbol)
-    
+
     def __getitem__(self, symbol):
         return self.symbol_address(symbol)
+
 
 class Objfile:
     def __init__(self, objfile: "gdb.Objfile"):
@@ -53,13 +55,14 @@ class Objfile:
     @property
     def sym(self):
         return self._sym
-    
+
     @property
     def lookup(self):
         return self._lookup
 
     def __repr__(self):
         return "<Objfile for {!r}>".format(self.objfile.filename)
+
 
 class Objfiles:
     def __init__(self, gdb: "gdb"):
@@ -106,17 +109,19 @@ class Objfiles:
         if type(objfile) == type(""):
             return self.objfile_for_path(objfile)
         return self.objfiles[objfile]
-    
+
     def __repr__(self):
         return str(list(self.objfiles.values()))
-    
+
+
 class HexInt(int):
     def __new__(self, val):
         return super().__new__(self, val)
-    
+
     def __repr__(self):
         return f"{self:#x}"
-    
+
+
 class Registers:
     gdb: "Gdb"
 
@@ -130,11 +135,14 @@ class Registers:
             return None
         val = HexInt(val)
         return val
-    
+
     def __setattr__(self, key: str, val: int):
         val = self.gdb.parse_and_eval(f"${key} = {val}")
 
+
 """ Gdb copied from pwntools """
+
+
 class Gdb:
     def __init__(self, conn, binary: elf.ELF = None, resolve_debuginfo: bool = True, **kwargs):
         gdbref = self
@@ -143,10 +151,12 @@ class Gdb:
         self.regs = Registers(self)
 
         self.stopped = threading.Event()
+
         def stop_handler(event):
             self.stopped.set()
+
         self.events.stop.connect(stop_handler)
-        
+
         class ProxyBreakpoint(gdbutils.Breakpoint):
             def __init__(self, *args, **kwargs):
                 super().__init__(conn, *args, **kwargs)
@@ -158,7 +168,7 @@ class Gdb:
                 if val not in [True, False]:
                     return True
                 return val
-            
+
             def wait(self, fn):
                 def wrapper(*args, **kwargs):
                     count = self.count
@@ -167,7 +177,7 @@ class Gdb:
                         time.sleep(0.1)
 
                 return wrapper
-            
+
             def hit(self):
                 return True
 
@@ -190,13 +200,13 @@ class Gdb:
                 if not self._objfile:
                     raise FileNotFoundError("objfile not loaded yet")
                 return self._objfile
-                
+
             @property
             def libc(self):
                 for lib in self.libs:
-                    if '/libc.' in lib or '/libc-' in lib:
+                    if "/libc." in lib or "/libc-" in lib:
                         return ELF(lib)
-                
+
         self.ELF = ELF
         if binary is not None:
             self.file = ELF(binary.path)
@@ -221,7 +231,9 @@ class Gdb:
             mappings = {pathlib.Path(line[-1]).name: int(line[0], 16) for line in reversed(mappings)}
 
             cache = pathlib.Path("_cache")
-            working_directory = Path(self.conn.root.execute("info proc cwd", to_string=True).strip()[:-1].split("cwd = '", maxsplit=1)[1])
+            working_directory = Path(
+                self.conn.root.execute("info proc cwd", to_string=True).strip()[:-1].split("cwd = '", maxsplit=1)[1]
+            )
             print(working_directory)
             pid = self.pid()
 
@@ -229,7 +241,7 @@ class Gdb:
                 if library not in loaded:
                     cache.mkdir(exist_ok=True)
                     cached = cache / pathlib.Path(library).name
-                    
+
                     if not str(library).startswith("/"):
                         library = working_directory / library
 
@@ -244,12 +256,12 @@ class Gdb:
                             if str(linked).startswith("/"):
                                 remote_path = remote_root / linked.relative_to("/")
                             else:
-                                remote_path = (remote_path.parent / remote_path.readlink())
+                                remote_path = remote_path.parent / remote_path.readlink()
 
                         shutil.copy(remote_path, cached, follow_symlinks=True)
 
                     lib = elf.ELF(cached, checksec=False)
-                    if not bool(lib.get_section_by_name('.debug_info') or lib.get_section_by_name('.zdebug_info')):
+                    if not bool(lib.get_section_by_name(".debug_info") or lib.get_section_by_name(".zdebug_info")):
                         try:
                             unstrip.handle_unstrip(cached.absolute())
                             err.info(f"unstripped {lib}")
@@ -272,7 +284,11 @@ class Gdb:
                     for section in lib.sections:
                         # SHF_ALLOC
                         if section.header.sh_flags & 2 != 0:
-                            cmd += ["-s", section.name, "{:#x}".format(base + section.header.sh_addr)]
+                            cmd += [
+                                "-s",
+                                section.name,
+                                "{:#x}".format(base + section.header.sh_addr),
+                            ]
 
                     cmd = " ".join(cmd)
                     # print(cmd)
@@ -283,7 +299,7 @@ class Gdb:
 
     def pid(self):
         return int(self.conn.root.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
-    
+
     def wait_for_stop(self):
         if self.gdb.selected_thread().is_stopped():
             return
@@ -307,7 +323,7 @@ class Gdb:
     def prompt(self):
         self.conn.root.gdb.write(self.conn.root.gdb.prompt_hook(lambda: None))
 
-    def bp(self, location, callback = None):
+    def bp(self, location, callback=None):
         kind = str(type(location))
         if "gdb.Value" in kind:
             spec = location.format_string(raw=True, styling=False, address=False)
@@ -317,16 +333,24 @@ class Gdb:
             spec = location
 
         if callback is not None:
+
             class Bp(self.Breakpoint):
                 def hit(self):
                     return callback()
+
             bp = Bp(spec)
         else:
             bp = self.Breakpoint(spec)
         self.prompt()
         return bp
 
-    def execute(self, cmd: str, to_string: bool = False, from_tty: bool = False, print: bool = True):
+    def execute(
+        self,
+        cmd: str,
+        to_string: bool = False,
+        from_tty: bool = False,
+        print: bool = True,
+    ):
         if print:
             self.conn.root.gdb.write(f"{cmd}\n")
 
@@ -345,18 +369,21 @@ class Gdb:
     def __getattr__(self, item):
         return getattr(self.conn.root.gdb, item)
 
+
 def on(option: bool):
     return "on" if option else "off"
 
+
 def no(disable: bool):
     return "no-" if disable else ""
+
 
 def collect_options(fn, kwargs: dict):
     options = {}
     for name, param in inspect.signature(fn).parameters.items():
         if name == "options":
             continue
-        
+
         if param.kind == param.POSITIONAL_OR_KEYWORD and param.default != param.empty:
             val = kwargs.get(name, None) or param.default
             if val is None:
@@ -368,12 +395,14 @@ def collect_options(fn, kwargs: dict):
             options[name] = val
     return options
 
+
 def with_options(fn):
     def wrapper(cls, *args, **kwargs):
         options = collect_options(fn, kwargs)
         return fn(cls, *args, **kwargs, options=options)
-    
+
     return wrapper
+
 
 def select_terminal(headless: bool):
     if headless:
@@ -381,8 +410,15 @@ def select_terminal(headless: bool):
     else:
         return "kitty"
 
+
 class Bridge:
-    def __init__(self, aslr: bool = True, index_cache: bool = None, index_cache_path: bool = None, **kwargs):
+    def __init__(
+        self,
+        aslr: bool = True,
+        index_cache: bool = None,
+        index_cache_path: bool = None,
+        **kwargs,
+    ):
         self.gdbscript = []
         self.launch_directory = pathlib.Path(mkdtemp())
         self.socket_path = str(self.launch_directory / "socket")
@@ -418,20 +454,18 @@ class Bridge:
         self.background_server = BgServingThread(connection, callback=lambda: None)
         return connection
 
+
 @with_options
 def attach(
     target: str | tuple[str, int],
     elf: elf.ELF = None,
-
     headless: bool = False,
     aslr: bool = True,
     resolve_debuginfo: bool = False,
     index_cache: bool = None,
     script: str = "",
-
     options: dict = None,
-
-    **kwargs
+    **kwargs,
 ):
     bridge = Bridge(**options)
     command = [bridge.gdb_path]
@@ -439,10 +473,15 @@ def attach(
         command += [elf.path]
 
     if isinstance(target, str):
-        pids = subprocess.run(["pgrep", "-fx", command], check=False, capture_output=True, encoding="utf-8").stdout.splitlines()
+        pids = subprocess.run(
+            ["pgrep", "-fx", command],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+        ).stdout.splitlines()
         if len(pids) == 0:
             raise FileNotFoundError("process {!r} not found".format(command))
-        
+
         if len(pids) != 1:
             print("selecting newest pid")
 
@@ -456,7 +495,7 @@ def attach(
 
     bridge.gdbscript.extend(script.strip().splitlines())
     bridge.finalize_gdbscript()
-    
+
     command += ["-x", bridge.gdbscript_path]
 
     terminal = select_terminal(headless)
@@ -465,18 +504,17 @@ def attach(
     conn = bridge.connect()
     return Gdb(conn, binary=elf, **options)
 
+
 @with_options
 def debug(
     elf: elf.ELF,
-
     headless: bool = False,
     aslr: bool = True,
     resolve_debuginfo: bool = False,
     index_cache: bool = None,
     script: str = "",
     port: int = 0,
-
-    options: dict = None
+    options: dict = None,
 ):
     # command = [bridge.gdbserver_path, str(elf.path), "-x", bridge.gdbscript_path]
     command = ["gdbserver", "--multi", "--no-startup-with-shell"]

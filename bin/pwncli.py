@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from argparse import ArgumentParser, BooleanOptionalAction, ArgumentTypeError
+from argparse import ArgumentParser, ArgumentTypeError
 import argcomplete
 import colorama
 from pathlib import Path
@@ -70,10 +70,10 @@ def PositiveInteger(arg):
     try:
         i = int(arg)
     except:
-        raise ArgumentTypeError(f"Expected integer")
+        raise ArgumentTypeError("Expected integer")
     
     if i < 0:
-        raise ArgumentTypeError(f"Must be positive")
+        raise ArgumentTypeError("Must be positive")
     
     return i
 

@@ -1,5 +1,6 @@
 from .util import *
 
+
 class Machine:
     NONE = 0x00
     SPARC = 0x02
@@ -9,9 +10,10 @@ class Machine:
     MIPS = 0x08
     ARM = 0x28
     IA64 = 0x32
-    AMD64 = 0x3e
-    ARM64 = 0xb7
-    RISCV = 0xf3
+    AMD64 = 0x3E
+    ARM64 = 0xB7
+    RISCV = 0xF3
+
 
 class Type:
     NONE = 0x00
@@ -23,6 +25,7 @@ class Type:
     HIOS = 0xFEFF
     LOPROC = 0xFF00
     HIPROC = 0xFFFF
+
 
 class IdentStructure(ctypes.Structure):
     class Magic(ctypes.Union):
@@ -41,6 +44,7 @@ class IdentStructure(ctypes.Structure):
         ("padding", 7 * u8),
     ]
 
+
 def generate(bits: int, little_endian: bool):
     addrsize = addrsize_from_bits(bits)
     fields = [
@@ -57,7 +61,7 @@ def generate(bits: int, little_endian: bool):
         ("number_of_segments", u16),
         ("sizeof_section", u16),
         ("number_of_sections", u16),
-        ("section_name_table_index", u16)
+        ("section_name_table_index", u16),
     ]
 
     class Header(structure_parent(little_endian)):
@@ -65,11 +69,14 @@ def generate(bits: int, little_endian: bool):
 
         Machine = Machine
         Type = Type
+
     return Header
+
 
 class Magic:
     raw: u32
     bytes: u8
+
 
 class Ident:
     magic: Magic
@@ -79,6 +86,7 @@ class Ident:
     osabi: u8
     abiversion: u8
     padding: u8
+
 
 class Header:
     ident: Ident

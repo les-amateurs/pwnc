@@ -1,5 +1,6 @@
 from .util import *
 
+
 def generate(bits: int, little_endian: bool):
     addrsize = addrsize_from_bits(bits)
     if bits == 64:
@@ -9,7 +10,7 @@ def generate(bits: int, little_endian: bool):
             ("other", u8),
             ("index", u16),
             ("value", addrsize),
-            ("size", addrsize)
+            ("size", addrsize),
         ]
     else:
         fields = [
@@ -18,12 +19,14 @@ def generate(bits: int, little_endian: bool):
             ("size", u32),
             ("info", u8),
             ("other", u8),
-            ("index", u16)
+            ("index", u16),
         ]
 
     class Symbol(structure_parent(little_endian)):
         _fields_ = fields
+
     return Symbol
+
 
 class Symbol:
     name: u32
