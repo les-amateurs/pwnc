@@ -22,4 +22,4 @@ def command(args: Args):
         case _:
             err.fatal(f"template {args.kind} not found")
 
-    err.info(f"done")
+    err.info("done")

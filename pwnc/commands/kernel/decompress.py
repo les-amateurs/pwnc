@@ -1,9 +1,10 @@
-from pwnc.config import find_config, load_config
+from pwnc.config import load_config
 from ...util import *
 from tempfile import NamedTemporaryFile
 import gzip
 
 CONFIG_INITRAMFS = config.Key("kernel") / "initramfs"
+
 
 def do_decompress(initramfs: Path, rootfs: Path):
     gzipped = False
@@ -19,20 +20,24 @@ def do_decompress(initramfs: Path, rootfs: Path):
             pass
 
         rootfs.mkdir(exist_ok=True)
-        run(f"cpio -idmu < {tempfile.name}", cwd=rootfs)
+        status = run(f"cpio -idmu < {tempfile.name}", cwd=rootfs, check=False)
+        if status.returncode != 0:
+            err.warn(f"cpio exited with {status.returncode}")
 
     return gzipped
+
 
 def save_parameters(initramfs: Path, rootfs: Path, gzipped: bool):
     config.save(CONFIG_INITRAMFS / "path", str(initramfs.absolute()))
     config.save(CONFIG_INITRAMFS / "gzipped", gzipped)
     config.save(CONFIG_INITRAMFS / "rootfs", str(rootfs.absolute()))
 
+
 def command(args):
     initramfs = args.initramfs
     rootfs = args.rootfs
     save = load_config(False)
-    
+
     if rootfs is None:
         if args.ignore and save is not None:
             rootfs = Path(config.load(CONFIG_INITRAMFS / "rootfs"))

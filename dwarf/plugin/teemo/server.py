@@ -1,35 +1,25 @@
-from concurrent.futures import thread
 from binaryninja import (
     BinaryView,
     BinaryDataNotification,
-    BinaryDataNotificationCallbacks,
     HighLevelILInstruction,
     QualifiedName,
     SymbolType,
-    Tag,
     Type,
     VariableSourceType,
-    LowLevelILOperation,
-    RegisterValueType,
     Function,
     CoreSymbol,
     Section,
     NotificationType,
-    HighLevelILOperation,
     show_message_box,
 )
 from binaryninja.mainthread import worker_interactive_enqueue
 from pathlib import Path
-from tempfile import mkdtemp
 import json
 import subprocess
 import rpyc
 import threading
-from rpyc import async_, BgServingThread
-from rpyc.core.brine import register
+from rpyc import BgServingThread
 from rpyc.utils.server import ThreadedServer, spawn
-from rpyc.utils.factory import unix_connect
-from threading import Lock
 from .config import *
 from .extract import TypeCollection
 

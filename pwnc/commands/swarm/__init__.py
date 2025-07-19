@@ -2,8 +2,8 @@ from traceback import StackSummary
 from ...util import *
 from dataclasses import dataclass
 import json
-import signal
 from time import sleep
+
 
 @dataclass
 class State:
@@ -11,15 +11,18 @@ class State:
     kids: list[int]
     pids: list[int]
 
+
 @dataclass
 class Worker:
     kid: int
     pid: int | None
 
+
 state_path = Path(__file__).parent / "state.json"
 swarm_sock = Path(__file__).parent / "swarm.unix"
 unix = f"unix:{str(swarm_sock)}"
 ALLOWED_SIGNALS = ["SIGINT", "SIGTERM", "SIGKILL"]
+
 
 def load_state():
     try:
@@ -28,13 +31,16 @@ def load_state():
     except:
         pass
     return State(False, [], [])
-    
+
+
 def save_state(state: State):
     with open(state_path, "w+") as fp:
         json.dump(state.__dict__, fp)
 
+
 def kitten(command: list[str]):
     return subprocess.check_output(["kitten", "@", "--to", unix] + command)
+
 
 def start_worker(root: bool = False, options: list[str] = []):
     if root:
@@ -45,16 +51,18 @@ def start_worker(root: bool = False, options: list[str] = []):
         output = kitten(["launch"] + options)
         kid = int(output)
         pid = None
-    
+
     return Worker(kid, pid)
+
 
 def focus_worker(kid: int):
     kitten(["focus-window", "--match", f"id:{kid}"])
 
+
 def swarm_start(args: Args, state: State):
     if state.running:
         err.fatal("swarm already running")
-    
+
     swarm_sock.unlink(missing_ok=True)
 
     root = start_worker(root=True, options=["-o", "allow_remote_control=yes", "--listen-on", unix])
@@ -79,29 +87,33 @@ def swarm_start(args: Args, state: State):
     state.kids = kids
     state.pids = pids
 
+
 def swarm_kill(args: Args, state: State):
     for pid in state.pids:
         if pid is None:
             continue
-        
+
         kitten(["close-window", "--match", "all", "--no-response"])
 
     state.running = False
     state.kids = []
     state.pids = []
 
+
 def swarm_config(args: Args, state: State):
     if not state.running:
         err.fatal("swarm is not running")
-    
+
     if args.font_size:
         kitten(["set-font-size", str(args.font_size)])
+
 
 def swarm_exec(args: Args, state: State):
     if not state.running:
         err.fatal("swarm is not running")
-    
+
     kitten(["send-text", "--all", args.command.strip() + "\n"])
+
 
 def swarm_signal(args: Args, state: State):
     if not state.running:
@@ -116,8 +128,9 @@ def swarm_signal(args: Args, state: State):
 
     kitten(["signal-child", "--match", "all", signal])
 
+
 def command(args: Args):
-    state = load_state()    
+    state = load_state()
 
     sub = dict(args._get_kwargs())
     match sub.get("subcommand.swarm"):

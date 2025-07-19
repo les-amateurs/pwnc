@@ -2,6 +2,7 @@ from ...util import *
 from tempfile import TemporaryDirectory
 import json
 
+
 def command(args: Args):
     """
     Extracting properly without running the image is ... annoying.
@@ -13,7 +14,12 @@ def command(args: Args):
     with TemporaryDirectory() as tmp:
         tmp = Path(tmp).absolute()
         tarfile = tmp / "image.tar"
-        run(["docker", "save", args.image, "-o", tarfile.name], shell=False, capture_output=True, cwd=tmp)
+        run(
+            ["docker", "save", args.image, "-o", tarfile.name],
+            shell=False,
+            capture_output=True,
+            cwd=tmp,
+        )
         run(["tar", "-xf", tarfile.name], shell=False, capture_output=True, cwd=tmp)
 
         with open(tmp / "manifest.json") as fp:
@@ -47,8 +53,13 @@ def command(args: Args):
             for file in extractions:
                 dst = dump / file
                 src = layerPaths[i].parent / file
-                run(["tar", "-xf", str(layerPaths[i]), str(file)], shell=False, capture_output=True, cwd=layerPaths[i].parent)
-                
+                run(
+                    ["tar", "-xf", str(layerPaths[i]), str(file)],
+                    shell=False,
+                    capture_output=True,
+                    cwd=layerPaths[i].parent,
+                )
+
                 if src.is_symlink():
                     # follow link more times?
                     # do we care about directory traversal?

@@ -1,7 +1,6 @@
 from ..util import *
-from ..minelf import ELF
-from ctypes import sizeof
 from tempfile import mkdtemp
+
 
 # is it worth it to pull in some file type recognition library?
 def command(args):
@@ -20,6 +19,7 @@ def command(args):
             return
 
     shutil.move(storage, dest)
+
 
 def unpack(file: Path):
     storage = Path(mkdtemp())

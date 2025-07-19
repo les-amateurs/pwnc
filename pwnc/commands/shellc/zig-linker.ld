@@ -1,17 +1,15 @@
-ENTRY(main)
-
-
 SECTIONS {
     /* here we place `.entry` as the first section */
     .entry.init : { KEEP(*(.entry.init)) }
     . = .;
     .entry      : { *(.entry) }
     . = .;
-    .text       : { *(.text.*) }
-    .rodata     : { *(.rodata.*) }
-    .data       : { *(.data.*) }
-    .entry.data : { *(.entry.data) }
-    .got        : { *(.got) }
+    .text       : { *(.text*) }
+    .rodata     : { *(.rodata*) }
+    .data       : {
+        *(.data*)
+        *(.entry.data)
+    }
     .bss        : { *(.bss.*) }
 
     /* remove all useless sections */

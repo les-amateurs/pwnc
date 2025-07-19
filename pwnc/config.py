@@ -11,6 +11,7 @@ index-cache = true
 # index-cache-path =
 """
 
+
 def locate_global_config_directory():
     home = Path.home()
 
@@ -20,6 +21,7 @@ def locate_global_config_directory():
         config_root = Path(os.getenv("XDG_CONFIG_HOME", home / ".config"))
 
     return config_root / "pwnc"
+
 
 def load_global_config():
     config_path = config = locate_global_config_directory() / CONFIG_FILE
@@ -33,6 +35,7 @@ def load_global_config():
         with open(config_path, "r") as fp:
             return toml.load(fp)
 
+
 def find_config():
     cwd = Path(".").absolute()
     while not (cwd / CONFIG_FILE).exists():
@@ -40,8 +43,9 @@ def find_config():
             return None
 
         cwd = cwd.parent
-        
+
     return cwd / CONFIG_FILE
+
 
 def find_or_init_config():
     p = find_config()
@@ -50,10 +54,12 @@ def find_or_init_config():
         return Path(".") / CONFIG_FILE
     return p
 
+
 _global_config_ = load_global_config()
 _local_config_ = None
 _local_config_path_ = None
 _old_serialized_config_ = None
+
 
 def save_config():
     if _local_config_path_ is not None:
@@ -62,7 +68,9 @@ def save_config():
             with open(_local_config_path_, "w+") as fp:
                 fp.write(_new_serialized_config_)
 
+
 atexit.register(save_config)
+
 
 def load_config(init: bool):
     global _local_config_, _local_config_path_, _old_serialized_config_
@@ -80,13 +88,14 @@ def load_config(init: bool):
 
     return _local_config_
 
+
 class Key:
     def __init__(self, key: str):
         self.parts = [key]
 
     def name(self):
         return self.parts[-1]
-    
+
     def path(self):
         return self.parts[:-1]
 
@@ -94,12 +103,13 @@ class Key:
         new = Key("")
         new.parts = [part for part in self.parts] + [other]
         return new
-    
+
     def __str__(self):
         return " -> ".join(self.parts)
-    
+
     def __repr__(self):
         return f"{self}"
+
 
 def traverse(config: dict, key: Key, create: bool):
     keys = iter(key.path())
@@ -115,14 +125,16 @@ def traverse(config: dict, key: Key, create: bool):
                 config[next_key] = subconfig
             else:
                 raise KeyError(next_key)
-            
+
         config = config[next_key]
-            
+
     return config
+
 
 def save(key: Key, info):
     config = load_config(True)
     traverse(config, key, True)[key.name()] = info
+
 
 def load(key: Key):
     config = load_config(False)
@@ -136,13 +148,15 @@ def load(key: Key):
         return traverse(_global_config_, key, False)[key.name()]
     except KeyError:
         raise KeyError(key)
-    
+
+
 def maybe(key: Key):
     try:
         return load(key)
     except KeyError:
         return None
-    
+
+
 def exists(key: Key):
     config = load_config(False)
     if config is not None:
@@ -151,11 +165,10 @@ def exists(key: Key):
             return True
         except KeyError:
             pass
-        
+
     try:
         traverse(_global_config_, key, False)[key.name()]
         return True
     except KeyError:
         pass
-    
     return False

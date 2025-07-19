@@ -1,4 +1,3 @@
-from pwnc.config import load_config
 from ...util import *
 
 
@@ -28,7 +27,12 @@ def do_compress(rootfs: Path, destination: Path, gzipped: bool, gzip_level: int 
     )
     if gzipped:
         err.info(f"gzip_level = {gzip_level}")
-        gzip = subprocess.Popen(["gzip", "-c", f"-{gzip_level}", "-"], shell=False, stdout=final_out, stdin=cpio.stdout)
+        gzip = subprocess.Popen(
+            ["gzip", "-c", f"-{gzip_level}", "-"],
+            shell=False,
+            stdout=final_out,
+            stdin=cpio.stdout,
+        )
     cpio.communicate(delimited)
     status = cpio.wait()
     err.info(f"cpio status = {status}")

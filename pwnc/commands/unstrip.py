@@ -1,12 +1,11 @@
-from .. util import *
+from ..util import *
 from .scrape import locate_package
 from .. import minelf
 import shutil
 
 # https://wiki.archlinux.org/title/Debuginfod
-DEBUGINFOD_SERVERS = [
-    "https://debuginfod.elfutils.org/"
-]
+DEBUGINFOD_SERVERS = ["https://debuginfod.elfutils.org/"]
+
 
 def unstrip(stripped: Path, debuginfo: Path):
     err.info(f"debuginfo path = {debuginfo}")
@@ -15,9 +14,10 @@ def unstrip(stripped: Path, debuginfo: Path):
 
     handle = run(f"eu-unstrip {stripped} {debuginfo} --force -o {stripped}", check=False)
     if handle.returncode == 0:
-        err.info(f"sucessfully unstripped file")
+        err.info("sucessfully unstripped file")
     else:
-        err.fatal(f"failed to unstrip file")
+        err.fatal("failed to unstrip file")
+
 
 def unstrip_from_package(file: Path, save: bool):
     with open(file, "rb") as fp:
@@ -36,7 +36,7 @@ def unstrip_from_package(file: Path, save: bool):
     err.info(f"using buildid strategy ({buildid})")
     file = f"{buildid[:2]}/{buildid[2:]}.debug"
     debuginfo = package.find(file)
-    
+
     if len(debuginfo) == 1:
         debuginfo_path = debuginfo[0]
     else:
@@ -64,6 +64,7 @@ def unstrip_from_package(file: Path, save: bool):
 
     if debuginfo_path is None:
         import os
+
         os.system("/bin/zsh")
         err.fatal("failed to find debuginfo file")
 
@@ -71,12 +72,19 @@ def unstrip_from_package(file: Path, save: bool):
         cache = Path("_cache") / buildid
         cache.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.copytree(package.storage, cache, dirs_exist_ok=True, ignore_dangling_symlinks=True)
+            shutil.copytree(
+                package.storage,
+                cache,
+                dirs_exist_ok=True,
+                ignore_dangling_symlinks=True,
+            )
         except:
             import os
+
             os.system("/bin/zsh")
 
     return debuginfo_path
+
 
 def handle_unstrip(file: Path, save: bool = False, force: bool = False):
     debuginfo_path = None
@@ -95,9 +103,12 @@ def handle_unstrip(file: Path, save: bool = False, force: bool = False):
     if debuginfo_path is None and not save:
         cmd = f"debuginfod-find debuginfo {str(file)}"
         # fix issue with DEBUGINFOD_URLS not set when run as root
-        handle = run(cmd, check=False, capture_output=True, extra_env={
-            "DEBUGINFOD_URLS": "https://debuginfod.elfutils.org/"
-        })
+        handle = run(
+            cmd,
+            check=False,
+            capture_output=True,
+            extra_env={"DEBUGINFOD_URLS": "https://debuginfod.elfutils.org/"},
+        )
 
         if handle.returncode == 0:
             debuginfo_path = Path(handle.stdout.strip())
@@ -109,11 +120,13 @@ def handle_unstrip(file: Path, save: bool = False, force: bool = False):
 
     unstrip(file, debuginfo_path)
 
+
 def command(args: Args):
     if not shutil.which("debuginfod-find"):
         err.require("debuginfod-find")
 
     handle_unstrip(args.file, save=args.save, force=args.force)
+
 
 # cut open package with knife
 # get the pork out

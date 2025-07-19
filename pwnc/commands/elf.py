@@ -4,6 +4,7 @@ from ..minelf.types.header import Machine
 
 MACHINES = list(filter(lambda field: not field.startswith("_"), dir(Machine)))
 
+
 def info_from_machine(machine: int):
     match machine:
         case Machine.AMD64:
@@ -16,19 +17,20 @@ def info_from_machine(machine: int):
             return (True, 32)
     return None, None
 
+
 def command(args: Args):
     machine: str = args.machine.upper()
     if machine not in MACHINES:
         err.warn(f"machine {args.machine} not supported")
         err.info(f"supported machines: {MACHINES}")
-        err.info(f"interpreting raw value")
+        err.info("interpreting raw value")
         try:
             machine = int(args.machine, 0)
             err.info(f"interpreted machine as raw value: {machine}")
         except ValueError:
             machine = None
         if machine is None:
-            err.fatal(f"failed to interpret machine as raw value")
+            err.fatal("failed to interpret machine as raw value")
     else:
         machine = getattr(Machine, machine)
 
@@ -58,7 +60,7 @@ def command(args: Args):
     # TODO: custom page size
     base_address = 0x1000000
     segment_offset = ctypes.sizeof(elf.Header) + ctypes.sizeof(elf.Segment)
-    segment_offset = segment_offset + 0xfff & ~0xfff
+    segment_offset = segment_offset + 0xFFF & ~0xFFF
     load_address = base_address
     total = segment_offset + len(payload)
     elf.raw_elf_bytes += b"\x00" * total
@@ -85,6 +87,6 @@ def command(args: Args):
     elf.segments[0].mem_size = len(payload)
     elf.segments[0].alignment = 0
 
-    elf.raw_elf_bytes[elf.segments[0].offset:elf.segments[0].offset+len(payload)] = payload
+    elf.raw_elf_bytes[elf.segments[0].offset : elf.segments[0].offset + len(payload)] = payload
 
     elf.write(f"{args.file}.elf")

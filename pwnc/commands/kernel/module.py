@@ -1,7 +1,6 @@
 from ...util import *
-import shutil
-from tempfile import NamedTemporaryFile
 from ... import minelf
+
 
 def parse_modinfo(elf: minelf.ELF):
     for section in elf.sections:
@@ -23,6 +22,7 @@ def parse_modinfo(elf: minelf.ELF):
             err.warn(f"modinfo key {key} already exists, overwriting")
         info[key] = value
     return section, raw_modinfo_bytes, info
+
 
 def command(args: Args):
     with open(args.file, "rb") as fp:
