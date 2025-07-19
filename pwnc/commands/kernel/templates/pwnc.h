@@ -251,4 +251,80 @@ void trigger_modprobe(char *script_path, char *script) {
     system("/tmp/zero");
 }
 
+/*
+ * BPF program utilities
+ */
+
+#include <linux/bpf.h>
+#include <sys/socket.h>
+
+#define BPF_LOG_BUF_SIZE (UINT32_MAX >> 8)
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+static int bpf_program_load(enum bpf_prog_type prog_type,
+                            const struct bpf_insn *insns, u32 prog_len,
+                            const char *license, u32 kern_version,
+                            u32 log_level) {
+
+    union bpf_attr attr = {
+        .prog_type = prog_type,
+        .insns = (uint64_t)insns,
+        .insn_cnt = prog_len / sizeof(struct bpf_insn),
+        .license = (uint64_t)license,
+        .log_buf = (uint64_t)bpf_log_buf,
+        .log_size = BPF_LOG_BUF_SIZE,
+        .log_level = log_level,
+    };
+    attr.kern_version = kern_version;
+    bpf_log_buf[0] = 0;
+    return syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
+}
+static int bpf_create_map(enum bpf_map_type map_type, u32 key_size,
+                          u32 value_size, u32 max_entries) {
+
+    union bpf_attr attr = {.map_type = map_type,
+                           .key_size = key_size,
+                           .value_size = value_size,
+                           .max_entries = max_entries};
+    return syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+}
+
+static int bpf_create_rdonly_map(enum bpf_map_type map_type, u32 key_size,
+                                 u32 value_size, u32 max_entries) {
+
+    union bpf_attr attr = {.map_type = map_type,
+                           .key_size = key_size,
+                           .value_size = value_size,
+                           .max_entries = max_entries,
+                           .map_flags = BPF_F_RDONLY_PROG};
+    return syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+}
+
+static int bpf_update_elem(int fd, void *key, void *value, uint64_t flags) {
+    union bpf_attr attr = {
+        .map_fd = fd,
+        .key = (uint64_t)key,
+        .value = (uint64_t)value,
+        .flags = flags,
+    };
+    return syscall(__NR_bpf, BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr));
+}
+static int bpf_lookup_elem(int fd, void *key, void *value) {
+    union bpf_attr attr = {
+        .map_fd = fd,
+        .key = (uint64_t)key,
+        .value = (uint64_t)value,
+    };
+    return syscall(__NR_bpf, BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+}
+static int bpf_map_freeze(int fd) {
+    union bpf_attr attr;
+    memset((void *)&attr, 0, sizeof(attr));
+    attr.map_fd = fd;
+    return syscall(__NR_bpf, BPF_MAP_FREEZE, &attr, sizeof(attr));
+}
+
+/*
+ * END BPF program utilities
+ */
+
 #endif
