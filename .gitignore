@@ -10,6 +10,7 @@ __pycache__/
 .DS_Store
 
 **/.venv
+.ruff_cache
 .ropeproject
 _cache
 .ruff_cache

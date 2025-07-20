@@ -8,6 +8,7 @@ import builtins
 from typing import Callable
 from ..util import err
 
+
 class Method:
     def __init__(self, fn, name: str, args: list, kwargs: dict):
         self.fn = fn
@@ -21,6 +22,7 @@ class Method:
     def __call__(self):
         return self.fn(*self.args, **self.kwargs)
 
+
 class Callback:
     def __init__(self, method: str, server: "Server"):
         self.server = server
@@ -31,6 +33,7 @@ class Callback:
 
     def __call__(self, *args, **kwargs):
         return self.server.run(self.method, *args, **kwargs)
+
 
 class Server:
     class ForwardedException(Exception):
@@ -129,7 +132,7 @@ class Server:
         line = base64.b64decode(line)
         # print(f"{self.name} got line {line}")
         return line
-    
+
     def _deserialize(self):
         tag = self.next_line()
         # print(f"tag = {tag}")
@@ -164,10 +167,10 @@ class Server:
             case b"stop":
                 raise Server.StopException
 
-    def deserialize(self, from_remote = False):
+    def deserialize(self, from_remote=False):
         if self.remote and from_remote:
             return self.values.get()
-        
+
         val = self._deserialize()
         if self.remote and not from_remote:
             print(f"PUTTTING = {val}")
@@ -224,7 +227,7 @@ class Server:
                 self.serialize(method),
                 self.serialize(args),
                 self.serialize(list(kwargs.keys())),
-                self.serialize(list(kwargs.values()))
+                self.serialize(list(kwargs.values())),
             ]
             packet = b"\n".join(parts)
             self.sock.send(packet + b"\n")

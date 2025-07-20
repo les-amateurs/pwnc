@@ -9,7 +9,8 @@ supported_distros = [
     ubuntu,
 ]
 
-def locate_package(elf: minelf.ELF)-> Package:
+
+def locate_package(elf: minelf.ELF) -> Package:
     for distro in supported_distros:
         if not distro.provides(elf):
             name = distro.__name__.rsplit(".", maxsplit=1)[1]

@@ -1,9 +1,7 @@
 import gdb
 import os
 import rpyc
-import time
 from elftools.elf.elffile import ELFFile
-from rpyc import BgServingThread
 from rpyc.utils.server import spawn
 from rpyc.utils.factory import unix_connect
 from .. import config
@@ -322,7 +320,7 @@ class BinjaCommand(gdb.Command):
             print("debuginfo update interrupted")
 
     def disconnect(self):
-        print(f"disconnecting...")
+        print("disconnecting...")
         self.service.close()
         gdb.events.stop.disconnect(self.gdb_stop_handler)
         gdb.events.exited.disconnect(self.gdb_exit_handler)

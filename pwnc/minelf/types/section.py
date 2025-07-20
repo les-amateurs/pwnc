@@ -1,5 +1,6 @@
 from .util import *
 
+
 class Type:
     NULL = 0
     PROGBITS = 1
@@ -20,6 +21,7 @@ class Type:
     SYMTAB_SHNDX = 18
     LOOS = 0x60000000
 
+
 class Flags:
     WRITE = 0x01
     ALLOC = 0x02
@@ -31,6 +33,7 @@ class Flags:
     OS_NONCONFORMING = 0x100
     GROUP = 0x200
     TLS = 0x400
+
 
 def generate(bits: int, little_endian: bool):
     addrsize = addrsize_from_bits(bits)
@@ -44,7 +47,7 @@ def generate(bits: int, little_endian: bool):
         ("link", u32),
         ("info", u32),
         ("alignment", addrsize),
-        ("entrysize", addrsize)
+        ("entrysize", addrsize),
     ]
 
     class Section(structure_parent(little_endian)):
@@ -52,7 +55,9 @@ def generate(bits: int, little_endian: bool):
 
         Type = Type
         Flags = Flags
+
     return Section
+
 
 class Section:
     name = u32

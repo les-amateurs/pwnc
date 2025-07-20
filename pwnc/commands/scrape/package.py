@@ -3,6 +3,7 @@ import atexit
 from ...util import *
 from ... import err
 
+
 class Package:
     def __init__(self, distro: str, package: str, version: str, contents: bytes):
         self.distro = distro
@@ -21,7 +22,7 @@ class Package:
     def files(self) -> list[str]:
         self.extract()
         return list(self.storage.rglob("*"))
-    
+
     def unpack(self):
         if not self.unpacked:
             package = self.tempdir / "package.whatever"
@@ -31,9 +32,9 @@ class Package:
             run(f"ar x {package}", cwd=self.tempdir)
             data = list(self.tempdir.glob("data.tar.*"))
             if len(data) == 0:
-                err.fatal(f"failed to locate data.tar.*")
+                err.fatal("failed to locate data.tar.*")
             if len(data) != 1:
-                err.fatal(f"too many data.tar.* found")
+                err.fatal("too many data.tar.* found")
 
             data = data[0]
             storage = self.tempdir / "storage"

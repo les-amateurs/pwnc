@@ -11,6 +11,7 @@ try:
 except KeyError as e:
     pwnc.err.fatal(f"unable to locate bata24 gef.py file. set {str(e)} in pwnc.toml")
 
+
 def load_module(module_name, module_path):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)
@@ -19,6 +20,7 @@ def load_module(module_name, module_path):
 
     return module
 
+
 load_module("bata24", expanduser(bata24_gef_py_path))
 
 from bata24 import *
@@ -26,12 +28,16 @@ from bata24 import *
 __kallsyms_cache__ = None
 __kbase_symbol__ = "_stext"
 
+
 def read_msr(name: str):
     return GCI["msr"].read_msr(GCI["msr"].lookup_name2const(name))
+
 
 """ Resolve kernel base without having to load entire kernel memory map.
     Falls back to bata24 if a fast path cannot be used.
 """
+
+
 @Cache.cache_this_session
 def find_kernel_base():
     kbase = None
@@ -41,7 +47,7 @@ def find_kernel_base():
         msrs = config.Key("kernel") / "x86-64" / "msrs"
         lstar_offset = msrs / "lstar"
         lstar = read_msr("MSR_LSTAR")
-        
+
         if config.exists(lstar_offset):
             offset = config.load(lstar_offset)
             kbase = lstar - offset
@@ -53,6 +59,7 @@ def find_kernel_base():
         kbase = original_get_ksymaddr(__kbase_symbol__)
 
     return kbase
+
 
 @Cache.cache_this_session
 def load_ksymaddr_cache():
@@ -85,14 +92,16 @@ def load_ksymaddr_cache():
         pickle.dump(relativesyms, fp)
     config.save(kallsyms, str(cached_kallsyms))
 
+
 @Cache.cache_this_session
 def fast_get_ksymaddr(sym):
     load_ksymaddr_cache()
     if __kallsyms_cache__ is not None and sym in __kallsyms_cache__:
         return __kallsyms_cache__[sym]
-    
+
     res = original_get_ksymaddr(sym)
     return res
+
 
 @Cache.cache_this_session
 def fast_kernel_version():
@@ -112,7 +121,7 @@ def fast_kernel_version():
         pass
     info("failed kernel version fast path.")
 
-    kversion =  original_kernel_version()
+    kversion = original_kernel_version()
     if kversion is not None:
         config.save(version / "version-string", kversion.version_string)
         config.save(version / "major", kversion.major)
@@ -120,6 +129,7 @@ def fast_kernel_version():
         config.save(version / "patch", kversion.patch)
         config.save(version / "offset", kversion.address - kbase)
         return kversion
+
 
 original_get_ksymaddr = Symbol.get_ksymaddr
 original_kernel_version = Kernel.kernel_version

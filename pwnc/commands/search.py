@@ -1,6 +1,11 @@
-from .. util import *
-from .scrape.ubuntu import ROOT, async_setup, request_versions, request_num_published, request_build_pages
-from .scrape.index import Index
+from ..util import *
+from .scrape.ubuntu import (
+    ROOT,
+    async_setup,
+    request_versions,
+    request_num_published,
+    request_build_pages,
+)
 import asyncio
 
 package = "glibc"
@@ -17,11 +22,14 @@ architectures = [
     "s390x",
 ]
 
+
 def extract(s: str):
     return [int(n) for n in re.findall(r"[0-9]+", s)]
 
+
 def extract_major_minor(version: str):
     return extract(version)
+
 
 async def async_search(args: Args):
     num_published = await request_num_published(package)
@@ -40,6 +48,7 @@ async def async_search(args: Args):
     for arch, page in build_pages.items():
         page = page.lstrip("/")
         err.info(f"{arch:<16} {ROOT}{page}")
+
 
 def command(args: Args):
     return asyncio.get_event_loop().run_until_complete(

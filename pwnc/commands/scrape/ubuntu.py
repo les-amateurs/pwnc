@@ -5,7 +5,7 @@ import re
 import functools
 from ...util import *
 from .index import Index
-from ...import minelf
+from ... import minelf
 from ...minelf.types.header import Machine
 from .package import Package
 
@@ -16,6 +16,7 @@ MAX_CONCURRENT = 5
 BATCH_SIZE = 100
 RETRIES = 10
 MACHINES = [Machine.AMD64, Machine.X86, Machine.ARM64, Machine.ARM, Machine.RISCV]
+
 
 def elf_to_architecture(elf: minelf.ELF):
     match elf.header.machine:
@@ -32,7 +33,10 @@ def elf_to_architecture(elf: minelf.ELF):
                 return "riscv64"
     return None
 
+
 session, sem = None, None
+
+
 async def request(url):
     global session, sem
     await sem.put(None)
@@ -54,8 +58,10 @@ async def request(url):
     await sem.get()
     return await resp.content.read()
 
+
 async def parse(html: str):
     return BeautifulSoup(html, features="html.parser")
+
 
 # cache the publishinghistory webpages, they arent too big
 async def request_published_range(package: str, batch_start: int, batch_end: int):
@@ -69,24 +75,29 @@ async def request_published_range(package: str, batch_start: int, batch_end: int
         index[path] = html
     return await parse(html)
 
+
 async def request_num_published(package: str):
     index = Index(f"{DISTRO}-num_published")
     if package in index:
         return index[package]
-    
+
     soup = await request_published_range(package, 0, 0)
-    results = soup.find("td", { "class": "batch-navigation-index" })
+    results = soup.find("td", {"class": "batch-navigation-index"})
     num_published = int(re.search(r"\s([0-9]+)\sresults", " ".join(filter(len, results.text.split()))).group(1))
     index[package] = num_published
     return num_published
 
+
 async def request_versions(num_published: int, package: str):
     ranges = list(range(0, num_published, BATCH_SIZE)) + [num_published]
-    ranges = [(package, ranges[i], ranges[i+1]) for i in range(len(ranges)-1)]
-    
-    versions = await asyncio.gather(*[asyncio.create_task(request_versions_batched(*version_range)) for version_range in ranges])
+    ranges = [(package, ranges[i], ranges[i + 1]) for i in range(len(ranges) - 1)]
+
+    versions = await asyncio.gather(
+        *[asyncio.create_task(request_versions_batched(*version_range)) for version_range in ranges]
+    )
     versions = functools.reduce(lambda a, b: a.union(b), versions)
     return versions
+
 
 async def request_versions_batched(package: str, batch_start: int, batch_end: int):
     index = Index(f"{DISTRO}-{package}-versions")
@@ -105,6 +116,7 @@ async def request_versions_batched(package: str, batch_start: int, batch_end: in
     index[key] = paths
     return paths
 
+
 async def request_build_pages(package: str, version: str, architectures: list[str]):
     index = Index(f"{DISTRO}-build_pages-{package}-{version}")
     url = f"{ROOT}/ubuntu/+source/{package}/{version}"
@@ -113,16 +125,16 @@ async def request_build_pages(package: str, version: str, architectures: list[st
     else:
         html = await request(url)
         index[url] = html
-    
+
     soup = await parse(html)
     sources = soup.find(id="source-builds")
     builds = dict()
 
     ptags = list(filter(lambda tag: tag.name == "p", sources.children))
     if len(ptags) == 0:
-        err.warn(f"failed to locate build pages")
+        err.warn("failed to locate build pages")
         return builds
-    
+
     links = filter(lambda tag: tag.name == "a", ptags[0].children)
     links = list(links)
     for i, tag in enumerate(links):
@@ -131,6 +143,7 @@ async def request_build_pages(package: str, version: str, architectures: list[st
             builds[architecture] = tag["href"]
 
     return builds
+
 
 async def request_deb(binpackage: str, version: str, arch: str, build: str):
     debug = re.compile(rf"{binpackage}-dbg(sym)?_{version}_{arch}.d?deb$")
@@ -150,11 +163,13 @@ async def request_deb(binpackage: str, version: str, arch: str, build: str):
     err.info(f"found deb url: {deb_url}")
     return await request(deb_url)
 
+
 def parse_libc_version(elf: minelf.ELF):
     m = VERSION.search(elf.raw_elf_bytes)
     if not m.group(1):
         err.warn("failed to determine libc version")
     return m.group(1).decode()
+
 
 def provides(elf: minelf.ELF):
     if DISTRO.encode("utf-8") not in elf.raw_elf_bytes:
@@ -164,6 +179,7 @@ def provides(elf: minelf.ELF):
     if elf.header.machine not in MACHINES:
         return False
     return True
+
 
 async def async_locate(elf: minelf.ELF):
     # packages = ["glibc", "eglibc", "dietlibc", "musl"]
@@ -191,13 +207,15 @@ async def async_locate(elf: minelf.ELF):
         contents = await request_deb(names[package], version, arch, builds[arch])
         if contents is not None:
             return Package(DISTRO, package, version, contents)
-            
+
+
 async def async_setup(fn, *args, **kwargs):
     global session, sem
 
     sem = asyncio.Queue(maxsize=MAX_CONCURRENT)
     async with aiohttp.ClientSession() as session:
         return await fn(*args, **kwargs)
+
 
 def locate(elf: minelf.ELF):
     return asyncio.get_event_loop().run_until_complete(

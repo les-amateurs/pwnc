@@ -13,6 +13,7 @@ ROOT = "http://snapshot.debian.org/"
 VERSION = re.compile(rb"GLIBC (\d+\.\d+.*)\)")
 MACHINES = [Machine.AMD64, Machine.X86, Machine.ARM64, Machine.ARM, Machine.RISCV]
 
+
 def elf_to_architecture(elf: minelf.ELF):
     match elf.header.machine:
         case Machine.AMD64:
@@ -28,6 +29,7 @@ def elf_to_architecture(elf: minelf.ELF):
                 return "riscv64"
     return None
 
+
 def request(url: str):
     err.info(f"requesting {url}")
     response = requests.get(url, timeout=10)
@@ -36,9 +38,11 @@ def request(url: str):
 
     return response.content
 
+
 def download(hash: str):
     url = f"{ROOT}/file/{hash}"
     return request(url)
+
 
 def request_versions(package: str):
     index = Index(f"{DISTRO}-{package}-versions")
@@ -49,6 +53,7 @@ def request_versions(package: str):
     index[package] = versions
     return versions
 
+
 def request_binpackages(package: str, version: str):
     index = Index(f"{DISTRO}-{package}-{version}-binpackages")
     if version in index:
@@ -57,6 +62,7 @@ def request_binpackages(package: str, version: str):
     binpackages = [entry["name"] for entry in json.loads(request(url))["result"]]
     index[version] = binpackages
     return binpackages
+
 
 def request_binfiles(package: str, binpackage: str, version: str):
     index = Index(f"{DISTRO}-{package}-{version}-{binpackage}-binfiles")
@@ -68,11 +74,13 @@ def request_binfiles(package: str, binpackage: str, version: str):
     index[binpackage] = binfiles
     return binfiles
 
+
 def parse_libc_version(elf: minelf.ELF):
     m = VERSION.search(elf.raw_elf_bytes)
     if not m.group(1):
         err.warn("failed to determine libc version")
     return m.group(1).decode()
+
 
 def provides(elf: minelf.ELF):
     if DISTRO.encode("utf-8") not in elf.raw_elf_bytes:
@@ -83,11 +91,12 @@ def provides(elf: minelf.ELF):
         return False
     return True
 
+
 def locate(elf: minelf.ELF):
     package = "glibc"
     arch = elf_to_architecture(elf)
     if arch is None:
-        err.fatal(f"unsupported architecture") 
+        err.fatal("unsupported architecture")
 
     versions = request_versions(package)
     version = parse_libc_version(elf)
@@ -96,7 +105,7 @@ def locate(elf: minelf.ELF):
 
     binpackages = request_binpackages(package, version)
     if "libc6-dbg" not in binpackages:
-        err.fatal(f"unable to find libc6-dbg package for debuginfo")
+        err.fatal("unable to find libc6-dbg package for debuginfo")
 
     binfiles = request_binfiles(package, "libc6-dbg", version)
     if arch not in binfiles:

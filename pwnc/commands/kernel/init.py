@@ -1,5 +1,4 @@
 from ...util import *
-from tempfile import NamedTemporaryFile
 from . import decompress
 
 

@@ -21,6 +21,7 @@ try:
 except:
     pass
 
+
 class ObjfileSymbols:
     def __init__(self, objfile: "gdb.Objfile", raw: bool = True):
         self.objfile = objfile
@@ -40,6 +41,7 @@ class ObjfileSymbols:
     def __getitem__(self, symbol):
         return self.symbol_address(symbol)
 
+
 class Objfile:
     def __init__(self, objfile: "gdb.Objfile"):
         self.objfile = objfile
@@ -56,6 +58,7 @@ class Objfile:
 
     def __repr__(self):
         return "<Objfile for {!r}>".format(self.objfile.filename)
+
 
 class Objfiles:
     def __init__(self, gdb: "gdb"):
@@ -106,12 +109,14 @@ class Objfiles:
     def __repr__(self):
         return str(list(self.objfiles.values()))
 
+
 class HexInt(int):
     def __new__(self, val, *args, **kwargs):
         return super().__new__(self, val, *args, **kwargs)
 
     def __repr__(self):
         return f"{self:#x}"
+
 
 class Registers:
     gdb: "Gdb"
@@ -127,6 +132,7 @@ class Registers:
     def __setattr__(self, key: str, val: int):
         val = self.gdb.parse_and_eval(f"${key} = {val}")
 
+
 class Gdb:
     def __init__(self, conn, binary: elfutils.ELF = None, resolve_debuginfo: bool = True, **kwargs):
         gdbref = self
@@ -135,7 +141,7 @@ class Gdb:
 
     def pid(self):
         return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
-    
+
     def prompt(self):
         self.conn.run("prompt")
 
@@ -160,7 +166,7 @@ class Gdb:
     def interrupt(self):
         self.conn.run("interrupt")
 
-    def bp(self, location, callback = None):
+    def bp(self, location, callback=None):
         kind = str(type(location))
         if "gdb.Value" in kind:
             spec = location.format_string(raw=True, styling=False, address=False)
@@ -207,14 +213,19 @@ class Gdb:
         terminal = select_terminal(False)
         stdout = str(self.inout / "stdout")
         stderr = str(self.inout / "stderr")
-        stdin  = str(self.inout / "stdin")
-        misc.run_in_new_terminal(["sh", "-c", f"cat {stdout} & cat {stderr} & cat > {stdin}"], terminal=terminal, args=[])
+        stdin = str(self.inout / "stdin")
+        misc.run_in_new_terminal(
+            ["sh", "-c", f"cat {stdout} & cat {stderr} & cat > {stdin}"], terminal=terminal, args=[]
+        )
+
 
 def on(option: bool):
     return "on" if option else "off"
 
+
 def no(disable: bool):
     return "no-" if disable else ""
+
 
 def collect_options(fn, kwargs: dict):
     options = {}
@@ -233,6 +244,7 @@ def collect_options(fn, kwargs: dict):
             options[name] = val
     return options
 
+
 def with_options(fn):
     def wrapper(cls, *args, **kwargs):
         options = collect_options(fn, kwargs)
@@ -240,16 +252,25 @@ def with_options(fn):
 
     return wrapper
 
+
 def select_terminal(headless: bool):
     if headless:
         return "sh"
     else:
         return "kitty"
 
+
 from .protocol import Server
 
+
 class Bridge:
-    def __init__(self, aslr: bool = True, index_cache: bool = None, index_cache_path: bool = None, **kwargs):
+    def __init__(
+        self,
+        aslr: bool = True,
+        index_cache: bool = None,
+        index_cache_path: bool = None,
+        **kwargs,
+    ):
         self.gdbscript = []
         self.launch_directory = pathlib.Path(mkdtemp())
         self.socket_path = str(self.launch_directory / "socket")
@@ -285,11 +306,11 @@ class Bridge:
 
         return connection
 
+
 @with_options
 def attach(
     target: str | tuple[str, int],
     elf: elfutils.ELF = None,
-
     headless: bool = False,
     aslr: bool = True,
     resolve_debuginfo: bool = False,
@@ -297,10 +318,8 @@ def attach(
     gdbscript: str = "",
     args: list = [],
     targs: list = [],
-
     options: dict = None,
-
-    **kwargs
+    **kwargs,
 ):
     bridge = Bridge(**options)
     command = [bridge.gdb_path]
@@ -308,7 +327,12 @@ def attach(
         command += [elf.path]
 
     if isinstance(target, str):
-        pids = subprocess.run(["pgrep", "-fx", command], check=False, capture_output=True, encoding="utf-8").stdout.splitlines()
+        pids = subprocess.run(
+            ["pgrep", "-fx", command],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+        ).stdout.splitlines()
         if len(pids) == 0:
             raise FileNotFoundError("process {!r} not found".format(command))
 
@@ -339,12 +363,7 @@ def attach(
         a = os.open(inout / "stdin", os.O_RDWR)
         b = os.open(inout / "stdout", os.O_RDWR)
         c = os.open(inout / "stderr", os.O_RDWR)
-        instance = process(
-            command,
-            stdin=a,
-            stdout=b,
-            stderr=c
-        )
+        instance = process(command, stdin=a, stdout=b, stderr=c)
     else:
         instance = misc.run_in_new_terminal(command, terminal=terminal, args=[] + targs, kill_at_exit=True)
 
@@ -354,11 +373,11 @@ def attach(
     g.inout = inout
     return g
 
+
 @with_options
 def debug(
     target: str | elfutils.ELF,
     elf: elfutils.ELF = None,
-
     headless: bool = False,
     aslr: bool = True,
     resolve_debuginfo: bool = False,
@@ -367,8 +386,7 @@ def debug(
     args: list = [],
     targs: list = [],
     port: int = 0,
-
-    options: dict = None
+    options: dict = None,
 ):
     # command = [bridge.gdbserver_path, str(elf.path), "-x", bridge.gdbscript_path]
     if type(target) == elfutils.ELF:
