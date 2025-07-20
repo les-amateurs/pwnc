@@ -11,6 +11,8 @@ __pycache__/
 
 **/.venv
 .ropeproject
+_cache
+.ruff_cache
 
 # ignore this, random testing files
 log.txt
