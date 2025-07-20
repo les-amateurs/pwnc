@@ -10,6 +10,8 @@ Some considerations, currently will only generate object
 files for elf modes. It is possible to generate PIE shellcode,
 although of course relocations will be impossible to apply.
 """
+
+
 def nasm(code: str, format: str, extra: list[str] = []):
     if format not in ALLOWED_FORMATS:
         err.fatal(f"format not one of ALLOWED_FORMATS ({ALLOWED_FORMATS})")
