@@ -53,6 +53,7 @@ def command(args: Args):
             for file in extractions:
                 dst = dump / file
                 src = layerPaths[i].parent / file
+                err.info(f"extracting {str(layerPaths[i])}")
                 run(
                     ["tar", "-xf", str(layerPaths[i]), str(file)],
                     shell=False,
@@ -70,7 +71,10 @@ def command(args: Args):
                     src = layerPaths[i].parent / real
 
                 dst.parent.mkdir(exist_ok=True, parents=True)
-                shutil.copy(src, dst)
+                if src.is_dir():
+                    shutil.copytree(src, dst, dirs_exist_ok=True, ignore_dangling_symlinks=True)
+                else:
+                    shutil.copy(src, dst)
                 err.info(f"extracted {str(file)!r} to {str(dst)!r}")
 
         if len(current) == 0:

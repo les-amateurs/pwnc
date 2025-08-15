@@ -58,6 +58,7 @@ class Server:
         self.callback_id = 0
         self.reader: io.BufferedReader = None
         self.remote = False
+        self.blocked = False
         self.native_id = None
 
         if listen:
@@ -67,7 +68,7 @@ class Server:
                 pass
             self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.listener.bind(socket_path)
-            err.info("listening...")
+            # err.info("listening...")
             self.listener.listen(1)
             self.sock, _ = self.listener.accept()
         else:
@@ -80,7 +81,8 @@ class Server:
         self.thread.start()
 
     def stop(self):
-        self.sock.send(base64.b64encode(b"stop"))
+        self.send_raw(base64.b64encode(b"stop"))
+        self.reader.close()
 
     def register(self, name: str, fn):
         self.registry[name] = fn
@@ -125,7 +127,10 @@ class Server:
         return b"\n".join(packet)
 
     def next_line(self):
-        line = self.reader.readline()
+        try:
+            line = self.reader.readline()
+        except OSError:
+            line = None
         if not line:
             # print("stopping...")
             raise Server.EmptyMessageException
@@ -168,12 +173,12 @@ class Server:
                 raise Server.StopException
 
     def deserialize(self, from_remote=False):
-        if self.remote and from_remote:
+        if (self.remote and not self.blocked) and from_remote:
             return self.values.get()
 
         val = self._deserialize()
-        if self.remote and not from_remote:
-            print(f"PUTTTING = {val}")
+        if (self.remote and not self.blocked) and not from_remote:
+            # print(f"forwarding {val}")
             self.values.put(val)
             raise Server.ForwardedException
         else:
@@ -185,40 +190,51 @@ class Server:
 
         while True:
             try:
+                # print("reciever waiting for value...")
                 val = self.deserialize()
             except Server.EmptyMessageException:
                 break
             except Server.StopException:
                 break
             except Server.ForwardedException:
-                print("forwarded value")
                 continue
 
+            # print(f"reciever got: {val}")
             if isinstance(val, Method):
+                prev_blocked = self.blocked
+                self.blocked = True
                 self.send(val())
+                self.blocked = prev_blocked
             else:
                 err.warn(f"WTF: {val}")
 
-        err.info("stopping...")
+        # err.info("stopping...")
         try:
-            self.sock.send(base64.b64encode(b"stop") + b"\n" + b"A" * 512)
+            self.send_raw(base64.b64encode(b"stop"))
         except OSError:
-            err.warn("peer already stopped")
+            # err.warn("peer already stopped")
             pass
 
         builtins.exit()
 
+    def send_raw(self, packet: bytes):
+        try:
+            self.sock.send(packet + b"\n")
+        except OSError as e:
+            # err.warn(f"send error: {e}")
+            pass
+
     def send(self, val):
         packet = self.serialize(val)
-        self.sock.send(packet + b"\n")
-        # builtins.print(f"{self.name} SENT {val}")
+        self.send_raw(packet)
+        # print(f"{self.name} SENT {val}")
 
     def run(self, method: str, *args, **kwargs):
-        print(method)
-        print(f"remote = {self.remote}")
+        # print(method)
+        # print(f"remote = {self.remote}")
         remote_orig = self.remote
         if threading.get_native_id() != self.native_id:
-            print("setting remote")
+            # print("setting remote")
             self.remote = True
 
         try:
@@ -230,13 +246,13 @@ class Server:
                 self.serialize(list(kwargs.values())),
             ]
             packet = b"\n".join(parts)
-            self.sock.send(packet + b"\n")
-            # print(f"[{self.name}] (RUN) running {method}")
+            self.send_raw(packet)
+            # print(f"[{self.name}] running remote: {method}")
 
             while True:
                 try:
-                    print("attempting to deserialize value")
-                    print(self.remote)
+                    # print("attempting to deserialize value")
+                    # print(f"remote = {self.remote}")
                     val = self.deserialize(True)
                 except Server.StopException:
                     break
@@ -244,11 +260,10 @@ class Server:
                     break
 
                 # print(f"[{self.name}] received val = {val}")
-
-                if isinstance(val, Callback):
-                    self.send(val())
-                elif isinstance(val, Method):
-                    self.send(val())
+                if isinstance(val, Method):
+                    ret = val()
+                    # print(f"[{self.name}] {val} finished with {ret}")
+                    self.send(ret)
                 else:
                     # print(f"[{self.name}] (RUN) returning val = {val}")
                     return val

@@ -1,14 +1,14 @@
 """GDB Python API bridge."""
 
 import gdb
-from pwnc.gdb import protocol
-from threading import Event
+import pwnc.gdb.protocol
+import threading
 import time
 
 
 class Result:
     def __init__(self):
-        self.event = Event()
+        self.event = threading.Event()
         self.item = None
 
     def submit(self, item):
@@ -19,23 +19,56 @@ class Result:
         self.event.wait()
 
 
-def my_execute(command, to_string=False, from_tty=True, auto=True):
-    try:
-        gdb.newest_frame()
-    except gdb.error as e:
-        print("bad")
-        print(e)
-
-    # gdb.write(gdb.prompt_hook(lambda: None))
-    gdb.write(command + "\n")
-    gdb.flush()
-
+def execute_command(command, to_string, from_tty):
     try:
         ret = gdb.execute(command, to_string=to_string, from_tty=from_tty)
     except gdb.error as e:
         print("wtf")
         print(e)
         ret = None
+    return ret
+
+
+def my_execute(command, to_string=False, from_tty=True, safe=False):
+    try:
+        gdb.newest_frame()
+    except gdb.error as e:
+        print("bad 1")
+        print(e)
+
+    try:
+        gdb.selected_frame()
+    except gdb.error as e:
+        print("bad 2")
+        print(e)
+
+    # gdb.write(gdb.prompt_hook(lambda: None))
+    gdb.write(command + "\n")
+    gdb.flush()
+
+    if safe:
+        result = Result()
+        def safe_execute_command():
+            print("SAFE")
+            try:
+                gdb.newest_frame()
+            except gdb.error as e:
+                print("bad 1")
+                print(e)
+
+            try:
+                gdb.selected_frame()
+            except gdb.error as e:
+                print("bad 2")
+                print(e)
+            ret = execute_command(command, to_string=to_string, from_tty=from_tty)
+            result.submit(ret)
+        gdb.post_event(safe_execute_command)
+        result.wait()
+        ret = result.item
+    else:
+        ret = execute_command(command, to_string=to_string, from_tty=from_tty)
+        print("wtf")
 
     gdb.write(gdb.prompt_hook(lambda: None))
     gdb.flush()
@@ -44,56 +77,81 @@ def my_execute(command, to_string=False, from_tty=True, auto=True):
 
 def my_ni():
     def nexti():
-        gdb.execute("ni")
+        gdb.execute("nexti")
+    stopped = threading.Event()
+    waiters.append(stopped)
+    gdb.post_event(nexti)
+    stopped.wait()
 
-    gdb.post_event(lambda: nexti())
+
+def my_si():
+    def stepi():
+        gdb.execute("stepi")
+    stopped = threading.Event()
+    waiters.append(stopped)
+    gdb.post_event(stepi)
+    stopped.wait()
 
 
 def my_set_breakpoint(loc, callback=None):
     if callback:
-
         class Bp(gdb.Breakpoint):
             def stop(self):
                 # if "Cache" in globals():
                 #     Cache.reset_gef_caches()
-                print("RUNNING BP CALLBACK")
+                # print("RUNNING BP CALLBACK")
                 should_stop = callback()
-                # print(f"BP REQUESTING STOP = {stop}")
+                if should_stop is None:
+                    return True
+                # print(f"BP REQUESTING STOP = {should_stop}")
                 return should_stop
 
-        Bp(loc)
+        bp = Bp(loc)
     else:
-        gdb.Breakpoint(loc)
+        bp = gdb.Breakpoint(loc)
+    return bp.number
 
 
 def my_eval(expr):
-    print(f"evaling {expr}")
+    # print(f"evaling {expr}")
     return int(gdb.parse_and_eval(expr))
 
 
+"""
+The interrupt command behaves differently from gdb.interrupt() ...
+"""
 def my_interrupt():
     gdb.post_event(lambda: gdb.execute("interrupt"))
 
+
+"""
+https://www.eclipse.org/lists/cdt-dev/msg34353.html
+
+For some reason, executing a stepping command inside of post_event
+puts gdb in a weird state where it considers all other stepping
+instructions as also async, even without the ampersand modifier.
+"""
 
 def my_continue_nowait():
     gdb.post_event(lambda: gdb.execute("continue &"))
 
 
-def my_continue_wait():
-    print("continue and wait")
-    stopped = Event()
+def my_continue_wait(timeout: int | None = None):
+    # print("continue and wait")
+    stopped = threading.Event()
     waiters.append(stopped)
 
     def continuing():
-        print("RUNNING CONTINUE")
-        gdb.execute("continue &")
-        print("DONE RUNNING CONTINUE")
-
+        # print("RUNNING CONTINUE")
+        gdb.execute("continue")
+        # print("DONE RUNNING CONTINUE")
     gdb.post_event(continuing)
-    print("waiting...")
-    stopped.wait()
-    print("CONTINUE UNBLOCKED")
-    gdb.execute("info thread")
+    # gdb.execute("source continue.py")
+
+    stopped.wait(timeout=timeout)
+    
+    if timeout is not None:
+        gdb.execute("interrupt")
 
 
 def my_wait(timeout=None):
@@ -104,7 +162,7 @@ def my_wait(timeout=None):
     if thread.is_stopped():
         return
 
-    stopped = Event()
+    stopped = threading.Event()
     waiters.append(stopped)
     tout = not stopped.wait(timeout=timeout)
     if tout:
@@ -126,11 +184,15 @@ def my_read_memory(addr: int, size: int):
     return gdb.selected_inferior().read_memory(addr, size).tobytes()
 
 
+def my_write_memory(addr: int, data: bytes):
+    gdb.selected_inferior().write_memory(addr, data)
+
+
 def my_prompt():
     gdb.write(gdb.prompt_hook(lambda: None))
 
 
-waiters: list[Event] = []
+waiters: list[threading.Event] = []
 
 
 def unblock():
@@ -140,15 +202,11 @@ def unblock():
 
 
 def stopped(e: gdb.Event):
-    print("STOPPPED")
-    if isinstance(e, gdb.BreakpointEvent):
-        print(e.breakpoint.silent)
-        print(e.breakpoints)
-
+    # print("STOPPPED")
     if waiters:
         thread = gdb.selected_thread()
         if thread and thread.is_stopped():
-            print("UNBLOCKING")
+            # print("UNBLOCKING")
             unblock()
         else:
             gdb.post_event(unblock)
@@ -159,9 +217,10 @@ def exited(e: gdb.Event):
         waiter.set()
 
 
-s = protocol.Server("bridge", socket_path, True)
+s = pwnc.gdb.protocol.Server("bridge", socket_path, True)
 s.register("execute", my_execute)
 s.register("ni", my_ni)
+s.register("si", my_si)
 s.register("set_breakpoint", my_set_breakpoint)
 s.register("parse_and_eval", my_eval)
 s.register("continue_nowait", my_continue_nowait)

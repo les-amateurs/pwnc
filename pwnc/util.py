@@ -5,6 +5,8 @@ import re
 from argparse import Namespace as Args
 from pathlib import Path
 from . import err
+from . import config
+from . import cache
 
 
 def run(

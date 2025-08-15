@@ -50,3 +50,6 @@ class Reloca:
     offset: addr
     info: addr
     addend: addr
+    # technically not but oh well
+    type: addr
+    sym: addr

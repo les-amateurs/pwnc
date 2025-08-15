@@ -160,7 +160,7 @@ void info(const char *fmt, ...) {
 /* File does not contribute to nr_files count */
 #define FMODE_NOACCOUNT (1 << 29)
 
-void wait() {
+void stall() {
     info("pause: ");
     getchar();
 }

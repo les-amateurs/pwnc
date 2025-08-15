@@ -11,9 +11,11 @@ from pwnlib import gdb as gdbutils
 from pwnlib import elf as elfutils
 from pwnlib.tubes.process import process
 from pwnlib.tubes.tube import tube
+from pwn import context
 
 from ..util import *
 from .. import config
+from .protocol import Server
 
 # hack to get intellisense
 try:
@@ -134,10 +136,11 @@ class Registers:
 
 
 class Gdb:
-    def __init__(self, conn, binary: elfutils.ELF = None, resolve_debuginfo: bool = True, **kwargs):
+    def __init__(self, conn: Server, binary: elfutils.ELF = None, resolve_debuginfo: bool = True, headless = False, **kwargs):
         gdbref = self
         self.conn = conn
         self.regs = Registers(self)
+        self.headless = headless
 
     def pid(self):
         return int(self.gdb.execute("info proc", to_string=True).splitlines()[0].split(" ")[-1])
@@ -148,13 +151,13 @@ class Gdb:
     def continue_nowait(self):
         self.conn.run("continue_nowait")
 
-    def continue_and_wait(self):
-        self.conn.run("continue")
+    def continue_and_wait(self, timeout: int | None = None):
+        self.conn.run("continue", timeout=timeout)
 
-    def cont(self):
-        self.continue_and_wait()
+    def cont(self, timeout: int | None = None):
+        self.continue_and_wait(timeout=timeout)
 
-    def wait_for_stop(self, timeout=None) -> bool:
+    def wait_for_stop(self, timeout: int | None = None) -> bool:
         return self.conn.run("wait", timeout=timeout)
 
     def is_running(self):
@@ -176,23 +179,30 @@ class Gdb:
             spec = location
 
         if callback is not None:
-            bp = self.conn.run("set_breakpoint", spec, callback)
+            bp_id = self.conn.run("set_breakpoint", spec, callback)
         else:
-            bp = self.conn.run("set_breakpoint", spec)
+            bp_id = self.conn.run("set_breakpoint", spec)
         self.prompt()
+        return bp_id
 
-    def execute(self, cmd: str, to_string: bool = False, from_tty: bool = False) -> str | None:
+    def execute(self, cmd: str, to_string=False, from_tty=False, safe=False) -> str | None:
         try:
-            return self.conn.run("execute", cmd, to_string=to_string, from_tty=from_tty)
+            return self.conn.run("execute", cmd, to_string=to_string, from_tty=from_tty, safe=safe)
         except Exception as e:
             msg = e.args[0]
             err.warn(f"failed to execute cmd (`{cmd}`): {msg}")
 
     def read_memory(self, address: int, length: int) -> bytes:
         return self.conn.run("read_memory", address, length)
+    
+    def write_memory(self, address: int, data: bytes):
+        self.conn.run("write_memory", address, data)
 
     def ni(self):
         self.conn.run("ni")
+
+    def si(self):
+        self.conn.run("si")
 
     def parse_and_eval(self, expr: str) -> int:
         return self.conn.run("parse_and_eval", expr)
@@ -205,18 +215,21 @@ class Gdb:
         if isinstance(self.instance, int):
             os.kill(self.instance, signal.SIGTERM)
         elif isinstance(self.instance, tube):
-            self.instance.close()
+            with context.quiet:
+                self.instance.close()
         else:
             err.warn(f"unknown instance type: {self.instance}")
 
     def gui(self):
-        terminal = select_terminal(False)
-        stdout = str(self.inout / "stdout")
-        stderr = str(self.inout / "stderr")
-        stdin = str(self.inout / "stdin")
-        misc.run_in_new_terminal(
-            ["sh", "-c", f"cat {stdout} & cat {stderr} & cat > {stdin}"], terminal=terminal, args=[]
-        )
+        if self.headless:
+            terminal = select_terminal(False)
+            stdout = str(self.inout / "stdout")
+            stderr = str(self.inout / "stderr")
+            stdin = str(self.inout / "stdin")
+            misc.run_in_new_terminal(
+                ["sh", "-c", f"cat {stdout} & cat {stderr} & cat > {stdin}"], terminal=terminal, args=[]
+            )
+            self.headless = False
 
 
 def on(option: bool):
@@ -260,23 +273,23 @@ def select_terminal(headless: bool):
         return "kitty"
 
 
-from .protocol import Server
-
-
 class Bridge:
     def __init__(
         self,
-        aslr: bool = True,
+        aslr = True,
         index_cache: bool = None,
-        index_cache_path: bool = None,
+        index_cache_path: str | None = None,
+        stupid_hack = False,
         **kwargs,
     ):
+        script_dir = pathlib.Path(__file__).parent
         self.gdbscript = []
         self.launch_directory = pathlib.Path(mkdtemp())
         self.socket_path = str(self.launch_directory / "socket")
-        self.bridge_path = str(pathlib.Path(__file__).parent / "bridge.py")
+        self.bridge_path = str(script_dir / "bridge.py")
         self.gdbscript_path = str(self.launch_directory / "gdbscript")
         self.gdb_path = str(gdbutils.binary())
+        # self.gdb_path = "gdb-multiarch"
         self.background_server = None
 
         if aslr is not None:
@@ -285,6 +298,9 @@ class Bridge:
             if index_cache_path is not None:
                 self.gdbscript.append("set index-cache directory {:s}".format(index_cache_path))
             self.gdbscript.append("set index-cache enabled {:s}".format(on(index_cache)))
+        if stupid_hack:
+            stupid_hack_path = str(script_dir / "stupid-hack.py")
+            self.gdbscript.append("source {:s}".format(stupid_hack_path))
 
         self.gdbscript.append("python socket_path = {!r}".format(self.socket_path))
         self.gdbscript.append("source {:s}".format(self.bridge_path))
@@ -302,7 +318,7 @@ class Bridge:
             except FileNotFoundError:
                 time.sleep(0.1)
         else:
-            print("failed to connect")
+            err.fatal("failed to connect")
 
         return connection
 
@@ -311,13 +327,14 @@ class Bridge:
 def attach(
     target: str | tuple[str, int],
     elf: elfutils.ELF = None,
-    headless: bool = False,
-    aslr: bool = True,
-    resolve_debuginfo: bool = False,
+    headless = False,
+    aslr = True,
+    resolve_debuginfo = False,
     index_cache: bool = None,
     gdbscript: str = "",
-    args: list = [],
-    targs: list = [],
+    args: list[str] = [],
+    targs: list[str] = [],
+    stupid_hack = True,
     options: dict = None,
     **kwargs,
 ):
@@ -363,7 +380,8 @@ def attach(
         a = os.open(inout / "stdin", os.O_RDWR)
         b = os.open(inout / "stdout", os.O_RDWR)
         c = os.open(inout / "stderr", os.O_RDWR)
-        instance = process(command, stdin=a, stdout=b, stderr=c)
+        with context.quiet:
+            instance = process(command, stdin=a, stdout=b, stderr=c)
     else:
         instance = misc.run_in_new_terminal(command, terminal=terminal, args=[] + targs, kill_at_exit=True)
 
@@ -378,14 +396,15 @@ def attach(
 def debug(
     target: str | elfutils.ELF,
     elf: elfutils.ELF = None,
-    headless: bool = False,
-    aslr: bool = True,
-    resolve_debuginfo: bool = False,
+    headless = False,
+    aslr = True,
+    resolve_debuginfo = False,
     index_cache: bool = None,
-    gdbscript: str = "",
-    args: list = [],
-    targs: list = [],
-    port: int = 0,
+    gdbscript = "",
+    args: list[str] = [],
+    targs: list[str] = [],
+    port = 0,
+    stupid_hack = True,
     options: dict = None,
 ):
     # command = [bridge.gdbserver_path, str(elf.path), "-x", bridge.gdbscript_path]
@@ -397,7 +416,8 @@ def debug(
     command.append(f"localhost:{port}")
     command.append(target)
 
-    p = process(command)
+    with context.quiet:
+        p = process(command)
     pid = p.recvline()
     port = int(p.recvline().rsplit(maxsplit=1)[1])
 

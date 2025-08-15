@@ -206,13 +206,19 @@ class ELF:
             err.fatal(f"note name is not b'GNU\\x00', was {note.name}")
         return note.description
 
-    def section_name(self, section: "ELF.Section"):
-        section_name_table = self.sections[self.header.section_name_table_index]
-        contents = self.section_content(section_name_table)
-        offset = section.name
+    def section_str(self, strtab: "ELF.Section | bytes", offset: int):
+        if type(strtab) == self.Section:
+            contents = self.section_content(strtab)
+        else:
+            contents = strtab
+        start = offset
         while contents[offset] != 0:
             offset += 1
-        return contents[section.name : offset]
+        return contents[start : offset]
+
+    def section_name(self, section: "ELF.Section"):
+        section_name_table = self.sections[self.header.section_name_table_index]
+        return self.section_str(section_name_table, section.name)
 
     def section_content(self, section: "ELF.Section", element=None):
         content = memoryview(self.raw_elf_bytes)[section.offset : section.offset + section.size]
@@ -222,6 +228,22 @@ class ELF:
             elements = []
             for i in range(0, len(content), ctypes.sizeof(element)):
                 elements.append(element.from_buffer(content, i))
+            return elements
+        
+    def segment_from_virtual_address(self, virtual_address: int):
+        for segment in self.segments:
+            if segment.virtual_address <= virtual_address and virtual_address < segment.virtual_address + segment.mem_size:
+                return segment
+
+    # doesn't account for mem_size padding
+    def segment_content(self, segment: "ELF.Segment", element=None):
+        content = memoryview(self.raw_elf_bytes)[segment.offset : segment.offset + segment.file_size]
+        if element is None:
+            return content
+        else:
+            elements = []
+            for i in range(0, len(content), ctypes.sizeof(element)):
+                elements.append(element.from_buffer_copy(content, i))
             return elements
 
     def notes(self, content: bytes) -> list[note.Note]:
