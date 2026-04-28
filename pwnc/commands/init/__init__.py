@@ -137,7 +137,7 @@ class Container:
         else:
             out = self.exec(["cat", path.as_posix()])
             if out.returncode != 0:
-                err.fatal(f"failed to read {path}")
+                raise RuntimeError(f"Failed to read {path}")
             return out.stdout[:nbytes or len(out.stdout)]
         
 
@@ -193,8 +193,8 @@ class Container:
         else:
             root = Path("/") / root
             out = self.exec(["find", root.as_posix() + "/", "(", "-type", "f", "-o", "-type", "l", ")"])
-            if out.returncode != 0:
-                err.fatal(f"failed to list files for {pid} in container {self.id}")
+            if out.returncode != 0 and out.stdout == b"":
+                err.fatal(f"failed to list files for {pid} in container {self.id}, ret: {out.returncode}")
             return [Path(p) for p in out.stdout.decode("ascii", errors="ignore").strip().splitlines()]
 
 
@@ -334,14 +334,19 @@ def from_docker_container(id: str):
     try:
         container = Container(id)
         pids = container.get_pids()
-
+        err.info(f"pids: {pids}")
         for pid in pids:
             status_path = Path("/") / "proc" / str(pid) / "status"
-            proc_status = container.read_file(status_path)
+            # one pid will fail because ls is part of the pids
+            try:
+                proc_status = container.read_file(status_path)
+            except RuntimeError:
+                err.info(f"Failed to read status of {pid}")
+                continue
             lines = proc_status.splitlines()
             lines = list(filter(lambda l: b"Uid:" in l, lines))
             # todo: check if taking the first uid is correct
-            err.info(f"uid of proc: {pid} - {str(lines)}")
+            err.info(f"uid of proc {pid}: {str(lines)}")
             uid = int(lines[0].split()[1])
 
             uid_container = ContainerWithUID(id, uid)
