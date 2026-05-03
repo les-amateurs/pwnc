@@ -30,11 +30,15 @@ def round_up_to_page(addr: int):
 
 
 class ELF:
-    def __init__(self, raw_elf_bytes: bytes, bits: int = None, little_endian: bool = None):
+    def __init__(self, raw_elf_bytes: bytes, bits: int | None = None, little_endian: bool | None = None, readonly: bool = True):
         if bits is not None and bits not in ALLOWED_BITS:
             err.fatal(f"{bits} not one of {ALLOWED_BITS}")
 
-        self.raw_elf_bytes = bytearray(raw_elf_bytes)
+        if readonly:
+            self.raw_elf_bytes = raw_elf_bytes
+        else:
+            self.raw_elf_bytes = bytearray(raw_elf_bytes)
+        self.readonly = readonly
         self.cached_header_type = None
         self.cached_segment_type = None
         self.cached_section_type = None
@@ -59,6 +63,12 @@ class ELF:
     def check(self):
         if bytes(self.ident.magic) != b"\x7fELF":
             raise Exception("bad elf magic")
+        
+    def extract(self, ctype, bytes, *args):
+        if self.readonly:
+            return ctype.from_buffer_copy(bytes, *args)
+        else:
+            return ctype.from_buffer(bytes, *args)
 
     @property
     def Header(self):
@@ -111,7 +121,7 @@ class ELF:
     @property
     def ident(self):
         if not self.cached_ident:
-            self.cached_ident = header.IdentStructure.from_buffer(self.raw_elf_bytes)
+            self.cached_ident = self.extract(header.IdentStructure, self.raw_elf_bytes)
         return self.cached_ident
 
     @property
@@ -143,7 +153,7 @@ class ELF:
     @property
     def header(self) -> header.Header:
         if not self.cached_header:
-            self.cached_header = self.Header.from_buffer(self.raw_elf_bytes)
+            self.cached_header = self.extract(self.Header, self.raw_elf_bytes)
         return self.cached_header
 
     @property
@@ -152,7 +162,7 @@ class ELF:
             self.cached_segments = []
             offset = self.header.segment_offset
             for _ in range(self.header.number_of_segments):
-                segment = self.Segment.from_buffer(self.raw_elf_bytes, offset)
+                segment = self.extract(self.Segment, self.raw_elf_bytes, offset)
                 offset += ctypes.sizeof(self.Segment)
                 self.cached_segments.append(segment)
         return self.cached_segments
@@ -163,7 +173,7 @@ class ELF:
             self.cached_sections = []
             offset = self.header.section_offset
             for _ in range(self.header.number_of_sections):
-                section = self.Section.from_buffer(self.raw_elf_bytes, offset)
+                section = self.extract(self.Section, self.raw_elf_bytes, offset)
                 offset += ctypes.sizeof(self.Section)
                 self.cached_sections.append(section)
         return self.cached_sections
@@ -195,15 +205,19 @@ class ELF:
     def buildid(self, section: "ELF.Section" = None):
         buildid_section = section or self.section_from_name(b".note.gnu.build-id")
         if buildid_section is None:
-            err.fatal("failed to find .note.gnu.build-id section")
+            err.warn("failed to find .note.gnu.build-id section")
+            return None
         notes = self.notes(self.section_content(buildid_section))
         if len(notes) == 0:
-            err.fatal("unable to parse any notes from .note.gnu.build-id")
+            err.warn("unable to parse any notes from .note.gnu.build-id")
+            return None
         note = notes[0]
         if note.type != 3:
-            err.fatal(f"note type is not NT_GNU_BUILD_ID (3), was {note.type}")
+            err.warn(f"note type is not NT_GNU_BUILD_ID (3), was {note.type}")
+            return None
         if note.name != b"GNU\x00":
-            err.fatal(f"note name is not b'GNU\\x00', was {note.name}")
+            err.warn(f"note name is not b'GNU\\x00', was {note.name}")
+            return None
         return note.description
 
     def section_str(self, strtab: "ELF.Section | bytes", offset: int):
@@ -227,7 +241,7 @@ class ELF:
         else:
             elements = []
             for i in range(0, len(content), ctypes.sizeof(element)):
-                elements.append(element.from_buffer(content, i))
+                elements.append(self.extract(element, content, i))
             return elements
         
     def segment_from_virtual_address(self, virtual_address: int):
@@ -243,7 +257,7 @@ class ELF:
         else:
             elements = []
             for i in range(0, len(content), ctypes.sizeof(element)):
-                elements.append(element.from_buffer_copy(content, i))
+                elements.append(self.extract(element, content, i))
             return elements
 
     def notes(self, content: bytes) -> list[note.Note]:
@@ -251,7 +265,7 @@ class ELF:
         length = len(content)
         notes = []
         while offset < length:
-            note = self.Note.from_buffer_copy(content, offset)
+            note = self.extract(self.Note, content, offset)
             offset += ctypes.sizeof(self.Note)
             name = content[offset : offset + note.name_size].tobytes()
             offset = (offset + note.name_size) + 3 & ~3

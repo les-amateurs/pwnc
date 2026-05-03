@@ -61,20 +61,34 @@ def command(args: Args):
                     cwd=layerPaths[i].parent,
                 )
 
+                # fuck symlinks
                 if src.is_symlink():
-                    # follow link more times?
-                    # do we care about directory traversal?
-                    real = Path(os.path.normpath((file.parent / src.readlink())))
-                    if real in current:
-                        continue
-                    current.add(real)
-                    src = layerPaths[i].parent / real
+                    err.info(f"skipping symlink {src}")
+                    continue
+                # if src.is_symlink():
+                #     print(src.readlink())
+                #     # follow link more times?
+                #     # do we care about directory traversal?
+                #     link = src.readlink()
+                #     print(link)
+                #     if link.is_absolute():
+                #         link = link.relative_to("/")
+                #     print(link)
+                #     real = Path(os.path.normpath((file.parent / link)))
+                #     if real in current:
+                #         continue
+                #     current.add(real)
+                #     src = layerPaths[i].parent / real
 
                 dst.parent.mkdir(exist_ok=True, parents=True)
                 if src.is_dir():
                     shutil.copytree(src, dst, dirs_exist_ok=True, ignore_dangling_symlinks=True)
                 else:
-                    shutil.copy(src, dst)
+                    try:
+                        shutil.copy(src, dst)
+                    except Exception as e:
+                        os.system("/bin/sh")
+                        raise e
                 err.info(f"extracted {str(file)!r} to {str(dst)!r}")
 
         if len(current) == 0:

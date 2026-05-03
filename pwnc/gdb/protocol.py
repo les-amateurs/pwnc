@@ -82,7 +82,10 @@ class Server:
 
     def stop(self):
         self.send_raw(base64.b64encode(b"stop"))
-        self.reader.close()
+        try:
+            self.reader.close()
+        except OSError:
+            pass
 
     def register(self, name: str, fn):
         self.registry[name] = fn

@@ -215,13 +215,14 @@ async def async_locate(elf: minelf.ELF):
 
 async def async_setup(fn, *args, **kwargs):
     global session, sem
-
     sem = asyncio.Queue(maxsize=MAX_CONCURRENT)
     async with aiohttp.ClientSession() as session:
         return await fn(*args, **kwargs)
 
 
 def locate(elf: minelf.ELF):
-    return asyncio.get_event_loop().run_until_complete(
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop.run_until_complete(
         async_setup(async_locate, *(elf,)),
     )

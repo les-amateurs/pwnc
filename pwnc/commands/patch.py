@@ -13,6 +13,10 @@ from ctypes import sizeof
 USELESS = [
     dyntag.Type.DEBUG
 ]
+REPLACE = [
+    dyntag.Type.RUNPATH,
+    dyntag.Type.RPATH,
+]
 
 
 def command(args):
@@ -27,7 +31,7 @@ def command(args):
             little_endian = False
         case _:
             little_endian = True
-    elf = ELF(raw_elf_bytes, args.bits, little_endian)
+    elf = ELF(raw_elf_bytes, args.bits, little_endian, readonly=False)
     outfile = args.outfile or args.file
 
     dynamic = elf.section_from_name(b".dynamic")
@@ -59,20 +63,10 @@ def command(args):
 
     if args.rpath:
         rpath_bytes = bytes(args.rpath, "utf8")
-        if extra == 0:
-            err.warn("not enough space for rpath in dynamic table")
-            err.warn("attempting to replace useless dynamic entries instead")
-            
-            for i, dyntag in enumerate(dyntags):
-                if dyntag.tag in USELESS:
-                    offset = i * sizeof(elf.Dyntag)
-                    break
-            else:
-                err.fatal("did not find any useless dynamic entries")
+        if b"\0" not in rpath_bytes:
+            err.warn(f"appending null byte to rpath ({rpath_bytes})")
+            rpath_bytes += b"\0"
 
-        if len(rpath_bytes) >= elf.Dyntag.val.size + sizeof(elf.Dyntag) * max(0, extra - 1):
-            err.fatal(f"not enough space for rpath str (max {elf.Dyntag.val.size} bytes)")
-        
         for dyntag in dyntags:
             if dyntag.tag == elf.Dyntag.Type.STRTAB:
                 strtab = dyntag
@@ -87,9 +81,41 @@ def command(args):
         else:
             err.fatal("failed to get DYNAMIC segment base address")
 
-        rpath_offset = offset + sizeof(elf.Dyntag) + elf.Dyntag.val.offset
+        rpath_entry_offset = None
+        rpath_offset = None
+
+        # err.warn("searching for replacable entries")
+        # for i, dyntag in enumerate(dyntags):
+        #     if dyntag.tag in REPLACE:
+        #         err.warn("found replacable tag")
+        #         rpath_entry_offset = i * sizeof(elf.Dyntag)
+        #         break
+
+        if extra == 0:
+            err.warn("not enough space for rpath in dynamic table")
+            err.warn("attempting to replace useless dynamic entries instead")
+            
+            for i, dyntag in enumerate(dyntags):
+                if dyntag.tag in USELESS:
+                    rpath_entry_offset = i * sizeof(elf.Dyntag)
+                    break
+            else:
+                err.fatal("did not find any useless dynamic entries")
+
+        if len(rpath_bytes) >= elf.Dyntag.val.size + sizeof(elf.Dyntag) * max(0, extra - 1):
+            err.fatal(f"not enough space for rpath str (max {elf.Dyntag.val.size} bytes)")
+
+        if rpath_entry_offset is None:
+            err.warn("rpath entry offset not set, appending to end of dynamic")
+            rpath_entry_offset = offset
+            offset += sizeof(elf.Dyntag)
+        
+        if rpath_offset is None:
+            err.warn("rpath offset no set, using the NULL entry value")
+            rpath_offset = offset + sizeof(elf.Dyntag) + elf.Dyntag.val.offset
+
         rpath_dyntag = elf.Dyntag(tag=elf.Dyntag.Type.RPATH, val=address + rpath_offset - strtab.val)
-        contents[offset : offset + sizeof(elf.Dyntag)] = bytes(rpath_dyntag)
+        contents[rpath_entry_offset : rpath_entry_offset + sizeof(elf.Dyntag)] = bytes(rpath_dyntag)
         contents[rpath_offset : rpath_offset + len(rpath_bytes)] = rpath_bytes
         err.warn(f"rpath     set to {args.rpath}")
 

@@ -1,5 +1,4 @@
 from ..util import *
-from tempfile import mkdtemp
 
 
 # is it worth it to pull in some file type recognition library?
@@ -21,8 +20,19 @@ def command(args):
     shutil.move(storage, dest)
 
 
+archive_extensions = [
+    ".gz",
+    ".tar",
+    ".tgz",
+    ".zip",
+    ".7z",
+    ".xz",
+    ".zst",
+]
+
+
 def unpack(file: Path):
-    storage = Path(mkdtemp())
+    storage = random_tmpdir().absolute()
     name = file.stem
     copy = storage / file.name
 
@@ -39,13 +49,18 @@ def unpack(file: Path):
         case ".xz":
             shutil.copyfile(file, copy)
             run("unxz {!r}".format(str(copy)), cwd=storage)
+        case ".zst":
+            shutil.copyfile(file, copy)
+            run("unzstd {!r}".format(str(copy)), cwd=storage)
         case _:
             raise NotImplementedError(f"unknown package suffix {file.suffix}")
 
     files = os.listdir(storage)
     if len(files) == 1:
         file = storage / files[0]
-        if file.is_file():
+        # only recursively unpack if it's an archive file
+        # some archives may only have a single file inside that is not an archive
+        if file.is_file() and file.suffix in archive_extensions:
             try:
                 storage, name = unpack(file)
             except NotImplementedError:

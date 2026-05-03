@@ -70,7 +70,7 @@ def my_execute(command, to_string=False, from_tty=True, safe=False):
         ret = execute_command(command, to_string=to_string, from_tty=from_tty)
         print("wtf")
 
-    gdb.write(gdb.prompt_hook(lambda: None))
+    my_prompt()
     gdb.flush()
     return ret
 
@@ -189,7 +189,11 @@ def my_write_memory(addr: int, data: bytes):
 
 
 def my_prompt():
-    gdb.write(gdb.prompt_hook(lambda: None))
+    if gdb.prompt_hook:
+        prompt = gdb.prompt_hook(lambda: None)
+    else:
+        prompt = "(gdb) "
+    gdb.write(prompt)
 
 
 waiters: list[threading.Event] = []

@@ -5,14 +5,17 @@ description = ""
 authors = ["unvariant <unvariant.winter@gmail.com>"]
 readme = "README.md"
 
+[tool.poetry.scripts]
+pwnc = "pwnc.pwncli:main"
+
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.11"
 pwntools = "^4.13.1"
 toml = "^0.10.2"
 argcomplete = "^3.5.1"
 colorama = "^0.4.6"
-beautifulsoup4 = "^4.14.2"
-aiohttp = "^3.13.2"
+beautifulsoup4 = "^4.14.3"
+aiohttp = "^3.13.3"
 
 [tool.ruff]
 line-length = 120

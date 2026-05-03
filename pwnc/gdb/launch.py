@@ -177,6 +177,9 @@ class Gdb:
                 spec = spec[1:-1]
         elif kind == "<class 'str'>":
             spec = location
+        else:
+            print("invalid location")
+            return
 
         if callback is not None:
             bp_id = self.conn.run("set_breakpoint", spec, callback)
@@ -380,8 +383,12 @@ def attach(
         a = os.open(inout / "stdin", os.O_RDWR)
         b = os.open(inout / "stdout", os.O_RDWR)
         c = os.open(inout / "stderr", os.O_RDWR)
-        with context.quiet:
-            instance = process(command, stdin=a, stdout=b, stderr=c)
+        # with context.quiet:
+            # instance = process(command, stdin=a, stdout=b, stderr=c)
+        instance = process(command, stdin=a, stdout=b, stderr=c)
+        os.close(a)
+        os.close(b)
+        os.close(c)
     else:
         instance = misc.run_in_new_terminal(command, terminal=terminal, args=[] + targs, kill_at_exit=True)
 
@@ -411,13 +418,13 @@ def debug(
     if type(target) == elfutils.ELF:
         target = target.path
 
-    command = ["gdbserver", "--multi", "--no-startup-with-shell"]
+    command = ["gdbserver", "--once", "--no-startup-with-shell"]
     command.append(f"--{no(aslr)}disable-randomization")
     command.append(f"localhost:{port}")
     command.append(target)
 
-    with context.quiet:
-        p = process(command)
+    # with context.quiet:
+    p = process(command)
     pid = p.recvline()
     port = int(p.recvline().rsplit(maxsplit=1)[1])
 
@@ -425,3 +432,12 @@ def debug(
     p.recvline()
 
     return conn, p
+
+# (-$2) + $1
+# $2 = im
+# $1 = xV
+
+# ($2) + $1
+
+# b0cf
+# e90f

