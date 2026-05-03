@@ -82,7 +82,7 @@ void info(const char *fmt, ...) {
 
 #define chk(expr)                                                              \
     ({                                                                         \
-        int _i = (expr);                                                       \
+        typeof(expr) _i = (expr);                                              \
         if (0 > _i) {                                                          \
             panic("error at %s:%d: returned %d, %s", __FILE__, __LINE__, _i,   \
                   strerror(errno));                                            \
@@ -92,7 +92,7 @@ void info(const char *fmt, ...) {
 
 #define try(expr)                                                              \
     ({                                                                         \
-        int _i = (expr);                                                       \
+        typeof(expr) _i = (expr);                                              \
         if (0 > _i) {                                                          \
             warn("pwn: error at %s:%d: returned %d, %s", __FILE__, __LINE__,   \
                  _i, strerror(errno));                                         \

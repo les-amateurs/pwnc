@@ -7,7 +7,6 @@ from pwn import log
 
 def remote_upload(conn: tube, contents: bytes, workdir="/tmp", shell_prefix=b"$ ", chunk_size=500):
     exploit = gzip.compress(contents)
-    # context.log_level = "debug"
     conn.sendlineafter(shell_prefix, f"cd {workdir}".encode())
 
     with log.progress("Uploading exploit...") as p:

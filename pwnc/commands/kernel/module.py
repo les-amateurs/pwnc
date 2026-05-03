@@ -10,7 +10,7 @@ def parse_modinfo(elf: minelf.ELF):
     else:
         err.fatal("could not find .modinfo section")
 
-    raw_modinfo_bytes = elf.section_content(section)
+    raw_modinfo_bytes = elf.section_content(modinfo)
     info = dict()
     for entry in raw_modinfo_bytes.tobytes().strip(b"\x00").split(b"\x00"):
         if b"=" not in entry:

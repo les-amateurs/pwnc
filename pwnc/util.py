@@ -24,18 +24,22 @@ def run(
     env = os.environ.copy()
     if extra_env is not None:
         env.update(extra_env)
-    return subprocess.run(
-        cmd,
-        shell=shell,
-        check=check,
-        capture_output=capture_output,
-        encoding=encoding,
-        cwd=cwd,
-        stdout=stdout,
-        stdin=stdin,
-        input=input,
-        env=env,
-    )
+    try:
+        ret = subprocess.run(
+            cmd,
+            shell=shell,
+            check=check,
+            capture_output=capture_output,
+            encoding=encoding,
+            cwd=cwd,
+            stdout=stdout,
+            stdin=stdin,
+            input=input,
+            env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        err.fatal(f"{cmd} exited with {e.returncode}")
+    return ret
 
 
 def backup(file: Path):

@@ -36,7 +36,9 @@ async def async_search(args: Args):
     versions = await request_versions(num_published, package)
     versions = sorted(versions, key=extract_major_minor, reverse=True)
 
-    handle = run(["fzf", "-i"], input="\n".join(versions), capture_output=True, check=False)
+    handle = run(
+        ["fzf", "-i"], input="\n".join(versions), capture_output=True, check=False
+    )
     if handle.returncode != 0:
         err.fatal("search cancelled")
 

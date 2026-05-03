@@ -147,6 +147,8 @@ async def request_build_pages(package: str, version: str, architectures: list[st
 
 async def request_deb(binpackage: str, version: str, arch: str, build: str):
     debug = re.compile(rf"{binpackage}-dbg(sym)?_{version}_{arch}.d?deb$")
+    normal = re.compile(rf"{binpackage}_{version}_{arch}.d?deb$")
+
     # development_debug = re.compile(rf"{binpackage}-dev-dbg(sym)?_{version}_{arch}.d?deb$")
     # development = re.compile(rf"{binpackage}-dev_{version}_{arch}.d?deb$")
 
@@ -166,6 +168,8 @@ async def request_deb(binpackage: str, version: str, arch: str, build: str):
 
 def parse_libc_version(elf: minelf.ELF):
     m = VERSION.search(elf.raw_elf_bytes)
+    if not m:
+        return None
     if not m.group(1):
         err.warn("failed to determine libc version")
     return m.group(1).decode()
