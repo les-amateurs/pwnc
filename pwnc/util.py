@@ -66,6 +66,17 @@ def random_tmpdir(prefix="tmp-"):
     return tmpdir
 
 
+def walk_recursive(target: Path, dirs = True, files = True):
+    for path, dirlist, filelist in os.walk(target):
+        path = Path(path)
+        if dirs:
+            for dir in dirlist:
+                yield path / dir
+        if files:
+            for file in filelist:
+                yield path / file
+
+
 def find_recursive(pattern: str, callback = None, target = None) -> list[Path]:
     regex = re.compile(pattern)
     matches = []

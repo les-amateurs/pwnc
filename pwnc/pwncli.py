@@ -54,8 +54,18 @@ def get_main_parser():
     """
     Command: init
     """
-    subparser = subparsers.add_parser("init")
+    subparser = subparsers.add_parser("init", help="setup solve environment")
     subparser.add_argument("--privileged", action="store_true")
+
+    """
+    Command: template
+    """
+    subparser = subparsers.add_parser("template", help="instantiate templates")
+    subparser.add_argument("template")
+    subparser.add_argument("--file", type=PathArg, required=False)
+    subparser.add_argument("--libc", type=PathArg, required=False)
+    subparser.add_argument("--port", type=PositiveInteger, required=False)
+    subparser.add_argument("--overwrite", action="store_true")
 
     """
     Command: unpack
@@ -242,6 +252,10 @@ def main():
                 import pwnc.commands.init
 
                 pwnc.commands.init.command(args)
+            case "template":
+                import pwnc.commands.template
+
+                pwnc.commands.template.command(args)
             case "unpack":
                 import pwnc.commands.unpack
 
