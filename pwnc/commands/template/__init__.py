@@ -2,11 +2,12 @@ from ...util import *
 from ...config import locate_global_config_directory
 import toml
 
-FILE_KEY = '""" [config.file] """'
-LIBC_KEY = '""" [config.libc] """'
-PORT_KEY = '""" [config.port] """'
+FILE_KEY   = '""" [config.file] """'
+LIBC_KEY   = '""" [config.libc] """'
+LINKER_KEY = '""" [config.linker] """'
+PORT_KEY   = '""" [config.port] """'
 
-CONFIG   = "config.toml"
+CONFIG = "config.toml"
 
 TEMPLATES = locate_global_config_directory() / "templates"
 
@@ -21,17 +22,25 @@ def instantiate(path: Path, args: dict):
 
 def command(args: Args):
     template = args.template
+
     file_path = None
     if args.file:
         file_path = "{!r}".format(str(args.file))
+
     libc_path = None
     if args.libc:
         libc_path = "{!r}".format(str(args.libc)) if args.libc else 'None'
+
+    linker_path = None
+    if args.linker:
+        linker_path = "{!r}".format(str(args.linker)) if args.linker else 'None'
+
     port = args.port
 
     replacements = {
         FILE_KEY: file_path,
         LIBC_KEY: libc_path,
+        LINKER_KEY: linker_path,
         PORT_KEY: str(port),
     }
 

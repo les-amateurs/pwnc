@@ -42,6 +42,19 @@ just breaks. Could fallback to using docker exec or experiment with uid remappin
 """
 
 
+class InitError(Exception):
+    pass
+
+
+class RunningResult(NamedTuple):
+    binary: Path
+    dependencies: set[Path]
+
+
+class InitResult(NamedTuple):
+    resolved: list[RunningResult]
+    ports: set[int]
+
 
 def binary_filter(path: Path):
     if not path.is_file(follow_symlinks=False):
@@ -189,7 +202,7 @@ class Container:
         if self.direct:
             def file_type_filter(path):
                 return path.is_file() or path.is_symlink()
-            return [p.relative_to(self.root) for p in find_recursive(".*", callback=file_type_filter, target=self.root / root)]
+            return [Path("/") / p.relative_to(self.root) for p in find_recursive(".*", callback=file_type_filter, target=self.root / root)]
         else:
             root = Path("/") / root
             out = self.exec(["find", root.as_posix() + "/", "(", "-type", "f", "-o", "-type", "l", ")"])
@@ -266,11 +279,15 @@ class ContainerWithUID(Container):
         return run(cmd, shell=False, check=False, capture_output=True, encoding=None)
 
 
-def from_running(container: Container, pid: int):
+def from_running(container: Container, pid: int) -> RunningResult:
     exe = Path("/") / "proc" / str(pid) / "exe"
     resolved = set()
-    targets = [(exe, container.read_link(exe).name)]
+    binary = Path(container.read_link(exe).name)
+    result = RunningResult(binary=binary, dependencies=set())
+    targets = [(exe, binary)]
+
     while targets:
+        err.debug(f"{'targets':<12}: {targets}")
         target, dst = targets.pop()
         if target in resolved:
             continue
@@ -323,13 +340,20 @@ def from_running(container: Container, pid: int):
                 err.warn(f"unable to find dynstr for {dst}")
 
         resolved.add(target)
+        result.dependencies.add(dst)
+        err.debug(f"{'RESOLVED':<12}: {resolved}")
 
-def from_docker_container(id: str):
+    result.dependencies.remove(result.binary)
+    return result
+
+
+def from_docker_container(id: str) -> list[RunningResult]:
     hashes = {}
     bins = possible_binaries()
     matches = []
     tmp = random_tmpdir()
     copy = tmp / "copy"
+    results = []
 
     try:
         container = Container(id)
@@ -344,10 +368,13 @@ def from_docker_container(id: str):
                 err.info(f"Failed to read status of {pid}")
                 continue
             lines = proc_status.splitlines()
-            lines = list(filter(lambda l: b"Uid:" in l, lines))
+            uid_lines = list(filter(lambda l: l.startswith(b"Uid:"), lines))
+            name_lines = list(filter(lambda l: l.startswith(b"Name:"), lines))
             # todo: check if taking the first uid is correct
-            err.info(f"uid of proc {pid}: {str(lines)}")
-            uid = int(lines[0].split()[1])
+            # err.info(f"uid of proc {pid}: {str(uid_lines)}")
+            uid = int(uid_lines[0].split()[1])
+            name = name_lines[0].split()[1]
+            err.info(f"uid: {uid}, name: {name}")
 
             uid_container = ContainerWithUID(id, uid)
             src = Path("/") / "proc" / str(pid) / "exe"
@@ -368,11 +395,13 @@ def from_docker_container(id: str):
                     break
 
         for match in matches:
-            from_running(*match)
+            results.append(from_running(*match))
     finally:
         shutil.rmtree(tmp)
+    return results
 
-def handle_docker(args: Args):
+
+def handle_docker(args: Args) -> InitResult | None:
     if run(["docker", "--version"], shell=False, check=False, capture_output=True).returncode != 0:
         err.warn("docker not found")
         return
@@ -381,7 +410,7 @@ def handle_docker(args: Args):
     if out.returncode != 0:
         print(out.stderr, end="")
         err.warn("failed to build docker container")
-        return False
+        raise InitError("docker")
     
     tag = out.stdout.strip()
     runner = ["docker", "run", "-d", "-q"]
@@ -396,7 +425,7 @@ def handle_docker(args: Args):
     if out.returncode != 0:
         print(out.stderr, end="")
         err.warn("docker failed to run")
-        return False
+        raise InitError("docker")
     
     containers = []
     socks = []
@@ -409,13 +438,13 @@ def handle_docker(args: Args):
         if out.returncode != 0:
             print(out.stderr, end="")
             err.warn("docker failed to get container status")
-            return False
+            raise InitError("docker")
         
         status = out.stdout.strip()
         if status == "false":
             run(["docker", "logs", id], shell=False, check=False)
             err.warn("container failed to start or exited")
-            return False
+            raise InitError("docker")
         
         time.sleep(0.5)
         container = Container(id)
@@ -425,7 +454,7 @@ def handle_docker(args: Args):
         if out.returncode != 0:
             print(out.stderr, end="")
             err.warn("docker failed top stop container")
-            return False
+            raise InitError("docker")
         
         for port in ports:
             runner.extend(["-p", f"{port}:{port}"])
@@ -436,7 +465,7 @@ def handle_docker(args: Args):
         if out.returncode != 0:
             print(out.stderr, end="")
             err.warn("docker failed to run")
-            return False
+            raise InitError("docker")
         
         id = out.stdout.strip()
         containers.append(id)
@@ -446,8 +475,8 @@ def handle_docker(args: Args):
             socks.append(sock)
 
         time.sleep(0.5)
-        from_docker_container(id)
-        return True
+        resolved = from_docker_container(id)
+        return InitResult(resolved=resolved, ports=ports)
     finally:
         for id in containers:
             out = run(["docker", "kill", id], shell=False, check=False, capture_output=True)
@@ -467,6 +496,28 @@ def handle_docker(args: Args):
         for sock in socks:
             sock.close()
 
+def build_compose_env_override(services: list[str], env: dict[str, str]):
+    BLACKLIST = "\n\r\0:"
+
+    def line(data: str, indent: int):
+        return (" " * 4) * indent + data
+
+    lines = [line("services:", 0)]
+    for service in services:
+        lines.append(line(f"{service}:", 1))
+        lines.append(line("environment:", 2))
+        for key, value in env.items():
+            if any(ch in BLACKLIST for ch in key):
+                err.warn("invalid env key")
+                return
+            if any(ch in BLACKLIST for ch in value):
+                err.warn("invalid env value")
+                return
+            value = "{!r}".format(value)
+            lines.append(line(f"{key}: {value}", 3))
+
+    return "\n".join(lines)
+
 def handle_compose(args: Args):
     if run(["docker", "compose", "version"], shell=False, check=False, capture_output=True).returncode != 0:
         err.warn("docker compose not found")
@@ -478,19 +529,58 @@ def handle_compose(args: Args):
         pubs = info.get("Publishers")
         return (id, name, pubs)
 
+    override_path = random_tmpfile(suffix=".yaml")
     socks = []
 
     try:
-        out = run(["docker", "compose", "up", "-d"], shell=False, check=False, capture_output=True)
+        out = run(["docker", "compose", "config"], shell=False, check=False, capture_output=True)
         if out.returncode != 0:
             print(out.stderr, end="")
+            err.warn("failed to find compose file")
+            return
+        
+        out = run(["docker", "compose", "config", "--services"], shell=False, check=False, capture_output=True)
+        if out.returncode != 0:
+            print(out.stderr, end="")
+            err.warn("failed to list compose services")
+            raise InitError("compose")
+        
+        services = out.stdout.strip().splitlines()
+        override = build_compose_env_override(services, {
+            "JAIL_POW": "0",
+            "DEBIAN_FRONTEND": "noninteractive",
+        })
+        override_path.write_text(override)
 
-            if out.stderr.startswith("no configuration"):
-                err.warn("failed to find compose file")
-                return
-            
+        out = run(["docker", "compose", "create", "--force-recreate"], shell=False, check=False, capture_output=False)
+        if out.returncode != 0:
+            print(out.stderr, end="")
+            err.warn("failed to build compose")
+            raise InitError("compose")
+        
+        out = run(["docker", "compose", "ps", "-q", "-a"], shell=False, check=False, capture_output=True)
+        if out.returncode != 0:
+            print(out.stderr, end="")
+            err.warn("failed to get container id")
+            raise InitError("compose")
+        cid = out.stdout.strip()
+        
+        out = run(["docker", "inspect", cid, "--format", "{{ index .Config.Labels \"com.docker.compose.project.config_files\" }}"], shell=False, check=False, capture_output=True)
+        if out.returncode != 0:
+            print(out.stderr, end="")
+            err.warn("failed to get compose files")
+            raise InitError("compose")
+        temp = out.stdout.strip().split(",")
+        files = []
+        for f in temp:
+            files += ["-f", f]
+        files += ["-f", str(override_path)]
+
+        out = run(["docker", "compose", *files, "up", "-d"], shell=False, check=False, capture_output=False)
+        if out.returncode != 0:
+            print(out.stderr, end="")
             err.warn("failed to start compose")
-            return False
+            raise InitError("compose")
 
         lines = run(["docker", "compose", "ps", "--format", "json", "--no-trunc"], shell=False, capture_output=True).stdout.strip().splitlines()
         infos = map(lambda line: json.loads(line), lines)
@@ -515,10 +605,11 @@ def handle_compose(args: Args):
                         socks.append(sock)
                         connected.add(pubport)
 
+        resolved = []
         for id, *_ in infos:
-            from_docker_container(id)
+            resolved += from_docker_container(id)
 
-        return True
+        return InitResult(resolved=resolved, ports=connected)
     finally:
         err.info("killing compose")
         out = run(["docker", "compose", "kill"], shell=False, check=False, capture_output=True)
@@ -527,21 +618,58 @@ def handle_compose(args: Args):
             err.warn("failed to stop compose")
         for sock in socks:
             sock.close()
+        override_path.unlink()
 
+
+def get_libc_file(files: set[Path]):
+    files = filter(binary_filter, files)
+    for file in files:
+        if "libc" in file.name:
+            return file
+        
+def get_linker_file(files: set[Path]):
+    files = filter(binary_filter, files)
+    for file in files:
+        if "ld-linux" in file.name:
+            return file
+
+def handle_init(result: InitResult, args: Args):
+    if len(result.resolved) > 1:
+        err.warn("more than one binary, defaulting to first")
+    target = result.resolved[0]
+    libc = get_libc_file(target.dependencies)
+    linker = get_linker_file(target.dependencies)
+    extra = ["--file", target.binary]
+    if libc is not None:
+        extra += ["--libc", str(libc)]
+    if linker is not None:
+        extra += ["--linker", str(linker)]
+    if result.ports:
+        port = list(result.ports)[0]
+        extra += ["--port", str(port)]
+    if args.overwrite:
+        extra += ["--overwrite"]
+    run(["pwnc", "template", args.template] + extra, shell=False)
 
 def command(args: Args):
-    res = handle_compose(args)
-    if res is None:
-        err.warn("docker compose not installed or compose.yml not found")
-    elif not res:
-        err.fatal("docker compose failed to start")
-    else:
+    try:
+        res = handle_compose(args)
+        if res is None:
+            err.warn("compose: not installed or not compose")
+    except InitError as e:
+        err.fatal(e)
         return
 
-    res = handle_docker(args)
     if res is None:
-        err.warn("docker not installed or Dockerfile not found")
-    elif not res:
-        err.fatal("docker failed to start")
-    else:
-        return
+        try:
+            res = handle_docker(args)
+            if res is None:
+                err.warn("docker: not installed or not docker")
+        except InitError as e:
+            err.fatal(e)
+            return
+        
+    if res is None:
+        err.fatal("unable to init")
+
+    handle_init(res, args)    

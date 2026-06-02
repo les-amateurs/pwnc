@@ -35,6 +35,8 @@ async def async_search(args: Args):
     num_published = await request_num_published(package)
     versions = await request_versions(num_published, package)
     versions = sorted(versions, key=extract_major_minor, reverse=True)
+    with open("versions.txt", "w+") as f:
+        f.write("\n".join(versions))
 
     handle = run(
         ["fzf", "-i"], input="\n".join(versions), capture_output=True, check=False
@@ -53,6 +55,8 @@ async def async_search(args: Args):
 
 
 def command(args: Args):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     return asyncio.get_event_loop().run_until_complete(
         async_setup(async_search, *(args,)),
     )

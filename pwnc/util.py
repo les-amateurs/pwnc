@@ -66,6 +66,16 @@ def random_tmpdir(prefix="tmp-"):
     return tmpdir
 
 
+def random_tmpfile(prefix="tmp-", suffix=""):
+    """
+    Caller is responsible for cleaning up the directory.
+    """
+    token = secrets.token_hex(16)
+    tmpfile = Path(f"{prefix}{token}{suffix}")
+    tmpfile.touch(exist_ok=False)
+    return tmpfile
+
+
 def walk_recursive(target: Path, dirs = True, files = True):
     for path, dirlist, filelist in os.walk(target):
         path = Path(path)

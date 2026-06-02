@@ -17,6 +17,11 @@ description = """\
 def PathArg(file):
     return Path(file)
 
+def TemplateArg(**kwargs):
+    from pwnc.commands.template import TEMPLATES
+    templates =  filter(lambda path: path.is_dir(), TEMPLATES.iterdir())
+    templates = map(lambda path: path.name, templates)
+    return list(templates)
 
 def DockerImageArg(**kwargs):
     try:
@@ -55,7 +60,9 @@ def get_main_parser():
     Command: init
     """
     subparser = subparsers.add_parser("init", help="setup solve environment")
+    subparser.add_argument("template", type=str, default="default", nargs="?").completer = TemplateArg
     subparser.add_argument("--privileged", action="store_true")
+    subparser.add_argument("--overwrite", action="store_true")
 
     """
     Command: template
@@ -64,6 +71,7 @@ def get_main_parser():
     subparser.add_argument("template")
     subparser.add_argument("--file", type=PathArg, required=False)
     subparser.add_argument("--libc", type=PathArg, required=False)
+    subparser.add_argument("--linker", type=PathArg, required=False)
     subparser.add_argument("--port", type=PositiveInteger, required=False)
     subparser.add_argument("--overwrite", action="store_true")
 
