@@ -20,8 +20,7 @@ bp_main = g.bp("main")
 bp_add = g.bp("add")
 print(f"Set breakpoints: main (#{bp_main.number}), add (#{bp_add.number})")
 
-g.run()
-stop = g.wait()
+stop = g.run()                      # run() / cont() / stepi() wait and return the stop
 print(f"\nHit breakpoint at main (reason: {stop.get('reason')})")
 
 print("\n--- Globals at main entry ---")
@@ -39,11 +38,9 @@ print(f"rbp = 0x{g.reg.rbp:x}")
 print("\n--- Stepping ---")
 for i in range(3):
     g.nexti()
-    g.wait()
     print(f"  step {i+1}: rip=0x{g.reg.rip:x}")
 
-g.cont()
-stop = g.wait()
+stop = g.cont()
 print(f"\nHit breakpoint at add (reason: {stop.get('reason')})")
 
 frame = g.frame()
@@ -64,8 +61,7 @@ for off in range(0, 32, 8):
     print(f"  rsp+{off:#04x}: 0x{word:016x}")
 
 bp_add.delete()
-g.cont()
-stop = g.wait()
+stop = g.cont()
 print(f"\nProgram finished (reason: {stop.get('reason')})")
 
 g.close()

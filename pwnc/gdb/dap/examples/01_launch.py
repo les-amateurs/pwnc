@@ -32,8 +32,7 @@ print("origin.x after write =", g.sym.origin.x)        # 999
 # breakpoint callback: fires on each hit; return False to stop, else auto-continue
 hits = []
 g.bp("update_origin", callback=lambda gg: hits.append(int(gg.sym.counter)))
-g.cont()
-stop = g.wait()
+stop = g.cont()                          # cont() waits and returns the stop
 print("update_origin hits:", hits, "-> program", stop.get("reason"))
 
 g.close()

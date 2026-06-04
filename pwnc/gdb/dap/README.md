@@ -23,16 +23,21 @@ from pwnc.gdb.dap import debug
 
 g = debug("./binary")          # gdbserver + tube for clean IO; gdb attaches over DAP
 g.bp("main")
-g.run(); g.wait()
+stop = g.run()                 # run/cont/stepi/... resume AND wait; return the stop dict
 
 g.sym.counter                  # typed pwnc.types Value over live memory
 g.sym.origin.x                 # struct fields, bitfields, pointers, arrays
 g.reg.rip; g.reg.rip = 0x401000
 g.read(addr, 64); g.write(addr, b"\x90")
-g.stepi(); g.nexti(); g.skip(); g.cont()
+g.stepi(); g.nexti(); g.skip(); stop = g.cont()
 
 bp = g.bp("update_origin", callback=lambda g: print(int(g.sym.counter)))
-g.cont(); g.wait()             # callback runs each hit; return False to stop
+stop = g.cont()                # callback runs each hit; return False to stop
+
+# async control: resume without waiting, break in, then collect the stop
+g.cont_nowait()
+g.interrupt()
+stop = g.wait()
 
 g.close()
 ```

@@ -211,32 +211,47 @@ class Gdb:
     def _tid(self):
         return self._cur_thread if self._cur_thread is not None else 1
 
-    def run(self, *args):
-        # After attach (gdbserver/pid) the inferior is stopped; "run" == go.
-        self.cont()
+    # Resume/step methods block until the next stop and return its dict (running
+    # breakpoint callbacks). Use cont_nowait()/interrupt()/wait() for async control.
 
-    def cont(self):
+    def run(self, *args, timeout=None):
+        # After attach (gdbserver/pid) the inferior is stopped; "run" == go.
+        return self.cont(timeout=timeout)
+
+    def cont(self, timeout=None):
+        """Continue, then block until the next stop; returns the stop dict."""
+        self.cont_nowait()
+        return self.wait(timeout=timeout)
+
+    def cont_nowait(self):
+        """Continue without waiting (async). Collect the stop later via wait()."""
         self.transport.request("continue", {"threadId": self._tid()})
 
     def interrupt(self):
+        """Stop a running inferior (async). Collect the stop via wait()."""
         self.transport.request("pause", {"threadId": self._tid()})
 
-    def stepi(self):
+    def stepi(self, timeout=None):
         self.transport.request("stepIn",
                                {"threadId": self._tid(), "granularity": "instruction"})
+        return self.wait(timeout=timeout)
 
-    def nexti(self):
+    def nexti(self, timeout=None):
         self.transport.request("next",
                                {"threadId": self._tid(), "granularity": "instruction"})
+        return self.wait(timeout=timeout)
 
-    def step(self):
+    def step(self, timeout=None):
         self.transport.request("stepIn", {"threadId": self._tid()})
+        return self.wait(timeout=timeout)
 
-    def next(self):
+    def next(self, timeout=None):
         self.transport.request("next", {"threadId": self._tid()})
+        return self.wait(timeout=timeout)
 
-    def stepout(self):
+    def stepout(self, timeout=None):
         self.transport.request("stepOut", {"threadId": self._tid()})
+        return self.wait(timeout=timeout)
 
     def skip(self):
         return self.transport.request("pwncSkip")["pc"]
@@ -247,10 +262,12 @@ class Gdb:
     def wait(self, timeout=None):
         """Block until the inferior stops; run breakpoint callbacks.
 
-        A breakpoint callback gets this ``Gdb`` and may read/write freely. If it
-        returns ``False`` the stop is delivered to the caller; otherwise
-        execution auto-continues and ``wait`` keeps waiting. Event-driven over a
-        stop queue, so stops are never lost or coalesced.
+        cont()/stepi()/... already call this for you; use it directly only after
+        the async cont_nowait()/interrupt(). A breakpoint callback gets this
+        ``Gdb`` and may read/write freely. If it returns ``False`` the stop is
+        delivered to the caller; otherwise execution auto-continues and ``wait``
+        keeps waiting. Event-driven over a stop queue, so stops are never lost or
+        coalesced.
         """
         while True:
             try:
@@ -266,7 +283,7 @@ class Gdb:
                 if cb(self) is False:
                     stop_requested = True
             if ran and not stop_requested:
-                self.cont()
+                self.cont_nowait()      # resume without recursing into cont()/wait()
                 continue
             return stop
 
