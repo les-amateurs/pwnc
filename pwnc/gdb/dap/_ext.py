@@ -167,6 +167,27 @@ def _lookup_symbol(name):
     return sym
 
 
+# Executable sections — used to classify no-debug-info symbols as functions.
+_CODE_SECTIONS = (".text", ".plt", ".plt.sec", ".plt.got", ".init", ".fini")
+
+
+def _in_code_section(info_symbol_output):
+    return any(("section %s" % s) in info_symbol_output for s in _CODE_SECTIONS)
+
+
+def _word_descriptor():
+    """Target-word unsigned int doc — the default 'type' for untyped data."""
+    bits = gdb.lookup_type("void").pointer().sizeof * 8
+    return {"root": {"kind": "int", "bits": bits, "signed": False}, "types": {}}
+
+
+def _addr_of(name):
+    try:
+        return int(gdb.parse_and_eval("&" + name))
+    except gdb.error:
+        return None
+
+
 @request("pwncResolveSymbol", expect_stopped=False)
 def pwnc_resolve_symbol(*, name: str, **extra):
     """Resolve a symbol to (address, type-descriptor).
@@ -208,34 +229,60 @@ def pwnc_resolve_symbol(*, name: str, **extra):
         if addr is not None:
             return {"found": True, "address": addr, "kind": "data", "type": doc}
 
-    # Fallback: gdb's expression evaluator finds minsyms / PLT / shared-lib
-    # symbols that lookup_*symbol misses.
+    # Fallback: gdb's expression evaluator finds minsyms / PLT / shared-lib /
+    # stripped symbols that lookup_*symbol misses. These frequently have NO type
+    # ("<text variable>", "<data variable>", or "unknown type"). Classify
+    # function vs data by gdb's own label / the symbol's section rather than
+    # lumping everything together. An untyped *data* symbol's real width is
+    # unknown, so default it to a target word (use value.address / g.read for
+    # exact bytes); a *code* symbol returns its address (kind="function").
     try:
         val = gdb.parse_and_eval(name)
+        type_str = str(val.type)
+        code = val.type.strip_typedefs().code
     except gdb.error as e:
-        if "unknown type" in str(e):
-            try:
-                addr = int(gdb.parse_and_eval("&" + name))
-                return {"found": True, "address": addr, "kind": "function",
-                        "type": None}
-            except gdb.error:
-                return {"found": False}
-        return {"found": False}
+        if "unknown type" not in str(e):
+            return {"found": False}
+        val, type_str, code = None, "", None
 
-    t = val.type.strip_typedefs()
-    if t.code in (gdb.TYPE_CODE_ERROR, gdb.TYPE_CODE_FUNC):
+    is_func = ("text variable" in type_str) or (code == gdb.TYPE_CODE_FUNC)
+
+    if val is None and not is_func:
+        # No value/type at all — decide purely by the symbol's section.
+        addr = _addr_of(name)
+        if addr is None:
+            return {"found": False}
         try:
-            addr = int(gdb.parse_and_eval("&" + name))
+            info = gdb.execute("info symbol %#x" % addr, to_string=True)
         except gdb.error:
+            info = ""
+        if _in_code_section(info):
+            return {"found": True, "address": addr, "kind": "function", "type": None}
+        return {"found": True, "address": addr, "kind": "data",
+                "type": _word_descriptor()}
+
+    if is_func:
+        addr = _addr_of(name)
+        if addr is None:
             return {"found": False}
         return {"found": True, "address": addr, "kind": "function", "type": None}
 
+    # No-debug *data* ("<data variable, no debug info>" / ERROR type): known
+    # address, unknown width -> default to a target word.
+    if code == gdb.TYPE_CODE_ERROR or "data variable" in type_str:
+        addr = _addr_of(name)
+        if addr is None:
+            return {"found": False}
+        return {"found": True, "address": addr, "kind": "data",
+                "type": _word_descriptor()}
+
+    # Regular typed value (e.g. a shared-library variable with real debug info).
     try:
         addr = int(val.address) if val.address else int(val)
     except Exception:
         return {"found": False}
     try:
-        doc = _encode_doc(t)
+        doc = _encode_doc(val.type)
     except Exception:
         doc = None
     return {"found": True, "address": addr, "kind": "data", "type": doc}
