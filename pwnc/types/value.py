@@ -260,6 +260,16 @@ class Value:
     def __int__(self):
         return self._resolve()
 
+    def __index__(self):
+        # Lets integer-typed Values be used directly in int contexts
+        # (bytes(), chr(), hex(), range(), struct.pack, indexing, ...) — e.g.
+        # bytes(buf[i] for i in range(n)) over a char/byte array.
+        value = self._resolve()
+        if isinstance(value, int):
+            return value
+        raise TypeError(
+            "%s value is not an integer" % type(self._type).__name__)
+
     def __float__(self):
         return float(self._resolve())
 
