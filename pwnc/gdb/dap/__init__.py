@@ -398,7 +398,12 @@ def debug(program, *args, gdb_path="gdb", gdb_args=None, env=None,
     """
     from pwn import process as pwnprocess
 
-    gdbserver_cmd = ["gdbserver", "--once", "localhost:0", program]
+    # --no-startup-with-shell: exec the target directly instead of via /bin/sh.
+    # The shell layer interferes with argv[0]/env and, in restricted/container
+    # environments, can leave gdbserver wedged in sigsuspend before it ever
+    # services the RSP connection (gdb's target-remote then hangs).
+    gdbserver_cmd = ["gdbserver", "--once", "--no-startup-with-shell",
+                     "127.0.0.1:0", program]
     gdbserver_cmd.extend(str(a) for a in args)
     target = pwnprocess(gdbserver_cmd, env=env)
     line = target.recvline_contains(b"Listening on port")
@@ -406,7 +411,7 @@ def debug(program, *args, gdb_path="gdb", gdb_args=None, env=None,
 
     g = Gdb(DapTransport(gdb_path=gdb_path, gdb_args=gdb_args, env=env))
     g._initialize()
-    g._connect_remote(os.path.abspath(program), "localhost:%d" % port)
+    g._connect_remote(os.path.abspath(program), "127.0.0.1:%d" % port)
     g.target = target
     if not headless:
         g._start_console(console)
