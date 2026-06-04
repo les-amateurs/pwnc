@@ -178,6 +178,25 @@ def pwnc_resolve_symbol(*, name: str, **extra):
     """
     sym = _lookup_symbol(name)
     if sym is not None:
+        # Functions: the address IS the value — return it, don't read code bytes
+        # as data (the bug where g.sym.func returned the first opcode byte).
+        is_func = bool(getattr(sym, "is_function", False))
+        if not is_func and sym.type is not None:
+            try:
+                is_func = sym.type.strip_typedefs().code == gdb.TYPE_CODE_FUNC
+            except gdb.error:
+                pass
+        if is_func:
+            try:
+                addr = int(sym.value().address)
+            except Exception:
+                try:
+                    addr = int(gdb.parse_and_eval("&" + name))
+                except gdb.error:
+                    addr = None
+            if addr is not None:
+                return {"found": True, "address": addr, "kind": "function", "type": None}
+
         try:
             addr = int(sym.value().address)
         except Exception:

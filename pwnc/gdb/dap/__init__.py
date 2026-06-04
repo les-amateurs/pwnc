@@ -23,8 +23,9 @@ import os
 import queue
 
 from pwnc.types.provider import ByteOrder, BufferProvider
-from pwnc.types.primitives import Ptr, Int
-from pwnc.types.value import Value
+from pwnc.types.primitives import Ptr, Int, Float, Double
+from pwnc.types.containers import Array, Enum
+from pwnc.types.value import Value, ArrayValue, _typed_value
 from pwnc.types.serial import from_descriptor
 
 from .transport import DapTransport, DapError, DapTimeout
@@ -345,6 +346,13 @@ class Gdb:
                 ptype = Ptr(Int(8), bits=self._ptrbits)
             self._sym_type_cache[name] = ptype
         provider = DapBytesProvider(self.transport, addr, self._byteorder, self._ptrbits)
+        # Return a typed value (IntValue/RefValue/...) for primitives so g.sym.X
+        # supports arithmetic/deref like struct-field access does; ArrayValue for
+        # arrays; a plain Value for structs/unions.
+        if isinstance(ptype, (Int, Float, Double, Ptr, Enum)):
+            return _typed_value(ptype, provider, 0)
+        if isinstance(ptype, Array):
+            return ArrayValue(ptype, provider, 0)
         return Value(ptype, provider, 0)
 
     # --- console UI (optional, pluggable) ---
