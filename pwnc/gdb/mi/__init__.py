@@ -10,6 +10,7 @@ import base64
 import io
 import os
 import pickle
+from typing import TYPE_CHECKING
 
 from .process import GdbProcess
 from .protocol import Return, Error
@@ -18,6 +19,8 @@ from pwnc.types.provider import BytesProvider, ByteOrder
 from pwnc.types.primitives import Int, Float, Double, Ptr
 from pwnc.types.containers import Struct, Union, Array, Enum
 from pwnc.types.value import Value
+if TYPE_CHECKING:
+    from pwnlib.tubes.process import process as pwnprocess
 
 
 # --- Type descriptor → pwnc.types reconstruction ---
@@ -254,7 +257,7 @@ class Gdb:
         self.conn: BridgeConnection | None = None
         self.sym: SymbolAccessor | None = None
         self.reg: Registers | None = None
-        self.target = None  # pwntools process (set by debug())
+        self.target: pwnprocess = None  # pwntools process (set by debug())
         self._console_proc = None  # kitty subprocess for console UI
         self._closed = False
         self._bp_callbacks: dict[int, callable] = {}
@@ -440,7 +443,7 @@ def debug(program, *args, gdb_path="gdb", gdb_args=None, env=None,
         env: Environment dict for the GDB subprocess.
         headless: If True, skip spawning the kitty console window.
     """
-    from pwn import process as pwnprocess
+    from pwnlib.tubes.process import process as pwnprocess
 
     # Spawn gdbserver with target
     gdbserver_cmd = ["gdbserver", "--once", "localhost:0", program]
@@ -460,6 +463,8 @@ def debug(program, *args, gdb_path="gdb", gdb_args=None, env=None,
     # Start bridge, connect to gdbserver
     g._start_bridge()
     g.process.console(f'target remote localhost:{port}')
+
+    target.recvline_contains(b"Remote")
 
     if not headless:
         g._start_console()
