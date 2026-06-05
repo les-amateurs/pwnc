@@ -42,10 +42,38 @@ stop = g.wait()
 g.close()
 ```
 
-`attach(pid_or_name)` attaches to a running process. Both are **headless** by
-default; pass `headless=False` (optionally `console=<terminal argv>` or set
-`$PWNC_DAP_TERMINAL`) for an interactive gdb console window — no hard-coded
-terminal dependency.
+`attach(pid_or_name)` attaches to a running process.
+
+## Interactive console
+
+Open a real gdb CLI console in a terminal window — independent of the session,
+headless or not:
+
+```python
+g = launch("./bin", headless=False)   # open the console at startup, or:
+g.console()                           # ...open it any time (kitty by default)
+g.console_close()                     # ...and close it any time
+```
+
+The console and the script **share one gdb/inferior**: type gdb commands in the
+window (`run`/`continue`/`break`/`stepi`/`print`/…) and the script's breakpoint
+callbacks still fire — driving from the console produces stops the script
+receives via `g.wait()`. To hand control to the console and let callbacks fire as
+you drive:
+
+```python
+g.bp("target", callback=my_cb)
+while g.wait().get("reason") not in ("exited", "terminated"):
+    pass                              # callbacks fire on each console-driven stop
+```
+
+- **Terminal:** kitty by default; override with `console=<argv>` or
+  `$PWNC_DAP_TERMINAL`. The library uses the ambient `$DISPLAY` (no Xvfb — that's
+  only the test harness).
+- **Resize:** an in-window agent forwards `SIGWINCH`/size to gdb, so width-aware
+  plugins (pwndbg/GEF/bata24) render at the real window width.
+- **Lifecycle:** the window auto-closes when gdb exits; pass
+  `console_keep_open=True` (to `debug`/`attach`/`launch`) to keep it up.
 
 ## Layout
 
@@ -55,7 +83,8 @@ pwnc/gdb/dap/
 ├── transport.py   # DAP JSON-RPC over gdb stdio (framing, seq futures, events)
 ├── client.py      # DapBytesProvider: readMemory/writeMemory -> pwnc.types
 ├── _ext.py        # in-gdb extension: custom requests (type layout, regs, skip, …)
-└── console.py     # optional pluggable interactive console
+├── console.py     # interactive console: terminal + new-ui + resize side channel
+└── _console_agent.py  # runs in the terminal window; relays tty + size to gdb
 ```
 
 Type reconstruction lives in `pwnc.types.serial` (`from_descriptor`), shared and
@@ -65,5 +94,6 @@ gdb-independent.
 
 `pwncResolveSymbol`, `pwncTypeOf` (gdb.Type → descriptor), `pwncReadRegister(s)`,
 `pwncWriteRegister`, `pwncSkip`, `pwncEval`, `pwncBreakpoint`, `pwncWatch`,
-`pwncDeleteBreakpoint`, `pwncArch`. Everything else (memory, stepping,
+`pwncDeleteBreakpoint`, `pwncArch`, `pwncNewUI`/`pwncSetWinsize` (console).
+Everything else (memory, stepping,
 continue, stacks, disassembly) uses native DAP requests.

@@ -399,3 +399,27 @@ def pwnc_arch(**extra):
     except gdb.error:
         pass
     return {"byteorder": byteorder, "ptrbits": ptrbits}
+
+
+# ── interactive console ─────────────────────────────────────────────────────
+
+@request("pwncNewUI", expect_stopped=False)
+def pwnc_new_ui(*, tty: str, interp: str = "console", **extra):
+    """Attach a second gdb UI (a CLI console) to *tty* — e.g. a terminal window.
+
+    expect_stopped=False so the console can be opened while the inferior runs.
+    """
+    gdb.execute("new-ui %s %s" % (interp, tty))
+    return {}
+
+
+@request("pwncSetWinsize", expect_stopped=False)
+def pwnc_set_winsize(*, rows: int, cols: int, **extra):
+    """Tell gdb the console terminal's size so width-aware plugins render right.
+
+    gdb's own terminal is the DAP pipe (width auto-detect is meaningless there),
+    so the console relays the kitty window size here on attach and on SIGWINCH.
+    """
+    gdb.execute("set width %d" % int(cols))
+    gdb.execute("set height %d" % int(rows))
+    return {}

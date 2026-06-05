@@ -122,7 +122,7 @@ class Gdb:
         self._byteorder = ByteOrder.Little
         self._ptrbits = 64
         self._sym_type_cache = {}       # symbol name -> reconstructed Type
-        self._console_proc = None
+        self._console = None            # Console handle (interactive UI)
         self.sym = SymbolAccessor(self)
         self.reg = Registers(self)
         transport.on("stopped", self._on_stopped)
@@ -372,11 +372,31 @@ class Gdb:
             return ArrayValue(ptype, provider, 0)
         return Value(ptype, provider, 0)
 
-    # --- console UI (optional, pluggable) ---
+    # --- interactive console (independent start/stop) ---
 
-    def _start_console(self, terminal=None):
+    def console(self, terminal=None, timeout=10, keep_open=False):
+        """Open a gdb CLI console in a terminal window (kitty by default).
+
+        Independent of the session — call it any time, headless or not. The
+        console and the script share one gdb/inferior: driving execution from
+        the console (typing ``run``/``continue``/stepping) produces stops that
+        the script receives, so breakpoint callbacks fire during ``g.wait()``.
+        The window tracks resizes (gdb plugins get the right width) and
+        auto-closes when gdb exits unless ``keep_open=True``. Idempotent —
+        returns the existing console if one is already open.
+        """
+        if self._console is not None and self._console.alive():
+            return self._console
         from .console import start_console
-        self._console_proc = start_console(self, terminal)
+        self._console = start_console(self, terminal, timeout=timeout,
+                                      keep_open=keep_open)
+        return self._console
+
+    def console_close(self):
+        """Close the console window now (regardless of ``keep_open``)."""
+        if self._console is not None:
+            self._console.kill()
+            self._console = None
 
     # --- lifecycle ---
 
@@ -395,10 +415,11 @@ class Gdb:
                 self.target.close()
             except Exception:
                 pass
-        if self._console_proc is not None:
+        if self._console is not None:
+            # Drop the side channel; the agent closes the window once gdb is
+            # gone (or keeps it open if console_keep_open was set).
             try:
-                self._console_proc.kill()
-                self._console_proc.wait()
+                self._console.close()
             except Exception:
                 pass
 
@@ -412,7 +433,7 @@ class Gdb:
 # ── convenience constructors ────────────────────────────────────────────────
 
 def debug(program, *args, gdb_path="gdb", gdb_args=None, env=None,
-          headless=True, console=None):
+          headless=True, console=None, console_keep_open=False):
     """Run *program* under gdbserver and drive it via DAP.
 
     The target runs in a pwntools process tube (``g.target``) with its own
@@ -439,12 +460,12 @@ def debug(program, *args, gdb_path="gdb", gdb_args=None, env=None,
     g._connect_remote(os.path.abspath(program), "127.0.0.1:%d" % port)
     g.target = target
     if not headless:
-        g._start_console(console)
+        g.console(console, keep_open=console_keep_open)
     return g
 
 
 def attach(pid_or_name, program=None, gdb_path="gdb", gdb_args=None, env=None,
-           headless=True, console=None):
+           headless=True, console=None, console_keep_open=False):
     """Attach gdb (over DAP) to a running process by PID or name."""
     if isinstance(pid_or_name, int):
         pid = pid_or_name
@@ -463,12 +484,12 @@ def attach(pid_or_name, program=None, gdb_path="gdb", gdb_args=None, env=None,
     g._initialize()
     g._connect_pid(pid, program)
     if not headless:
-        g._start_console(console)
+        g.console(console, keep_open=console_keep_open)
     return g
 
 
 def launch(program, *args, gdb_path="gdb", gdb_args=None, env=None,
-           headless=True, console=None, stop_at_main=True):
+           headless=True, console=None, console_keep_open=False, stop_at_main=True):
     """Run *program* locally under gdb (no gdbserver) and stop at ``main``.
 
     Simpler than :func:`debug` and dependency-free (no pwntools); the inferior's
@@ -481,5 +502,5 @@ def launch(program, *args, gdb_path="gdb", gdb_args=None, env=None,
     g._initialize()
     g._launch(os.path.abspath(program), args, env, stop_at_main)
     if not headless:
-        g._start_console(console)
+        g.console(console, keep_open=console_keep_open)
     return g
