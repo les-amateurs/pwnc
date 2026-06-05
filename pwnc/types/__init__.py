@@ -4,3 +4,4 @@ from .base import Type, BoundField
 from .provider import ByteOrder, BytesProvider, BufferProvider
 from .value import Value, RefValue
 from .resolver import Source, StaticSource, Types
+from .serial import to_descriptor, from_descriptor

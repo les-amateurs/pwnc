@@ -1,0 +1,17 @@
+usage: pwnc (options) [command]
+
+positional arguments:
+  {init,unpack,unstrip,search,patch,errno,kernel,docker,shellc,elf,swarm}
+    unpack              unpack and initialize from distribution
+    unstrip             unstrip binaries by adding debuginfo
+    search              search for libcs
+    patch               patch binaries
+    errno               interpret errno code
+    kernel              kernel pwn setup
+    docker              docker utils
+    shellc              compile c to shellcode
+    elf                 build elf from shellcode
+    swarm               synchronized terminal control
+
+options:
+  -h, --help            show this help message and exit

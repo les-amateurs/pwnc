@@ -23,4 +23,8 @@ other/
 dist/
 kmod/
 tests/
+!tests/
+tests/*
+!tests/profiling/
+!tests/profiling/**
 scripts/

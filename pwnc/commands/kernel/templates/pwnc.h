@@ -33,6 +33,7 @@ typedef int16_t i16;
 typedef int8_t i8;
 
 typedef size_t usize;
+typedef ssize_t isize;
 
 #define RESET "\033[0m"
 #define BLUE "\033[34m"
@@ -102,6 +103,27 @@ void info(const char *fmt, ...) {
         }                                                                      \
         _i;                                                                    \
     })
+
+usize __pagesize__ = 0;
+#define PAGESIZE (__pagesize__ == 0 ? (__pagesize__ = getpagesize()) : __pagesize__)
+#define PAGEMASK ((PAGESIZE)-1)
+
+void dumpp(void *base, usize len) {
+    void **ptr = (void **)base;
+    printf("dump(%p)\n", base);
+    for (usize i = 0; i < len; i++) {
+        printf("%016lx | ", (usize)ptr[i]);
+        for (int o = 0; o < sizeof(void *); o++) {
+            u8 ch = ((u8 *)&ptr[i])[o];
+            if (0x20 <= ch || ch <= 0x7e) {
+                putchar(ch);
+            } else {
+                putchar('.');
+            }
+        }
+        printf(" |\n");
+    }
+}
 
 /* file is open for reading */
 #define FMODE_READ (1 << 0)
