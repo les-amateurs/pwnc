@@ -5,6 +5,9 @@ description = ""
 authors = ["unvariant <unvariant.winter@gmail.com>"]
 readme = "README.md"
 
+[tool.poetry.scripts]
+pwnc = "pwnc.pwncli:main"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 pwntools = "^4.13.1"

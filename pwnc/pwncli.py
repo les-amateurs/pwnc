@@ -17,6 +17,11 @@ description = """\
 def PathArg(file):
     return Path(file)
 
+def TemplateArg(**kwargs):
+    from pwnc.commands.template import TEMPLATES
+    templates =  filter(lambda path: path.is_dir(), TEMPLATES.iterdir())
+    templates = map(lambda path: path.name, templates)
+    return list(templates)
 
 def DockerImageArg(**kwargs):
     try:
@@ -54,8 +59,21 @@ def get_main_parser():
     """
     Command: init
     """
-    subparser = subparsers.add_parser("init")
+    subparser = subparsers.add_parser("init", help="setup solve environment")
+    subparser.add_argument("template", type=str, default="default", nargs="?").completer = TemplateArg
     subparser.add_argument("--privileged", action="store_true")
+    subparser.add_argument("--overwrite", action="store_true")
+
+    """
+    Command: template
+    """
+    subparser = subparsers.add_parser("template", help="instantiate templates")
+    subparser.add_argument("template")
+    subparser.add_argument("--file", type=PathArg, required=False)
+    subparser.add_argument("--libc", type=PathArg, required=False)
+    subparser.add_argument("--linker", type=PathArg, required=False)
+    subparser.add_argument("--port", type=PositiveInteger, required=False)
+    subparser.add_argument("--overwrite", action="store_true")
 
     """
     Command: unpack
@@ -229,68 +247,77 @@ def get_main_parser():
     return parser
 
 
-parser = get_main_parser()
-argcomplete.autocomplete(parser)
-args, extra = parser.parse_known_args()
+def main():
+    parser = get_main_parser()
+    argcomplete.autocomplete(parser)
+    args, extra = parser.parse_known_args()
 
-command = dict(args._get_kwargs())
+    command = dict(args._get_kwargs())
 
-try:
-    match command.get("subcommand"):
-        case "init":
-            import pwnc.commands.init
+    try:
+        match command.get("subcommand"):
+            case "init":
+                import pwnc.commands.init
 
-            pwnc.commands.init.command(args)
-        case "unpack":
-            import pwnc.commands.unpack
+                pwnc.commands.init.command(args)
+            case "template":
+                import pwnc.commands.template
 
-            pwnc.commands.unpack.command(args)
-        case "unstrip":
-            import pwnc.commands.unstrip
+                pwnc.commands.template.command(args)
+            case "unpack":
+                import pwnc.commands.unpack
 
-            pwnc.commands.unstrip.command(args)
-        case "search":
-            import pwnc.commands.search
-            
-            pwnc.commands.search.command(args)
-        case "patch":
-            import pwnc.commands.patch
+                pwnc.commands.unpack.command(args)
+            case "unstrip":
+                import pwnc.commands.unstrip
 
-            pwnc.commands.patch.command(args)
-        case "errno":
-            import pwnc.commands.errno
+                pwnc.commands.unstrip.command(args)
+            case "search":
+                import pwnc.commands.search
+                
+                pwnc.commands.search.command(args)
+            case "patch":
+                import pwnc.commands.patch
 
-            pwnc.commands.errno.command(args)
-        case "kernel":
-            import pwnc.commands.kernel
+                pwnc.commands.patch.command(args)
+            case "errno":
+                import pwnc.commands.errno
 
-            match command.get("subcommand.kernel"):
-                case "init":
-                    pwnc.commands.kernel.init.command(args)
-                case "compress":
-                    pwnc.commands.kernel.compress.command(args)
-                case "decompress":
-                    pwnc.commands.kernel.decompress.command(args)
-                case "module":
-                    pwnc.commands.kernel.module.command(args)
-                case "template":
-                    pwnc.commands.kernel.template.command(args)
-        case "docker":
-            import pwnc.commands.docker.extract
+                pwnc.commands.errno.command(args)
+            case "kernel":
+                import pwnc.commands.kernel
 
-            match command.get("subcommand.docker"):
-                case "extract":
-                    pwnc.commands.docker.extract.command(args)
-        case "shellc":
-            import pwnc.commands.shellc
+                match command.get("subcommand.kernel"):
+                    case "init":
+                        pwnc.commands.kernel.init.command(args)
+                    case "compress":
+                        pwnc.commands.kernel.compress.command(args)
+                    case "decompress":
+                        pwnc.commands.kernel.decompress.command(args)
+                    case "module":
+                        pwnc.commands.kernel.module.command(args)
+                    case "template":
+                        pwnc.commands.kernel.template.command(args)
+            case "docker":
+                import pwnc.commands.docker.extract
 
-            pwnc.commands.shellc.command(args, extra)
-        case "elf":
-            import pwnc.commands.elf
+                match command.get("subcommand.docker"):
+                    case "extract":
+                        pwnc.commands.docker.extract.command(args)
+            case "shellc":
+                import pwnc.commands.shellc
 
-            pwnc.commands.elf.command(args)
-        case "swarm":
-            import pwnc.commands.swarm
-            pwnc.commands.swarm.command(args)
-except RuntimeError as e:
-    print(e)
+                pwnc.commands.shellc.command(args, extra)
+            case "elf":
+                import pwnc.commands.elf
+
+                pwnc.commands.elf.command(args)
+            case "swarm":
+                import pwnc.commands.swarm
+                pwnc.commands.swarm.command(args)
+    except RuntimeError as e:
+        print(e)
+
+
+if __name__ == "__main__":
+    main()

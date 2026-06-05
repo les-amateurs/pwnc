@@ -8,6 +8,7 @@ __pycache__/
 *.o
 *.pkl
 .DS_Store
+.vscode
 
 **/.venv
 .ruff_cache

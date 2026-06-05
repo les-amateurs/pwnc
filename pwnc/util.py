@@ -27,18 +27,22 @@ def run(
     env = os.environ.copy()
     if extra_env is not None:
         env.update(extra_env)
-    return subprocess.run(
-        cmd,
-        shell=shell,
-        check=check,
-        capture_output=capture_output,
-        encoding=encoding,
-        cwd=cwd,
-        stdout=stdout,
-        stdin=stdin,
-        input=input,
-        env=env,
-    )
+    try:
+        ret = subprocess.run(
+            cmd,
+            shell=shell,
+            check=check,
+            capture_output=capture_output,
+            encoding=encoding,
+            cwd=cwd,
+            stdout=stdout,
+            stdin=stdin,
+            input=input,
+            env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        err.fatal(f"{cmd} exited with {e.returncode}")
+    return ret
 
 
 def backup(file: Path):
@@ -61,6 +65,27 @@ def random_tmpdir(prefix="tmp-"):
     tmpdir = Path(f"{prefix}{token}")
     tmpdir.mkdir(exist_ok=False)
     return tmpdir
+
+
+def random_tmpfile(prefix="tmp-", suffix=""):
+    """
+    Caller is responsible for cleaning up the directory.
+    """
+    token = secrets.token_hex(16)
+    tmpfile = Path(f"{prefix}{token}{suffix}")
+    tmpfile.touch(exist_ok=False)
+    return tmpfile
+
+
+def walk_recursive(target: Path, dirs = True, files = True):
+    for path, dirlist, filelist in os.walk(target):
+        path = Path(path)
+        if dirs:
+            for dir in dirlist:
+                yield path / dir
+        if files:
+            for file in filelist:
+                yield path / file
 
 
 def find_recursive(pattern: str, callback = None, target = None) -> list[Path]:

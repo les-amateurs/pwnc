@@ -37,11 +37,11 @@ def unpack(file: Path):
     copy = storage / file.name
 
     match file.suffix:
+        case ".tar" | ".tgz" | ".tar.gz":
+            run("tar -xf {!r}".format(str(file)), cwd=storage)
         case ".gz":
             shutil.copyfile(file, copy)
             run("gzip -d {!r}".format(str(copy)), cwd=storage)
-        case ".tar" | ".tgz":
-            run("tar -xf {!r}".format(str(file)), cwd=storage)
         case ".zip":
             run("unzip {!r}".format(str(file)), cwd=storage)
         case ".7z":
@@ -53,6 +53,7 @@ def unpack(file: Path):
             shutil.copyfile(file, copy)
             run("unzstd {!r}".format(str(copy)), cwd=storage)
         case _:
+            shutil.rmtree(storage)
             raise NotImplementedError(f"unknown package suffix {file.suffix}")
 
     files = os.listdir(storage)
@@ -62,7 +63,9 @@ def unpack(file: Path):
         # some archives may only have a single file inside that is not an archive
         if file.is_file() and file.suffix in archive_extensions:
             try:
-                storage, name = unpack(file)
+                result = unpack(file)
+                shutil.rmtree(storage)
+                storage, name = result
             except NotImplementedError:
                 shutil.rmtree(storage)
 

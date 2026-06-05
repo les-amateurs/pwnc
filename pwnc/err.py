@@ -49,6 +49,10 @@ def warn(msg: str):
     logger.warn(msg)
 
 
+def debug(msg: str):
+    logger.debug(msg)
+
+
 def fatal(msg: str):
     logger.error(msg)
     raise RuntimeError("fatal error")
