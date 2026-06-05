@@ -71,15 +71,18 @@ class Value:
         ty = self._type
 
         if isinstance(ty, Bits):
-            # Need to find the bit position within the containing struct
-            # Bits fields are read as part of the byte at base_offset
-            # The bit_offset is tracked by the parent Value access
-            raw = self._provider.read(self._base_offset, 1)
-            byte_val = raw[0]
-            # bit_offset is stored on the Value when created from struct access
+            # Bitfield: read the storage bytes the field spans (bit_offset is its
+            # bit position within the first byte), assemble per byte order, then
+            # shift/mask. Reading enough bytes makes bitfields that cross a byte
+            # boundary (e.g. `unsigned x:16`) decode correctly, not just sub-byte
+            # ones. (Little-endian targets; bit_offset is stored at struct-build
+            # time by the type's layout / the DAP bridge.)
             bit_off = getattr(self, '_bit_offset', 0)
-            mask = (1 << ty.nbits) - 1
-            return (byte_val >> bit_off) & mask
+            nbytes = (bit_off + ty.nbits + 7) >> 3
+            raw = self._provider.read(self._base_offset, nbytes)
+            order = "little" if self._provider.byteorder == ByteOrder.Little else "big"
+            storage = int.from_bytes(raw, order)
+            return (storage >> bit_off) & ((1 << ty.nbits) - 1)
 
         if isinstance(ty, (Int, Ptr)):
             raw = self._provider.read(self._base_offset, ty.nbytes)
@@ -121,11 +124,15 @@ class Value:
         bo = self._provider.byteorder
 
         if isinstance(ty, Bits):
+            # Read-modify-write the bitfield's storage bytes (handles bitfields
+            # that span byte boundaries; mirrors the multi-byte read above).
             bit_off = getattr(self, '_bit_offset', 0)
+            nbytes = (bit_off + ty.nbits + 7) >> 3
+            order = "little" if bo == ByteOrder.Little else "big"
+            storage = int.from_bytes(self._provider.read(offset, nbytes), order)
             mask = (1 << ty.nbits) - 1
-            raw = bytearray(self._provider.read(offset, 1))
-            raw[0] = (raw[0] & ~(mask << bit_off)) | ((value & mask) << bit_off)
-            self._provider.write(offset, bytes(raw))
+            storage = (storage & ~(mask << bit_off)) | ((value & mask) << bit_off)
+            self._provider.write(offset, storage.to_bytes(nbytes, order))
         elif isinstance(ty, (Int, Ptr)):
             byte_order = "little" if bo == ByteOrder.Little else "big"
             if isinstance(ty, Int) and ty.signed and value < 0:
@@ -259,6 +266,16 @@ class Value:
 
     def __int__(self):
         return self._resolve()
+
+    def __index__(self):
+        # Lets integer-typed Values be used directly in int contexts
+        # (bytes(), chr(), hex(), range(), struct.pack, indexing, ...) — e.g.
+        # bytes(buf[i] for i in range(n)) over a char/byte array.
+        value = self._resolve()
+        if isinstance(value, int):
+            return value
+        raise TypeError(
+            "%s value is not an integer" % type(self._type).__name__)
 
     def __float__(self):
         return float(self._resolve())

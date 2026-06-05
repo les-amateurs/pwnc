@@ -1,0 +1,35 @@
+Sat May 16 02:16:11 2026    /home/ctf/pwnc-dev/pwnc/tests/profiling/results/latest/startup.cprofile
+
+         49979 function calls (48949 primitive calls) in 0.089 seconds
+
+   Ordered by: cumulative time
+   List reduced from 845 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       10    0.000    0.000    0.099    0.010 __init__.py:1(<module>)
+     67/1    0.000    0.000    0.089    0.089 {built-in method builtins.exec}
+        1    0.000    0.000    0.089    0.089 pwncli.py:1(<module>)
+     96/3    0.001    0.000    0.072    0.024 <frozen importlib._bootstrap>:1349(_find_and_load)
+     96/3    0.000    0.000    0.072    0.024 <frozen importlib._bootstrap>:1304(_find_and_load_unlocked)
+     86/3    0.000    0.000    0.071    0.024 <frozen importlib._bootstrap>:911(_load_unlocked)
+     65/3    0.000    0.000    0.071    0.024 <frozen importlib._bootstrap_external>:989(exec_module)
+    205/6    0.001    0.000    0.070    0.012 <frozen importlib._bootstrap>:480(_call_with_frames_removed)
+     19/7    0.000    0.000    0.055    0.008 {built-in method builtins.__import__}
+    27/12    0.000    0.000    0.055    0.005 <frozen importlib._bootstrap>:1390(_handle_fromlist)
+        2    0.000    0.000    0.024    0.012 util.py:1(<module>)
+       96    0.001    0.000    0.016    0.000 <frozen importlib._bootstrap>:1240(_find_spec)
+  218/215    0.004    0.000    0.015    0.000 {built-in method builtins.__build_class__}
+       65    0.001    0.000    0.015    0.000 <frozen importlib._bootstrap_external>:1062(get_code)
+        1    0.000    0.000    0.014    0.014 pwncli.py:42(get_main_parser)
+       81    0.000    0.000    0.013    0.000 <frozen importlib._bootstrap_external>:1520(find_spec)
+       81    0.001    0.000    0.013    0.000 <frozen importlib._bootstrap_external>:1491(_get_spec)
+        1    0.000    0.000    0.012    0.012 err.py:1(<module>)
+      274    0.003    0.000    0.011    0.000 <frozen importlib._bootstrap_external>:1593(find_spec)
+        1    0.000    0.000    0.011    0.011 pathlib.py:1(<module>)
+       23    0.000    0.000    0.011    0.000 argparse.py:1776(__init__)
+        1    0.000    0.000    0.010    0.010 config.py:1(<module>)
+       22    0.000    0.000    0.010    0.000 argparse.py:1223(add_parser)
+       65    0.001    0.000    0.009    0.000 <frozen importlib._bootstrap_external>:751(_compile_bytecode)
+      219    0.000    0.000    0.008    0.000 __init__.py:226(compile)
+
+

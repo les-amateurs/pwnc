@@ -62,8 +62,31 @@ class Struct(Type):
         super().__init__(current_byte * 8)
 
     @classmethod
-    def _from_layout(cls, name, layout, padding, nbytes, mode="packed"):
-        """Create a Struct with a pre-built layout (used by DWARF builder)."""
+    def from_layout(cls, name, layout, padding, nbytes, mode="packed"):
+        """Build a Struct from a pre-computed field layout.
+
+        This is the canonical constructor for a struct whose field offsets are
+        already known — from DWARF debug info, a debugger's type introspection,
+        or a serialized descriptor (see :mod:`pwnc.types.serial`) — as opposed
+        to ``__init__``, which *computes* offsets from a packed field list.
+
+        Args:
+            name: struct tag/name.
+            layout: list of ``(field_name, field_type, byte_offset, bit_offset)``
+                tuples. ``byte_offset`` is the field's offset in bytes from the
+                start of the struct. ``bit_offset`` is the bit position *within
+                that byte* (0-7) for a :class:`~pwnc.types.primitives.Bits`
+                bitfield, or ``None`` for ordinary byte-aligned fields. (This
+                bit-within-byte convention is what the ``Value`` bitfield decoder
+                expects; see ``value.Value._resolve``.)
+            padding: list of ``(byte_offset, size)`` tuples describing padding
+                gaps (used for display only; may be empty).
+            nbytes: total size of the struct in bytes.
+            mode: layout mode, ``"packed"`` (default) or ``"cstyle"``.
+
+        Returns:
+            A fully constructed :class:`Struct`.
+        """
         obj = object.__new__(cls)
         obj.name = name
         obj.mode = mode
@@ -73,6 +96,10 @@ class Struct(Type):
         obj._field_map = {f[0]: i for i, f in enumerate(layout)}
         Type.__init__(obj, nbytes * 8)
         return obj
+
+    # Backwards-compatible private alias (kept for existing callers such as the
+    # DWARF builder, which predate the public name).
+    _from_layout = from_layout
 
     def _get_field(self, name):
         idx = self._field_map[name]

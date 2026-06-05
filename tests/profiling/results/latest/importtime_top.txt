@@ -1,0 +1,55 @@
+Slowest imports by cumulative time
+
+   25.479 ms cumulative      0.246 ms self  pwnc
+   15.880 ms cumulative      0.314 ms self  argcomplete
+   13.142 ms cumulative      0.256 ms self  pwnc.util
+   11.984 ms cumulative      0.557 ms self  pwnc.minelf
+   10.823 ms cumulative      0.292 ms self  argcomplete.completers
+    8.442 ms cumulative      1.183 ms self  site
+    7.995 ms cumulative      0.194 ms self  pwnc.err
+    6.268 ms cumulative      2.057 ms self  logging
+    5.380 ms cumulative      1.071 ms self  argparse
+    5.151 ms cumulative      0.792 ms self  subprocess
+    4.627 ms cumulative      0.949 ms self  pathlib
+    4.457 ms cumulative      0.139 ms self  importlib.util
+    4.353 ms cumulative      0.475 ms self  pwnc.config
+    4.253 ms cumulative      0.178 ms self  secrets
+    4.149 ms cumulative      1.640 ms self  shutil
+    4.134 ms cumulative      0.520 ms self  argcomplete.finders
+    3.652 ms cumulative      0.750 ms self  threading
+    3.439 ms cumulative      0.548 ms self  re
+    3.078 ms cumulative      0.191 ms self  toml
+    3.030 ms cumulative      0.592 ms self  traceback
+    2.887 ms cumulative      0.318 ms self  toml.encoder
+    2.877 ms cumulative      1.173 ms self  urllib.parse
+    2.874 ms cumulative      0.250 ms self  hmac
+    2.737 ms cumulative      2.686 ms self  typing
+    2.676 ms cumulative      0.566 ms self  functools
+
+Slowest imports by self time
+
+    2.686 ms self            2.737 ms cumulative  typing
+    2.262 ms self            2.262 ms cumulative  _hashlib
+    2.057 ms self            6.268 ms cumulative  logging
+    1.798 ms self            1.901 ms cumulative  locale
+    1.640 ms self            4.149 ms cumulative  shutil
+    1.577 ms self            1.577 ms cumulative  ipaddress
+    1.379 ms self            1.379 ms cumulative  enum
+    1.183 ms self            8.442 ms cumulative  site
+    1.173 ms self            2.877 ms cumulative  urllib.parse
+    1.090 ms self            1.611 ms cumulative  lzma
+    1.071 ms self            5.380 ms cumulative  argparse
+    1.015 ms self            1.015 ms cumulative  textwrap
+    1.014 ms self            1.244 ms cumulative  tokenize
+    0.992 ms self            2.039 ms cumulative  collections
+    0.949 ms self            4.627 ms cumulative  pathlib
+    0.872 ms self            0.872 ms cumulative  gettext
+    0.824 ms self            1.992 ms cumulative  ctypes
+    0.792 ms self            5.151 ms cumulative  subprocess
+    0.782 ms self            0.782 ms cumulative  _collections_abc
+    0.781 ms self            1.262 ms cumulative  _decimal
+    0.769 ms self            0.769 ms cumulative  _distutils_hack
+    0.758 ms self            0.908 ms cumulative  toml.decoder
+    0.750 ms self            3.652 ms cumulative  threading
+    0.701 ms self            0.802 ms cumulative  platform
+    0.655 ms self            0.907 ms cumulative  selectors
