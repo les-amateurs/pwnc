@@ -21,6 +21,7 @@ import atexit
 import base64
 import os
 import queue
+import time
 
 from pwnc.types.provider import ByteOrder, BufferProvider
 from pwnc.types.primitives import Ptr, Int, Float, Double
@@ -393,10 +394,25 @@ class Gdb:
         return self._console
 
     def console_close(self):
-        """Close the console window now (regardless of ``keep_open``)."""
-        if self._console is not None:
-            self._console.kill()
-            self._console = None
+        """Close the console window — gracefully first, then forcibly.
+
+        Closes the side channel so the in-window agent exits on EOF and the
+        terminal shuts itself down (and gdb removes the console UI cleanly);
+        only if it doesn't close on its own within a short grace period is the
+        terminal SIGKILLed. The gdb session keeps running — command history is
+        written when the *session* exits cleanly (``close()``), since gdb's
+        ``quit`` is process-wide and cannot close a single UI.
+        """
+        con = self._console
+        if con is None:
+            return
+        self._console = None
+        con.close()                     # graceful: agent sees EOF -> terminal self-closes
+        deadline = time.monotonic() + 3.0
+        while con.alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if con.alive():
+            con.kill()                  # drastic: force it closed (e.g. keep_open)
 
     # --- lifecycle ---
 

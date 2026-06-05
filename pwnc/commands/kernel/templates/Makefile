@@ -3,4 +3,5 @@ exploit: exploit.c pwnc.h
 	cp exploit.debug exploit
 	strip exploit
 	# any file copying, etc
+	cp exploit rootfs
 	pwnc kernel compress

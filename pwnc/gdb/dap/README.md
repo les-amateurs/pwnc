@@ -74,6 +74,15 @@ while g.wait().get("reason") not in ("exited", "terminated"):
   plugins (pwndbg/GEF/bata24) render at the real window width.
 - **Lifecycle:** the window auto-closes when gdb exits; pass
   `console_keep_open=True` (to `debug`/`attach`/`launch`) to keep it up.
+  `console_close()` closes the window *gracefully* first (the in-window agent
+  exits on EOF, the terminal shuts itself down, and gdb drops the UI cleanly),
+  SIGKILLing the terminal only if it lingers — and the gdb session keeps
+  running.
+- **History:** opening a console enables gdb history saving (gdb is launched
+  with `-nx`, which would otherwise skip it), so commands typed in the console
+  are written to gdb's history file when the *session* exits cleanly
+  (`g.close()`). gdb's `quit` is process-wide, so there is no way to save
+  history while keeping the session — it is persisted at clean session exit.
 
 ## Layout
 

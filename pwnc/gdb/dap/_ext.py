@@ -404,12 +404,21 @@ def pwnc_arch(**extra):
 # ── interactive console ─────────────────────────────────────────────────────
 
 @request("pwncNewUI", expect_stopped=False)
-def pwnc_new_ui(*, tty: str, interp: str = "console", **extra):
+def pwnc_new_ui(*, tty: str, interp: str = "console", save_history: bool = True,
+                **extra):
     """Attach a second gdb UI (a CLI console) to *tty* — e.g. a terminal window.
 
     expect_stopped=False so the console can be opened while the inferior runs.
+    Enables command-history saving (gdb is launched with -nx, which otherwise
+    skips the user's history config) so commands typed in the console persist to
+    gdb's history file when the session exits cleanly.
     """
     gdb.execute("new-ui %s %s" % (interp, tty))
+    if save_history:
+        try:
+            gdb.execute("set history save on")
+        except gdb.error:
+            pass
     return {}
 
 

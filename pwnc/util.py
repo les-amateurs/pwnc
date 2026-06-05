@@ -6,6 +6,7 @@ import re
 import secrets
 from argparse import Namespace as Args
 from pathlib import Path
+from os.path import expanduser
 from . import err
 from . import config
 from . import cache
