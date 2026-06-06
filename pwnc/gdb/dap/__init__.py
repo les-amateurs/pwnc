@@ -158,9 +158,23 @@ class Gdb:
         ext = os.path.join(os.path.dirname(__file__), "_ext.py")
         self.transport.request("evaluate",
                                {"expression": "source " + ext, "context": "repl"})
-        self.transport.request("configurationDone")
+        # configurationDone is deliberately NOT sent here: gdb 14+/17+ require it
+        # to come *after* launch/attach (and use it to fulfil the deferred
+        # launch/attach). See _post_connect.
 
-    def _post_connect(self):
+    def _post_connect(self, pending=None):
+        # DAP/gdb ordering (verified against gdb 17.2 dap/launch.py): launch &
+        # attach return a deferred "promise" whose response gdb withholds until
+        # configurationDone reschedules it. So the caller sends launch/attach via
+        # transport.send() (non-blocking) and hands us the Future; we send
+        # configurationDone (which fulfils the promise), then collect the
+        # launch/attach result. Blocking on launch/attach *before*
+        # configurationDone deadlocks; sending configurationDone first errors with
+        # "launch or attach not specified". (gdb 15.x answered launch/attach
+        # eagerly and made configurationDone a no-op, so either order worked there.)
+        self.transport.request("configurationDone")
+        if pending is not None:
+            self.transport.result(pending)
         arch = self.transport.request("pwncArch")
         self._byteorder = (ByteOrder.Little if arch.get("byteorder") == "little"
                            else ByteOrder.Big)
@@ -186,15 +200,15 @@ class Gdb:
         # remote's, since gdbserver runs locally) instead of slow remote transfers.
         self.transport.request(
             "evaluate", {"expression": "set sysroot /", "context": "repl"})
-        self.transport.request("attach", {"target": target})
-        self._post_connect()
+        pending = self.transport.send("attach", {"target": target})
+        self._post_connect(pending)
 
     def _connect_pid(self, pid, program=None):
         args = {"pid": pid}
         if program:
             args["program"] = program
-        self.transport.request("attach", args)
-        self._post_connect()
+        pending = self.transport.send("attach", args)
+        self._post_connect(pending)
 
     def _launch(self, program, args=(), env=None, stop_at_main=True):
         launch_args = {
@@ -204,8 +218,10 @@ class Gdb:
         }
         if env is not None:
             launch_args["env"] = dict(env)
-        self.transport.request("launch", launch_args)   # responds immediately
-        self._post_connect()                            # consumes the stop-at-main
+        # send (not request): the launch response is deferred until
+        # configurationDone (see _post_connect), so don't block here.
+        pending = self.transport.send("launch", launch_args)
+        self._post_connect(pending)                     # configurationDone + stop-at-main
 
     # --- execution control ---
 

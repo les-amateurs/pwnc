@@ -62,16 +62,20 @@ class DapTransport:
         """Register *handler(body)* for a DAP event (may register several)."""
         self._handlers.setdefault(event, []).append(handler)
 
-    def request(self, command, arguments=None, timeout=DEFAULT_TIMEOUT):
-        """Send a request and return its response ``body`` (raises on failure).
+    def send(self, command, arguments=None):
+        """Send a request *without* waiting; return a Future for its response.
 
-        Note that gdb sends a response for every request — including the
-        ``response=False`` execution commands (next/stepIn/...) which respond
-        immediately on acceptance; the resulting stop arrives later as a
-        ``stopped`` event.
+        Pair with :meth:`result` to collect. Needed when gdb withholds a
+        request's response until a *later* request: gdb 14+/17+ make
+        ``launch``/``attach`` deferred "promises" whose response is sent only
+        after ``configurationDone`` reschedules them, so blocking on launch/attach
+        before sending configurationDone deadlocks. ``send`` then ``result``
+        (after configurationDone) does not.
         """
         seq = next(self._seq)
         fut = Future()
+        fut._dap_seq = seq                  # carried so result() can clean up on timeout
+        fut._dap_command = command
         with self._lock:
             if self._closed:
                 raise DapError("transport closed", command=command)
@@ -80,17 +84,32 @@ class DapTransport:
         if arguments is not None:
             msg["arguments"] = arguments
         self._send(msg)
+        return fut
+
+    def result(self, fut, timeout=DEFAULT_TIMEOUT):
+        """Block for a :meth:`send`'d request's response ``body`` (raises on failure)."""
+        command = getattr(fut, "_dap_command", None)
         try:
             resp = fut.result(timeout=timeout)
         except _FTimeout:
             with self._lock:
-                self._pending.pop(seq, None)
+                self._pending.pop(getattr(fut, "_dap_seq", None), None)
             raise DapTimeout("timed out waiting for %r response" % command,
                              command=command)
         if not resp.get("success", False):
             raise DapError(resp.get("message") or "request failed",
                            command=command, body=resp.get("body"))
         return resp.get("body")
+
+    def request(self, command, arguments=None, timeout=DEFAULT_TIMEOUT):
+        """Send a request and return its response ``body`` (raises on failure).
+
+        Note that gdb sends a response for every request — including the
+        ``response=False`` execution commands (next/stepIn/...) which respond
+        immediately on acceptance; the resulting stop arrives later as a
+        ``stopped`` event.
+        """
+        return self.result(self.send(command, arguments), timeout)
 
     def wait_initialized(self, timeout=DEFAULT_TIMEOUT):
         if not self._initialized.wait(timeout):
