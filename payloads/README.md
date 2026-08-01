@@ -16,9 +16,11 @@ separates three levels:
 - `qemu-verified`: a builder exists and an opt-in QEMU execution test covers
   the raw result.
 
-Each cell also exposes explicit `recognized`, `implemented`, and
-`qemu_verified` booleans. The whole matrix can be serialized without custom
-encoders:
+Each cell also exposes explicit `recognized`, `implemented`,
+`qemu_verified`, and `native_verified` booleans. Native execution is
+orthogonal to the three QEMU-oriented levels: a target/capability pair can
+carry both QEMU and direct-host evidence. The whole matrix can be serialized
+without custom encoders:
 
 ```python
 import json
@@ -44,8 +46,8 @@ little-endian 32-bit PowerPC emulator:
 
 | Architecture | Bits | Endian | ABI | Shellcode evidence |
 | --- | ---: | --- | --- | --- |
-| x86 | 32 | little | i386 SysV | QEMU-verified |
-| x86-64 | 64 | little | AMD64 SysV | QEMU-verified |
+| x86 | 32 | little | i386 SysV | QEMU-verified; native-verified |
+| x86-64 | 64 | little | AMD64 SysV | QEMU-verified; native-verified |
 | ARM and Thumb | 32 | little and big | ARM EABI | QEMU-verified |
 | ARM64 | 64 | little and big | AAPCS64 | QEMU-verified |
 | MIPS32 | 32 | little and big | o32 | QEMU-verified |
@@ -73,6 +75,13 @@ implemented variant is covered by the exact-identity unit matrix.
 Target-generic arbitrary-memory adapters, explicit payload
 staging/triggering, and exact-libc call workflows are implemented for every
 catalog target and are unit-tested, not QEMU-tested.
+
+On an x86-64 Linux host, a separate opt-in suite executes the command, ORW,
+RW-to-RX stager, static syscall ROP, static direct-call ROP, and exact-loaded-
+libc ret2libc paths directly in both 64-bit AMD64 and kernel i386 compatibility
+mode. These runs do not start QEMU. The native ret2libc fixture also validates
+the loaded libc device/inode mappings, independently derives its live base,
+and observes address randomization across fresh processes.
 
 ## Resolving an exact target
 
@@ -162,6 +171,45 @@ arbitrary-write path must perform the platform-appropriate instruction-cache
 synchronization before jumping when the environment requires it. It is false
 for x86/x86-64 and s390x; s390x has coherent instruction/data caches and does
 not require an external cache-flush hook.
+
+### QEMU user-mode semihosting host escape
+
+`qemu_semihosting_command_shellcode` deliberately escapes the guest and asks
+QEMU's user-mode semihosting handler to run `SYS_SYSTEM` (`0x12`) on the host.
+This is a CTF pwn primitive: it is not guest `execve` shellcode, and the
+command is interpreted by the host shell with the privileges and environment
+of the QEMU process.
+
+```python
+from payloads import qemu_semihosting_command_shellcode, resolve_target
+
+target = resolve_target("riscv64")
+escape = qemu_semihosting_command_shellcode("id > /tmp/qemu-host-id", target)
+```
+
+QEMU user mode automatically recognizes this architecture-specific trap; the
+payload runner must not add `-semihosting` or `-semihosting-config`. The exact
+implemented and QEMU-executed matrix is:
+
+| ISA | Bits | Endian variants | Semihosting trap |
+| --- | ---: | --- | --- |
+| ARM A32 | 32 | little, big | `svc #0x123456` |
+| Thumb T32 | 32 | little, big | `svc #0xab` |
+| AArch64 | 64 | little, big | `hlt #0xf000` |
+| RISC-V | 32, 64 | little | 16-byte-aligned `slli` / `ebreak` / `srai` sequence |
+
+The RISC-V code mapping must satisfy the payload's 16-byte alignment
+requirement so the three-instruction signature remains correctly aligned.
+Other catalog architectures are reported as recognized but unsupported for
+this capability: system-emulation semihosting support does not imply automatic
+qemu-user interception.
+
+The verified route is the trap being consumed by QEMU user mode. It is not
+native-hardware execution, a guest Linux syscall, or GDB remote file I/O. A
+debugger configured to catch or reroute the semihosting breakpoint changes
+that route; a GDB stop at the trap is therefore not evidence that this QEMU
+host escape executed. The opt-in test uses a host marker file to prove that
+QEMU itself handled the command without a semihosting command-line flag.
 
 `orw_shellcode(path, target, max_bytes=0x400, output_fd=1)` emits one
 position-independent open/read/write pass. It opens the NUL-free path
@@ -481,12 +529,26 @@ for the QEMU-verified matrix:
 PWNC_QEMU_TESTS=1 python3 -m unittest discover -s payloads/tests -v
 ```
 
+On an x86-64 Linux host, run the direct AMD64 and i386 compatibility-mode
+suite with:
+
+```sh
+PWNC_NATIVE_TESTS=1 python3 -m unittest discover -s payloads/tests -v
+```
+
+This native opt-in requires both 64-bit and 32-bit compiler, loader, and libc
+support in addition to LLVM and LLD. Once enabled, a missing prerequisite or a
+kernel that cannot execute i386 ELF files fails the run rather than skipping
+one half of the matrix.
+
 The shellcode QEMU tests place exactly the bytes returned by the command, ORW,
 and RW-to-RX stager builders in a minimal static ELF, then check command output,
 binary file bytes, and execution of an exact second-stage exit payload. They use
-no foreign libc or sysroot. The static ROP tests patch the exact materialized
-chain into a fixture and pivot to its first word; syscall and direct-call exits
-are deliberately distinct. The ret2libc tests use `-L /` with sanitized loader
+no foreign libc or sysroot. The semihosting test runs every one of the eight
+automatic qemu-user variants with no semihosting flag and checks a file written
+by the host command. The static ROP tests patch the exact materialized chain
+into a fixture and pivot to its first word; syscall and direct-call exits are
+deliberately distinct. The ret2libc tests use `-L /` with sanitized loader
 environment variables so that the libc path parsed by the framework is the
 artifact actually loaded by the guest. They require suitable native compiler
 and multilib support in addition to the i386 and AMD64 emulators.

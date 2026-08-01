@@ -2,12 +2,12 @@
 
 ``SUPPORTED_TARGETS`` describes targets that the foundation can resolve and
 pack.  It does *not* imply that every payload builder accepts every target.
-This module keeps that distinction explicit and records end-to-end QEMU
-coverage separately from implementation coverage.
+This module keeps that distinction explicit and records end-to-end QEMU and
+native-host coverage separately from implementation coverage.
 
 The matrix is intentionally declarative.  Adding a builder is not enough to
-change a claim here: its implemented target set and, separately, its QEMU test
-evidence must be added below.
+change a claim here: its implemented target set and, separately, its QEMU and
+native test evidence must be added below.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 
 from .target import ABI, SUPPORTED_TARGETS, Endian, Target, resolve_target
 
-SUPPORT_SCHEMA_VERSION = 1
+SUPPORT_SCHEMA_VERSION = 2
 
 
 class Capability(str, Enum):
@@ -32,6 +32,7 @@ class Capability(str, Enum):
     RET2LIBC = "ret2libc"
     STATIC_ROP = "static-rop"
     ARB_EXECUTOR = "arb-executor"
+    QEMU_SEMIHOSTING = "qemu-semihosting"
 
 
 class SupportLevel(str, Enum):
@@ -41,6 +42,8 @@ class SupportLevel(str, Enum):
     width, byte order, and ABI.  It explicitly does not mean a builder exists.
     ``IMPLEMENTED`` means a builder exists for the pair.  ``QEMU_VERIFIED``
     additionally means an opt-in end-to-end QEMU execution test covers it.
+    Direct host execution is an orthogonal fact exposed by
+    :attr:`CapabilitySupport.native_verified` rather than another level.
     """
 
     RECOGNIZED = "recognized"
@@ -55,6 +58,7 @@ class CapabilitySupport:
     level: SupportLevel
     detail: str
     evidence: tuple[str, ...]
+    native_verified: bool = False
 
     @property
     def recognized(self) -> bool:
@@ -76,6 +80,7 @@ class CapabilitySupport:
             "recognized": self.recognized,
             "implemented": self.implemented,
             "qemu_verified": self.qemu_verified,
+            "native_verified": self.native_verified,
             "detail": self.detail,
             "evidence": list(self.evidence),
         }
@@ -116,6 +121,19 @@ _SHELLCODE_IMPLEMENTED = _ALL_TARGET_NAMES
 _SHELLCODE_QEMU_VERIFIED = _ALL_TARGET_NAMES - frozenset({"powerpc32-le-powerpc-sysv"})
 _STATIC_ROP_QEMU_VERIFIED = _SHELLCODE_QEMU_VERIFIED
 _RET2LIBC_QEMU_VERIFIED = frozenset({"x86-le-i386-sysv", "x86_64-le-amd64-sysv"})
+_NATIVE_X86_VERIFIED = frozenset({"x86-le-i386-sysv", "x86_64-le-amd64-sysv"})
+_QEMU_SEMIHOSTING_IMPLEMENTED = frozenset(
+    {
+        "arm-le-arm-eabi",
+        "arm-be-arm-eabi",
+        "thumb-le-arm-eabi",
+        "thumb-be-arm-eabi",
+        "arm64-le-aarch64-aapcs64",
+        "arm64-be-aarch64-aapcs64",
+        "riscv32-le-riscv-ilp32",
+        "riscv64-le-riscv-lp64",
+    }
+)
 _DIRECT_CALL_UNSUPPORTED = frozenset(
     {
         "powerpc64-be-powerpc64-elfv1",
@@ -134,6 +152,7 @@ _IMPLEMENTED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.RET2LIBC: _DIRECT_CALL_IMPLEMENTED,
         Capability.STATIC_ROP: _ALL_TARGET_NAMES,
         Capability.ARB_EXECUTOR: _ALL_TARGET_NAMES,
+        Capability.QEMU_SEMIHOSTING: _QEMU_SEMIHOSTING_IMPLEMENTED,
     }
 )
 
@@ -145,6 +164,19 @@ _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.RET2LIBC: _RET2LIBC_QEMU_VERIFIED,
         Capability.STATIC_ROP: _STATIC_ROP_QEMU_VERIFIED,
         Capability.ARB_EXECUTOR: frozenset(),
+        Capability.QEMU_SEMIHOSTING: _QEMU_SEMIHOSTING_IMPLEMENTED,
+    }
+)
+
+_NATIVE_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
+    {
+        Capability.COMMAND: _NATIVE_X86_VERIFIED,
+        Capability.ORW: _NATIVE_X86_VERIFIED,
+        Capability.STAGER: _NATIVE_X86_VERIFIED,
+        Capability.RET2LIBC: _NATIVE_X86_VERIFIED,
+        Capability.STATIC_ROP: _NATIVE_X86_VERIFIED,
+        Capability.ARB_EXECUTOR: frozenset(),
+        Capability.QEMU_SEMIHOSTING: frozenset(),
     }
 )
 
@@ -184,6 +216,10 @@ _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyTyp
             "payloads.arbio.ExecveCallWorkflow",
             "payloads.arbio.GotSystemWorkflow",
         ),
+        Capability.QEMU_SEMIHOSTING: (
+            "payloads.shellcode.qemu_semihosting_command_source",
+            "payloads.shellcode.qemu_semihosting_command_shellcode",
+        ),
     }
 )
 
@@ -205,6 +241,35 @@ _QEMU_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
         ),
         Capability.STATIC_ROP: "payloads/tests/test_rop_qemu.py::StaticRopQemuTests",
         Capability.ARB_EXECUTOR: "no QEMU execution test in current tree",
+        Capability.QEMU_SEMIHOSTING: (
+            "payloads/tests/test_semihost_qemu.py::"
+            "QemuSemihostingExecutionTests.test_host_command_escape_executes_on_every_automatic_qemu_user_target"
+        ),
+    }
+)
+
+_NATIVE_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
+    {
+        Capability.COMMAND: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeShellcodeTests.test_raw_command_shellcode_executes_in_both_native_x86_modes"
+        ),
+        Capability.ORW: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeShellcodeTests.test_raw_orw_shellcode_preserves_binary_file_bytes_in_both_native_x86_modes"
+        ),
+        Capability.STAGER: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeShellcodeTests.test_rw_to_rx_mmap_stager_runs_exact_child_in_both_native_x86_modes"
+        ),
+        Capability.RET2LIBC: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeRet2libcTests.test_exact_loaded_libc_system_chain_executes_from_native_live_bases"
+        ),
+        Capability.STATIC_ROP: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeStaticRopTests.test_static_syscall_and_direct_call_chains_execute_in_both_native_x86_modes"
+        ),
     }
 )
 
@@ -216,6 +281,9 @@ _UNIMPLEMENTED_DETAIL: Mapping[Capability, str] = MappingProxyType(
         Capability.RET2LIBC: "target is recognized, but its ABI is not supported by the ret2libc call builder",
         Capability.STATIC_ROP: "target is recognized, but no static-binary ROP builder is implemented",
         Capability.ARB_EXECUTOR: "target is recognized, but no arbitrary-read/write executor is implemented",
+        Capability.QEMU_SEMIHOSTING: (
+            "target is recognized, but qemu-user does not automatically intercept its semihosting trap"
+        ),
     }
 )
 
@@ -250,6 +318,8 @@ def _implemented_detail(target: Target, capability: Capability) -> str:
             "target-endian arbitrary-memory adapters, explicit payload staging/triggering, "
             "and exact-libc call workflows exist"
         )
+    if capability is Capability.QEMU_SEMIHOSTING:
+        return "intentional QEMU user-mode SYS_SYSTEM host-command escape shellcode builder exists"
     raise AssertionError(f"unhandled capability {capability.value}")
 
 
@@ -270,9 +340,12 @@ def _unimplemented_detail(target: Target, capability: Capability) -> str:
 def _capability_support(target: Target, capability: Capability) -> CapabilitySupport:
     name = target.name
     qemu_verified = name in _QEMU_VERIFIED[capability]
+    native_verified = name in _NATIVE_VERIFIED[capability]
     implemented = name in _IMPLEMENTED[capability]
     if qemu_verified and not implemented:  # pragma: no cover - declaration invariant
         raise RuntimeError(f"{capability.value}/{name} cannot be QEMU-verified without an implementation")
+    if native_verified and not implemented:  # pragma: no cover - declaration invariant
+        raise RuntimeError(f"{capability.value}/{name} cannot be native-verified without an implementation")
 
     evidence = ["payloads.target.SUPPORTED_TARGETS"]
     if implemented:
@@ -309,20 +382,36 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
                 )
             else:
                 detail = "materialized static syscall and direct-call ROP both execute in the opt-in QEMU test"
+        elif capability is Capability.QEMU_SEMIHOSTING:
+            detail = (
+                "intentional SYS_SYSTEM host-command escape executes through automatic qemu-user semihosting "
+                "interception in the opt-in QEMU test"
+            )
         else:
             detail = "builder exists and raw payload execution is covered by the opt-in QEMU test"
         evidence.append(_QEMU_EVIDENCE[capability])
+        if native_verified:
+            evidence.append(_NATIVE_EVIDENCE[capability])
+            detail += "; direct execution on native Linux i386 and AMD64 is also covered"
         return CapabilitySupport(
             SupportLevel.QEMU_VERIFIED,
             detail,
             tuple(evidence),
+            native_verified,
         )
     if implemented:
+        detail = (
+            _implemented_detail(target, capability)
+            + "; no end-to-end QEMU execution test covers this target/capability pair"
+        )
+        if native_verified:
+            evidence.append(_NATIVE_EVIDENCE[capability])
+            detail += "; direct native execution is covered"
         return CapabilitySupport(
             SupportLevel.IMPLEMENTED,
-            _implemented_detail(target, capability)
-            + "; no end-to-end QEMU execution test covers this target/capability pair",
+            detail,
             tuple(evidence),
+            native_verified,
         )
     return CapabilitySupport(SupportLevel.RECOGNIZED, _unimplemented_detail(target, capability), tuple(evidence))
 
