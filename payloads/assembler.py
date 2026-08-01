@@ -146,8 +146,7 @@ class ZigAssembler:
             return self.fallback.assemble(source, target)
         except AssemblyError as fallback_error:
             raise AssemblyError(
-                f"zig cc failed for {target.name}: {zig_diagnostics}; "
-                f"fallback failed: {fallback_error}"
+                f"zig cc failed for {target.name}: {zig_diagnostics}; fallback failed: {fallback_error}"
             ) from fallback_error
 
     def assemble(self, source: str, target: Target) -> bytes:
