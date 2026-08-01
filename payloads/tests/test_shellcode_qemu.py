@@ -1,8 +1,9 @@
 """Opt-in end-to-end execution tests for raw payload bytes.
 
 Run with ``PWNC_QEMU_TESTS=1 python3 -m unittest discover -s payloads/tests``.
-The test links only a minimal ELF envelope around the exact raw bytes returned
-by :func:`payloads.command_shellcode`; libc or a foreign sysroot is not used.
+The tests link only a minimal ELF envelope around the exact raw bytes returned
+by the command, ORW, exit, and mmap-stager builders; libc or a foreign sysroot
+is not used.
 """
 
 from __future__ import annotations
@@ -13,8 +14,6 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-
-from test_shellcode import PRIMARY_TARGETS
 
 from payloads import (
     ABI,
@@ -27,6 +26,7 @@ from payloads import (
     orw_shellcode,
     resolve_target,
 )
+from payloads.tests.test_shellcode import PRIMARY_TARGETS
 
 _QEMU = {
     (Architecture.X86, None): "qemu-i386",
