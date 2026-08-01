@@ -1,0 +1,576 @@
+{
+  "schema_version": 1,
+  "default_lane": "glibc-2.39",
+  "bootlin_releases": {
+    "glibc-2.24": {
+      "artifact_release": "2017.05-toolchains-1-1",
+      "archive_suffix": ".tar.bz2",
+      "glibc_version": "2.24",
+      "sha256": {
+        "aarch64be": "26f5034c9613f57bb924b356edac8b602321bf15fb5aea216cfd31d6d7adb1c2",
+        "armebv7-eabihf": "840a2f1bc884d5fc637284317d1d31cea023c2c35f2407479595096149bb6e08",
+        "mips64": "07c178cd3d637b4355889f9548029f4c6c5d0d00b16e20cf2b9fb36baa0850e4",
+        "powerpc64-power8": "6c68f47f0821db60e3ecd03edabba10c8fedc9fb96332ac2f55d412e21560326",
+        "powerpc64le-power8": "eebeaa394c9fdb38789bc1f310baf9b09e1bde8cd178eead1eb635a1f49551ba",
+        "x86-64-core-i7": "5a2a296ff2bdfa60ff1b0b59d8ede8f1211b9a0f695ce7b7006a173c0ea2e5b8",
+        "x86-i686": "bc2144e010bdbc9bca43a7343634330be57e9c44c22b6aa73fc5ce018109b4ed"
+      }
+    },
+    "glibc-2.39": {
+      "artifact_release": "2024.05-1",
+      "archive_suffix": ".tar.xz",
+      "glibc_version": "2.39-74-g198632a05f6c7b9ab67d3331d8caace9ceabb685",
+      "sha256": {
+        "aarch64": "b0fad860eb94b503a56d66ca8b9ba06d2d4826943e37ebd1d7217423f6ea5bb2",
+        "aarch64be": "a44e4b4cc016aded66f00109c1c5f64f881a8b7effc60bae2e84a5936fd3b0e4",
+        "armebv7-eabihf": "50ca1e7c8bf78cdc941edf93d0a350d2c6b5b8024b582a57c7815f6e631ba43b",
+        "armv7-eabihf": "608263bc9dc3eadf0962ddb1165f1c2291001190f9927dee47d464e26374462c",
+        "mips32": "677402719c545e49eb71c3d27a5f495af38f60463b40ed705e24e43a9834c137",
+        "mips32el": "d0139b6ade7f3b72a5f9c33814696af817661e826c9c501f6cefcab4ac684c8f",
+        "powerpc-e300c3": "6c975a7293fde77a52f348124049645ee2ceee19e75ab6e0b2364043090a2dff",
+        "powerpc64-e5500": "588b8d77fbc991c2f26b356349cfdcd08d89df0d88477c8adfa00c20d9031ad3",
+        "powerpc64le-power8": "8133b74614f880eb8b76730efee77b8fd281c982bfa2791b72c5f836a529530d",
+        "riscv32-ilp32d": "00112418e6d4b0733019a673b682a39f1ce6300b9448cd840f1194aa4b064192",
+        "riscv64-lp64d": "78e16f3def8b2ff3da09c16155f993ac7e4dc1791d0904ada03fcb2e04910aab",
+        "s390x-z13": "b37ed02693a370f28434c34655c64bcb96dc0d428a92ddbc99feb5608bcf64a1",
+        "sparc64": "29d1e6c0d45ab95edf33ff2ee77b27869669f476a23d76fef96f56f8d3cc6234",
+        "x86-64": "932823ca9a3e067e7e2a29810a666d20c9cc5bb550de947f6879e38ace1aa955",
+        "x86-i686": "023e4f03cd212b5545c4c184238693b61b40fa36d257b84546100a92ea2c1d8b"
+      }
+    },
+    "glibc-2.41": {
+      "artifact_release": "2025.08-1",
+      "archive_suffix": ".tar.xz",
+      "glibc_version": "2.41-70-g1502c248d58cb99a203731707987a4342926e830",
+      "sha256": {
+        "aarch64be": "4eca1a03d3d73bd31427d0f231d40a9f00a682a50c6ae5b31f6738a4675f9dd8",
+        "armebv7-eabihf": "98150dbf42927fe33a1ce51f48d13fcd83e04ba7c3d8c9ad0fc1837a3fa971ce",
+        "mips32": "23d0f36aa7962230ef43338ba14ac2a7fa6eb68e15ef39cb9114ac711b907f70",
+        "powerpc64-e5500": "0334d8c2b52043abc4ca5075af22ca9192b4c624ab7d4f31c8a6e1ed48c9f167",
+        "powerpc64le-power8": "819c8dee94b1baff33943f3b01d669ea794a825e7b4cbead340ad5de8cff6baa",
+        "riscv32-ilp32d": "d42680e926542595c4c87629d33f5f90aac1e9a964c8955089e0514caa01b78f",
+        "x86-64": "760acd5c3159448b618e237b61935335baada74fe0cdc0d7611826cb49b41c8c",
+        "x86-i686": "f9b365d7fd8f8860dfb1845ff731013550f071ca4a8de0e5074abc995296b26c"
+      }
+    }
+  },
+  "packages": {
+    "noble-libc6-dev-mips64": {
+      "name": "libc6-dev-mips64-cross_2.39-0ubuntu8cross2_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/libc6-dev-mips64-cross_2.39-0ubuntu8cross2_all.deb",
+      "sha256": "19fe192fe95299d2a9f6116f04ee4bd3f927786c5aa2e314f7ed4e22dab3a546"
+    },
+    "noble-libc6-dev-mips64el": {
+      "name": "libc6-dev-mips64el-cross_2.39-0ubuntu8cross2_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/libc6-dev-mips64el-cross_2.39-0ubuntu8cross2_all.deb",
+      "sha256": "fc339bb4434a349e44871181b29290c888c4e29f129f90adf6f3fabb443d2607"
+    },
+    "noble-libc6-dev-sparc-multilib": {
+      "name": "libc6-dev-sparc-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-ports/libc6-dev-sparc-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "sha256": "9e1382b7c56c67cabf5cb83865e7fcc357ccd0f35a911c5554578a5aa361c9c7"
+    },
+    "noble-libc6-dev-sparc64": {
+      "name": "libc6-dev-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-ports/libc6-dev-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "sha256": "6d7185a60d88a89785bdac2f41fd81e70ae0de9fdcaab29c8a0a57ee67248592"
+    },
+    "noble-libc6-mips64": {
+      "name": "libc6-mips64-cross_2.39-0ubuntu8cross2_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/libc6-mips64-cross_2.39-0ubuntu8cross2_all.deb",
+      "sha256": "46570c4bbf12beb4eeb03b6665827d88b77b053d2204022608852c89b5246150"
+    },
+    "noble-libc6-mips64el": {
+      "name": "libc6-mips64el-cross_2.39-0ubuntu8cross2_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/libc6-mips64el-cross_2.39-0ubuntu8cross2_all.deb",
+      "sha256": "99556704930e9a7bfe45999af88b99d8fa5e67dcda5a0f7542bc8a0d1684d4d2"
+    },
+    "noble-libc6-sparc-multilib": {
+      "name": "libc6-sparc-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-ports/libc6-sparc-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "sha256": "4055bacac33a76534dabee37152ca15968bd320ba580faeecdf4e049962745b5"
+    },
+    "noble-libc6-sparc64": {
+      "name": "libc6-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-ports/libc6-sparc64-cross_2.39-0ubuntu8.2cross1_all.deb",
+      "sha256": "4788dc8804dfe62af11a2b73d6d4adc2e11c12f2c09b392423bedfcabe114275"
+    },
+    "noble-linux-libc-dev-mips64": {
+      "name": "linux-libc-dev-mips64-cross_6.8.0-25.25cross2_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/linux-libc-dev-mips64-cross_6.8.0-25.25cross2_all.deb",
+      "sha256": "81ab81c8a64e5592ee09e80072107e5621c5241c96e643149fab552d3e6adf63"
+    },
+    "noble-linux-libc-dev-mips64el": {
+      "name": "linux-libc-dev-mips64el-cross_6.8.0-25.25cross2_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/linux-libc-dev-mips64el-cross_6.8.0-25.25cross2_all.deb",
+      "sha256": "1e681dcce2840c538c6dc67518465964f850a31f46739db5c721fce6f79fb25b"
+    },
+    "noble-linux-libc-dev-sparc64": {
+      "name": "linux-libc-dev-sparc64-cross_6.8.0-39.39cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-ports/linux-libc-dev-sparc64-cross_6.8.0-39.39cross1_all.deb",
+      "sha256": "a90a6111115504fe089199d268e361aea5b169615d25f737515d3f73cd19b9a0"
+    },
+    "xenial-libc-dev-bin-amd64": {
+      "name": "libc-dev-bin_2.23-0ubuntu11.3_amd64.deb",
+      "url": "https://launchpadlibrarian.net/534747111/libc-dev-bin_2.23-0ubuntu11.3_amd64.deb",
+      "sha256": "506be57898246c7dbfa34cef33d247c4621260997a3c6729020f72f51408b22b"
+    },
+    "xenial-libc6-amd64": {
+      "name": "libc6_2.23-0ubuntu11.3_amd64.deb",
+      "url": "https://launchpadlibrarian.net/534747115/libc6_2.23-0ubuntu11.3_amd64.deb",
+      "sha256": "d7825ca7a85a2a5c12ff653b9acf7218a86413c79dfe4e52035d63fe1285d642"
+    },
+    "xenial-libc6-dev-amd64": {
+      "name": "libc6-dev_2.23-0ubuntu11.3_amd64.deb",
+      "url": "https://launchpadlibrarian.net/534747101/libc6-dev_2.23-0ubuntu11.3_amd64.deb",
+      "sha256": "b5b9102c8df4c0fff770a236c0feb9ab2d430ebddb910359927a3a1725c93a37"
+    }
+  },
+  "unsupported": [
+    {
+      "target": "powerpc32-le-powerpc-sysv",
+      "upstream_glibc": false,
+      "reason": "Linux has no standardized upstream 32-bit little-endian PowerPC glibc ABI; only downstream experimental ports exist"
+    }
+  ],
+  "sysroots": [
+    {
+      "id": "x86-i686-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["x86-le-i386-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "x86-i686"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-i386",
+      "loader": "lib/ld-linux.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 3},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "x86-64-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["x86_64-le-amd64-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "x86-64"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-x86_64",
+      "loader": "lib/ld-linux-x86-64.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 62},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "armv7-eabihf-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["arm-le-arm-eabi", "thumb-le-arm-eabi"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "armv7-eabihf"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-arm",
+      "loader": "lib/ld-linux-armhf.so.3",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 40},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "armebv7-eabihf-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["arm-be-arm-eabi", "thumb-be-arm-eabi"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "armebv7-eabihf"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-armeb",
+      "loader": "lib/ld-linux-armhf.so.3",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 40},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "aarch64-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["arm64-le-aarch64-aapcs64"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "aarch64"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-aarch64",
+      "loader": "lib/ld-linux-aarch64.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 183},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "aarch64be-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["arm64-be-aarch64-aapcs64"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "aarch64be"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-aarch64_be",
+      "loader": "lib/ld-linux-aarch64_be.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 183},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "mips32el-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["mips32-le-mips-o32"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "mips32el"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-mipsel",
+      "loader": "lib/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 8},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "mips32-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["mips32-be-mips-o32"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "mips32"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-mips",
+      "loader": "lib/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 8},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "mips64el-n64-glibc-2.39",
+      "lane": "glibc-2.39",
+      "glibc_version": "2.39-0ubuntu8",
+      "targets": ["mips64-le-mips-n64"],
+      "source": {
+        "kind": "packages",
+        "description": "Ubuntu Noble cross-toolchain-base-mipsen N64 packages",
+        "packages": ["noble-libc6-mips64el", "noble-libc6-dev-mips64el", "noble-linux-libc-dev-mips64el"]
+      },
+      "sysroot_subdir": "usr/mips64el-linux-gnuabi64",
+      "compiler": {"kind": "zig", "target": "mips64el-linux-gnuabi64"},
+      "qemu": "qemu-mips64el",
+      "loader": "lib64/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 8},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "mips64-n64-glibc-2.39",
+      "lane": "glibc-2.39",
+      "glibc_version": "2.39-0ubuntu8",
+      "targets": ["mips64-be-mips-n64"],
+      "source": {
+        "kind": "packages",
+        "description": "Ubuntu Noble cross-toolchain-base-mipsen N64 packages",
+        "packages": ["noble-libc6-mips64", "noble-libc6-dev-mips64", "noble-linux-libc-dev-mips64"]
+      },
+      "sysroot_subdir": "usr/mips64-linux-gnuabi64",
+      "compiler": {"kind": "zig", "target": "mips64-linux-gnuabi64"},
+      "qemu": "qemu-mips64",
+      "loader": "lib64/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 8},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "riscv32-ilp32d-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["riscv32-le-riscv-ilp32"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "riscv32-ilp32d"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-riscv32",
+      "loader": "lib/ld-linux-riscv32-ilp32d.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 243},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "riscv64-lp64d-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["riscv64-le-riscv-lp64"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "riscv64-lp64d"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-riscv64",
+      "loader": "lib/ld-linux-riscv64-lp64d.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 243},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "powerpc-e300c3-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["powerpc32-be-powerpc-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "powerpc-e300c3"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc",
+      "loader": "lib/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 20},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "powerpc64-elfv1-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["powerpc64-be-powerpc64-elfv1"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "powerpc64-e5500"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc64",
+      "loader": "lib/ld64.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 21, "flags_mask": 3, "flags_value": 1},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "powerpc64le-elfv2-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["powerpc64-le-powerpc64-elfv2"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "powerpc64le-power8"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc64le",
+      "loader": "lib/ld64.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 21, "flags_mask": 3, "flags_value": 2},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "sparc32-v8plus-glibc-2.39",
+      "lane": "glibc-2.39",
+      "glibc_version": "2.39-0ubuntu8.2",
+      "targets": ["sparc32-be-sparc-sysv"],
+      "source": {
+        "kind": "packages",
+        "description": "Ubuntu Noble SPARC64 cross packages with SPARC V8+ multilib",
+        "packages": [
+          "noble-libc6-sparc64",
+          "noble-libc6-dev-sparc64",
+          "noble-libc6-sparc-multilib",
+          "noble-libc6-dev-sparc-multilib",
+          "noble-linux-libc-dev-sparc64"
+        ]
+      },
+      "sysroot_subdir": "usr/sparc64-linux-gnu",
+      "compiler": {"kind": "system", "argv": ["sparc64-linux-gnu-gcc", "-m32"]},
+      "qemu": "qemu-sparc32plus",
+      "loader": "lib32/ld-linux.so.2",
+      "libc": "lib32/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 2},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "sparc64-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["sparc64-be-sparc64-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "sparc64"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-sparc64",
+      "loader": "lib/ld-linux.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 43},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "s390x-z13-glibc-2.39",
+      "lane": "glibc-2.39",
+      "targets": ["s390x-be-s390x-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.39", "slug": "s390x-z13"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-s390x",
+      "loader": "lib/ld64.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 22},
+      "version_marker": "stable release version 2.39"
+    },
+    {
+      "id": "amd64-xenial-glibc-2.23",
+      "lane": "glibc-2.23",
+      "glibc_version": "2.23-0ubuntu11.3",
+      "targets": ["x86_64-le-amd64-sysv"],
+      "source": {
+        "kind": "packages",
+        "description": "Canonical Ubuntu Xenial amd64 packages from Launchpad librarian",
+        "packages": ["xenial-libc6-amd64", "xenial-libc6-dev-amd64", "xenial-libc-dev-bin-amd64"]
+      },
+      "sysroot_subdir": ".",
+      "compiler": {"kind": "zig", "target": "x86_64-linux-gnu.2.23"},
+      "qemu": "qemu-x86_64",
+      "loader": "lib64/ld-linux-x86-64.so.2",
+      "libc": "lib/x86_64-linux-gnu/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 62},
+      "version_marker": "stable release version 2.23"
+    },
+    {
+      "id": "x86-i686-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["x86-le-i386-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "x86-i686"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-i386",
+      "loader": "lib/ld-linux.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 3},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "x86-64-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["x86_64-le-amd64-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "x86-64-core-i7"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-x86_64",
+      "loader": "lib/ld-linux-x86-64.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 62},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "armebv7-eabihf-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["arm-be-arm-eabi", "thumb-be-arm-eabi"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "armebv7-eabihf"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-armeb",
+      "loader": "lib/ld-linux-armhf.so.3",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 40},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "aarch64be-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["arm64-be-aarch64-aapcs64"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "aarch64be"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-aarch64_be",
+      "loader": "lib/ld-linux-aarch64_be.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 183},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "mips64-n64-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["mips64-be-mips-n64"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "mips64"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-mips64",
+      "loader": "lib/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 8},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "powerpc64-elfv1-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["powerpc64-be-powerpc64-elfv1"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "powerpc64-power8"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc64",
+      "loader": "lib/ld64.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 21, "flags_mask": 3, "flags_value": 1},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "powerpc64le-elfv2-glibc-2.24",
+      "lane": "glibc-2.24",
+      "targets": ["powerpc64-le-powerpc64-elfv2"],
+      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "powerpc64le-power8"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc64le",
+      "loader": "lib/ld64.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 21, "flags_mask": 3, "flags_value": 2},
+      "version_marker": "stable release version 2.24"
+    },
+    {
+      "id": "x86-i686-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["x86-le-i386-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "x86-i686"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-i386",
+      "loader": "lib/ld-linux.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 3},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "x86-64-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["x86_64-le-amd64-sysv"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "x86-64"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-x86_64",
+      "loader": "lib/ld-linux-x86-64.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 62},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "armebv7-eabihf-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["arm-be-arm-eabi", "thumb-be-arm-eabi"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "armebv7-eabihf"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-armeb",
+      "loader": "lib/ld-linux-armhf.so.3",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 40},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "aarch64be-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["arm64-be-aarch64-aapcs64"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "aarch64be"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-aarch64_be",
+      "loader": "lib/ld-linux-aarch64_be.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 183},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "mips32-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["mips32-be-mips-o32"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "mips32"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-mips",
+      "loader": "lib/ld.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 8},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "riscv32-ilp32d-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["riscv32-le-riscv-ilp32"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "riscv32-ilp32d"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-riscv32",
+      "loader": "lib/ld-linux-riscv32-ilp32d.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 32, "endian": "little", "machine": 243},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "powerpc64-elfv1-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["powerpc64-be-powerpc64-elfv1"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "powerpc64-e5500"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc64",
+      "loader": "lib/ld64.so.1",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "big", "machine": 21, "flags_mask": 3, "flags_value": 1},
+      "version_marker": "stable release version 2.41"
+    },
+    {
+      "id": "powerpc64le-elfv2-glibc-2.41",
+      "lane": "glibc-2.41",
+      "targets": ["powerpc64-le-powerpc64-elfv2"],
+      "source": {"kind": "bootlin", "release": "glibc-2.41", "slug": "powerpc64le-power8"},
+      "compiler": {"kind": "bootlin"},
+      "qemu": "qemu-ppc64le",
+      "loader": "lib/ld64.so.2",
+      "libc": "lib/libc.so.6",
+      "elf": {"class": 64, "endian": "little", "machine": 21, "flags_mask": 3, "flags_value": 2},
+      "version_marker": "stable release version 2.41"
+    }
+  ]
+}
