@@ -214,7 +214,10 @@ _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyTyp
         ),
         Capability.RET2LIBC: (
             "payloads.rop.build_ret2libc_system",
+            "payloads.libc_rop.LibcROPBuilder",
             "payloads/tests/test_rop.py::RopTargetMatrixTests.test_exact_identity_ret2libc_matrix_is_complete",
+            "payloads/tests/test_libc_rop.py::SemanticLibcROPStageTests",
+            "payloads/tests/test_libc_rop.py::PwntoolsComposedProgramTests",
         ),
         Capability.STATIC_ROP: (
             "payloads.rop.build_static_call",
@@ -412,8 +415,7 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
             )
         else:
             detail = (
-                _implemented_detail(target, capability)
-                + "; raw payload execution is covered by the opt-in QEMU test"
+                _implemented_detail(target, capability) + "; raw payload execution is covered by the opt-in QEMU test"
             )
         evidence.append(_QEMU_EVIDENCE[capability])
         if native_verified:

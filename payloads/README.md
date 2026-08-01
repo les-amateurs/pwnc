@@ -219,6 +219,12 @@ to `output_fd`, and exits. It preserves embedded NULs in file data. It is not a
 looping file copier: short reads and short writes are not retried. Its stack
 image, including the read buffer, shares the 1792-byte cap.
 
+`sendfile_orw_shellcode(path, target, max_bytes=0x400, output_fd=1)` is the
+buffer-free alternative. It opens the path and calls
+`sendfile(output_fd, opened_fd, NULL, max_bytes)` before exiting. It therefore
+needs no writable read buffer, but it still performs a single transfer and
+does not retry a short send.
+
 ### RW-to-RX stager
 
 `mmap_stager(size, target, input_fd=0, page_size=0x1000)` allocates an anonymous
@@ -247,14 +253,19 @@ instruction cache; s390x likewise needs no cache flush and emits a serializing
 first-stage bytes still need an initial executable region or another valid
 control-flow path.
 
-### LLVM requirement
+### Zig assembler backend
 
-Raw bytes are assembled by `LLVMAssembler`, which requires `llvm-mc` from
-LLVM. Pass `LLVMAssembler("/absolute/path/to/llvm-mc")` when it is not on
-`PATH`. `pyelftools` is used to extract `.text`; unresolved relocations are
-rejected rather than copied into the payload. LLVM/LLD target support varies by
-installation, so matrix recognition alone does not prove that a particular
-local LLVM build can assemble a target.
+Raw bytes are assembled by `ZigAssembler` by default. It invokes `zig cc` for
+the exact target triple, then uses `pyelftools` to extract `.text`; unresolved
+relocations are rejected rather than copied into a payload. The backend never
+uses pwntools' assembler or shellcraft. Pass
+`ZigAssembler("/absolute/path/to/zig")` when `zig` is not on `PATH`.
+
+`LLVMAssembler` remains an explicit backend and the fallback for big-endian
+PPC64 ELFv1, which current Zig/LLD cannot emit. On every other catalog target,
+the test suite requires Zig's bytes to match the LLVM reference bytes exactly.
+Toolchain target support still varies by installation, so recognizing a target
+does not itself prove a local compiler can assemble it.
 
 `ld.lld` is not required for normal payload construction. The QEMU tests use
 it where it can faithfully wrap the exact raw bytes in a minimal static ELF,
@@ -342,6 +353,36 @@ raw_chain = chain.materialize(
 gadgets. i386 uses its real cdecl stack shape. Direct function calls reject
 PPC64 ELFv1 (function descriptors/TOC are not modeled) and SPARC32/64 (register
 windows and `o7 + 8` return frames are not modeled).
+
+`LibcROPBuilder.from_file()` provides composable libc ORW stages. The path is
+required; writable storage is optional because `open` can use path bytes
+appended to an x86 chain and `sendfile` needs no transfer buffer. `read` and
+`write` require a caller-supplied writable area. File descriptors stay
+explicit, so an exploit can lower `open` independently and hardcode the
+observed descriptor in a later exfiltration stage:
+
+```python
+from payloads import LibcROPBuilder, RuntimeLayout
+
+builder = LibcROPBuilder.from_file("./libc.so.6", b"/flag")
+program = builder.compose(
+    builder.open(),
+    builder.sendfile(1, 3, 0x400),
+    builder.exit(),
+)
+payload = program.lower_pwntools(
+    RuntimeLayout(libc_base=leaked_libc_base),
+    chain_base=known_chain_address,
+).as_payload()
+```
+
+Automatic linked lowering deliberately uses pwntools' `ELF`, mitigation, and
+`ROP` support only on the live-tested i386 and AMD64 ABIs. Every other direct-
+call ABI exposes independently composable `LibcROPStage` objects which lower
+through caller-supplied `SemanticGadget` records; no unsupported stack
+transition is guessed. `ExactELFAdapter` rechecks the artifact digest before
+creating a fresh pwntools object and never accesses process-backed helpers such
+as `ELF.libs`, `ELF.maps`, or `ELF.libc`.
 
 Every function-call chain carries a `CallFrame` describing the function-entry
 SP offset, required ABI alignment/bias, and emitted mandatory caller area.
