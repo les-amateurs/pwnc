@@ -26,6 +26,7 @@ from payloads import (
     load_elf_profile,
     resolve_target,
 )
+from payloads.elf import _main_code_entry
 from payloads.tests.test_shellcode import PRIMARY_TARGETS
 from payloads.tests.test_shellcode_qemu import _link_raw_payload
 
@@ -87,6 +88,48 @@ def _mutate_elf_flags(source: Path, destination: Path, flags: int) -> None:
 
 
 class InvalidELFTests(unittest.TestCase):
+    def test_ppc64_elfv1_entry_descriptor_resolves_its_code_word(self) -> None:
+        target = resolve_target("ppc64")
+        artifact = bytearray(0x80)
+        descriptor_address = 0x2000
+        code_address = 0x1040
+        descriptor_file_offset = 0x20
+        artifact[descriptor_file_offset : descriptor_file_offset + target.word_size] = code_address.to_bytes(
+            target.word_size,
+            target.endian.value,
+        )
+        mappings = (
+            ELFRange(
+                0x1000,
+                0x1100,
+                Permission.READ | Permission.EXECUTE,
+                0,
+                0x20,
+                0x1000,
+                "PT_LOAD",
+            ),
+            ELFRange(
+                descriptor_address,
+                descriptor_address + 0x60,
+                Permission.READ | Permission.WRITE,
+                descriptor_file_offset,
+                0x60,
+                0x1000,
+                "PT_LOAD",
+            ),
+        )
+
+        resolved, evidence = _main_code_entry(bytes(artifact), descriptor_address, target, mappings)
+        self.assertEqual(resolved, code_address)
+        self.assertIn("descriptor", evidence)
+
+        artifact[descriptor_file_offset : descriptor_file_offset + target.word_size] = (0x3000).to_bytes(
+            target.word_size,
+            target.endian.value,
+        )
+        with self.assertRaisesRegex(ELFInspectionError, "descriptor code word"):
+            _main_code_entry(bytes(artifact), descriptor_address, target, mappings)
+
     def test_non_elf_and_truncated_elf_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pwnc-elf-invalid-") as directory:
             text = Path(directory, "text")

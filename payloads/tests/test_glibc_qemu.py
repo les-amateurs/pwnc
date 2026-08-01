@@ -504,7 +504,7 @@ class GlibcQemuFSOPTests(unittest.TestCase):
             if intended_target.arch is Architecture.THUMB:
                 self.assertEqual(callback_address & 1, 1)
             if libc.target.function_pointer_model is FunctionPointerModel.PPC64_ELFV1_DESCRIPTOR:
-                self.assertIs(intended_target.abi, ABI.PPC64_ELFV1)
+                self.assertIs(intended_target.abi, ABI.POWERPC64_ELFV1)
 
             bounds = None
             if family is FSOPFamily.WIDE:

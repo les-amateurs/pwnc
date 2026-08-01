@@ -683,6 +683,54 @@ def _classify_image(
     return ELFImageKind.ET_DYN_AMBIGUOUS, True, None, tuple(evidence)
 
 
+def _main_code_entry(
+    data: bytes,
+    entry_offset: int,
+    target: Target,
+    load_ranges: tuple[ELFRange, ...],
+) -> tuple[int, str]:
+    """Resolve the executable PC represented by ``e_entry``.
+
+    Most Linux ELFs store a code address directly in ``e_entry`` (with bit
+    zero selecting Thumb state where applicable).  PPC64 ELFv1 is the notable
+    exception: a normal executable may put a three-word ``.opd`` function
+    descriptor there.  Its first word is the actual entry PC and its second
+    word supplies r2/TOC.  Keep :attr:`ELFProfile.entry_offset` equal to the
+    ELF header value, but validate the descriptor's code word against an
+    executable mapping.
+    """
+
+    direct = entry_offset & ~1 if target.arch is Architecture.THUMB else entry_offset
+    if any(item.executable and item.contains(direct) for item in load_ranges):
+        return direct, "e_entry resolves directly to an executable PT_LOAD segment"
+    if target.abi is not ABI.POWERPC64_ELFV1:
+        raise ELFInspectionError("main executable entry is not contained in an executable PT_LOAD segment")
+
+    descriptor_size = 3 * target.word_size
+    if entry_offset % target.word_size:
+        raise ELFInspectionError("PPC64 ELFv1 e_entry function descriptor is not word-aligned")
+    candidates = [
+        item
+        for item in load_ranges
+        if item.readable
+        and item.contains(entry_offset, descriptor_size)
+        and entry_offset + descriptor_size <= item.start + item.file_size
+    ]
+    if len(candidates) != 1:
+        raise ELFInspectionError(
+            "PPC64 ELFv1 e_entry is neither executable code nor one file-backed function descriptor"
+        )
+    mapping = candidates[0]
+    file_offset = mapping.file_offset + entry_offset - mapping.start
+    end = file_offset + descriptor_size
+    if file_offset < 0 or end > len(data):
+        raise ELFInspectionError("PPC64 ELFv1 e_entry function descriptor lies beyond the artifact")
+    code_entry = int.from_bytes(data[file_offset : file_offset + target.word_size], target.endian.value)
+    if not any(item.executable and item.contains(code_entry) for item in load_ranges):
+        raise ELFInspectionError("PPC64 ELFv1 e_entry descriptor code word is not in an executable PT_LOAD segment")
+    return code_entry, f"PPC64 ELFv1 e_entry descriptor resolves to executable PC {code_entry:#x}"
+
+
 def inspect_elf(path: str | Path) -> ELFProfile:
     """Parse one exact ELF artifact without executing or loading it."""
 
@@ -756,11 +804,9 @@ def inspect_elf(path: str | Path) -> ELFProfile:
             flags_1=flags_1,
         )
         entry_offset = int(elf.header.e_entry)
-        code_entry = entry_offset & ~1 if target.arch is Architecture.THUMB else entry_offset
-        if image_kind not in {ELFImageKind.SHARED_OBJECT, ELFImageKind.ET_DYN_AMBIGUOUS} and not any(
-            item.executable and item.contains(code_entry) for item in load_ranges
-        ):
-            raise ELFInspectionError("main executable entry is not contained in an executable PT_LOAD segment")
+        entry_evidence = "e_entry is not interpreted for a shared or ambiguous ET_DYN image"
+        if image_kind not in {ELFImageKind.SHARED_OBJECT, ELFImageKind.ET_DYN_AMBIGUOUS}:
+            _, entry_evidence = _main_code_entry(data, entry_offset, target, load_ranges)
         alignments = [
             item.alignment
             for item in load_ranges
@@ -782,6 +828,7 @@ def inspect_elf(path: str | Path) -> ELFProfile:
     evidence = [
         *classification_evidence,
         nx_evidence,
+        entry_evidence,
         f"RELRO={relro.value} from PT_GNU_RELRO and bind-now tags",
         "target from ELF machine/class/endian/ABI flags and ARM entry state",
     ]
