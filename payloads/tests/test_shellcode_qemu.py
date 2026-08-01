@@ -14,7 +14,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from payloads import ABI, Architecture, LLVMAssembler, command_shellcode, llvm_triple, resolve_target
+from payloads import (
+    ABI,
+    Architecture,
+    LLVMAssembler,
+    command_shellcode,
+    exit_shellcode,
+    llvm_triple,
+    mmap_stager,
+    orw_shellcode,
+    resolve_target,
+)
 
 from test_shellcode import PRIMARY_TARGETS
 
@@ -93,6 +103,46 @@ class CommandQemuTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
                 self.assertEqual(result.stdout, marker.encode())
+
+    def test_raw_orw_shellcode_preserves_binary_file_bytes(self) -> None:
+        assembler = LLVMAssembler()
+        expected = b"pwnc ORW\0binary bytes\n"
+        for architecture, endian in PRIMARY_TARGETS:
+            target = resolve_target(architecture, endian=endian)
+            with self.subTest(target=target.name), tempfile.TemporaryDirectory(prefix="pwnc-qemu-") as directory:
+                source_file = Path(directory, "orw-input")
+                source_file.write_bytes(expected)
+                payload = orw_shellcode(str(source_file), target, max_bytes=256, assembler=assembler)
+                executable = Path(directory, "payload.elf")
+                _link_raw_payload(payload.data, target, executable)
+                qemu = _QEMU[(target.arch, endian)]
+                result = subprocess.run(
+                    [qemu, str(executable)],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+                self.assertEqual(result.stdout, expected)
+
+    def test_rw_to_rx_mmap_stager_runs_exact_second_stage(self) -> None:
+        assembler = LLVMAssembler()
+        for architecture, endian in PRIMARY_TARGETS:
+            target = resolve_target(architecture, endian=endian)
+            with self.subTest(target=target.name), tempfile.TemporaryDirectory(prefix="pwnc-qemu-") as directory:
+                child = exit_shellcode(42, target, assembler=assembler)
+                stager = mmap_stager(len(child.data), target, assembler=assembler)
+                executable = Path(directory, "payload.elf")
+                _link_raw_payload(stager.data, target, executable)
+                qemu = _QEMU[(target.arch, endian)]
+                result = subprocess.run(
+                    [qemu, str(executable)],
+                    input=child.data,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 42, result.stderr.decode(errors="replace"))
 
 
 if __name__ == "__main__":

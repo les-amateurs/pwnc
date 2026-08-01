@@ -23,7 +23,16 @@ from .model import (
     Relro,
     RuntimeLayout,
 )
-from .shellcode import command_shellcode, command_source
+from .shellcode import (
+    command_shellcode,
+    command_source,
+    exit_shellcode,
+    exit_source,
+    mmap_stager,
+    mmap_stager_source,
+    orw_shellcode,
+    orw_source,
+)
 from .target import (
     ABI,
     Architecture,
@@ -66,6 +75,12 @@ __all__ = [
     "UnsupportedTargetError",
     "command_shellcode",
     "command_source",
+    "exit_shellcode",
+    "exit_source",
     "llvm_triple",
+    "mmap_stager",
+    "mmap_stager_source",
+    "orw_shellcode",
+    "orw_source",
     "resolve_target",
 ]
