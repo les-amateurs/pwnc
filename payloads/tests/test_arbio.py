@@ -34,6 +34,7 @@ from payloads.arbio import (
     build_shell_command_execve_data,
 )
 from payloads.errors import MemoryAccessError
+from pwnc.types import BytesProvider, Int
 
 
 class MemoryBackend:
@@ -193,6 +194,13 @@ class ArbitraryMemoryTests(unittest.TestCase):
         memory.write(0x1020, b"verified", verify=True)
         self.assertEqual(backend.read_calls, [(0x1020, 8)])
 
+    def test_verification_read_constraints_are_checked_before_writing(self) -> None:
+        memory, backend = memory_for("x86", read_width=4)
+        with self.assertRaisesRegex(MemoryAccessError, "read size 3"):
+            memory.write(0x1020, b"abc", verify=True)
+        self.assertEqual(backend.write_calls, [])
+        self.assertEqual(backend.read_calls, [])
+
     def test_probe_requires_invalid_read_safety_trait(self) -> None:
         unsafe, _ = memory_for("x86")
         with self.assertRaisesRegex(ConstraintError, "invalid_read_safe"):
@@ -213,6 +221,42 @@ class ArbitraryMemoryTests(unittest.TestCase):
         round_trip = ArbitraryMemory.from_bytes_provider(provider, memory.target)
         round_trip.write(0x1048, b"EFGH")
         self.assertEqual(bytes(backend.data[0x48:0x4C]), b"EFGH")
+
+    def test_outward_provider_is_nominal_and_works_through_type_use(self) -> None:
+        memory, backend = memory_for("mipseb")
+        backend.data[0x40:0x44] = b"\x11\x22\x33\x44"
+        backend.data[0x80:0x84] = b"\xaa\xbb\xcc\xdd"
+        provider = memory.as_bytes_provider(0x1040)
+
+        self.assertIsInstance(provider, BytesProvider)
+        self.assertEqual((provider.ptrbits, provider.byteorder), (32, 1))
+        value = Int(32).use(provider)
+        self.assertEqual(value.address, 0x1040)
+        self.assertEqual(int(value), 0x11223344)
+
+        value.bytes = b"\xde\xad\xbe\xef"
+        self.assertEqual(bytes(backend.data[0x40:0x44]), b"\xde\xad\xbe\xef")
+
+        rebased = provider.rebase(0x1080)
+        self.assertIsInstance(rebased, BytesProvider)
+        self.assertEqual(Int(32).use(rebased).bytes, b"\xaa\xbb\xcc\xdd")
+
+    def test_type_use_preserves_exact_short_io_errors(self) -> None:
+        target = resolve_target("x86")
+        memory = ArbitraryMemory(target, read_at=lambda _address, size: b"X" * (size - 1))
+        value = Int(32).use(memory.as_bytes_provider(0x4000))
+        with self.assertRaises(ShortReadError) as caught:
+            int(value)
+        self.assertEqual((caught.exception.address, caught.exception.expected, caught.exception.actual), (0x4000, 4, 3))
+
+        write_memory = ArbitraryMemory(target, write_at=lambda _address, data: len(data) - 1)
+        write_value = Int(32).use(write_memory.as_bytes_provider(0x5000))
+        with self.assertRaises(ShortWriteError) as write_caught:
+            write_value.bytes = b"ABCD"
+        self.assertEqual(
+            (write_caught.exception.address, write_caught.exception.expected, write_caught.exception.actual),
+            (0x5000, 4, 3),
+        )
 
     def test_bytes_provider_adapter_rejects_absolute_addresses_below_base(self) -> None:
         memory, _ = memory_for("x86")
@@ -236,6 +280,7 @@ class PayloadStagerTests(unittest.TestCase):
             PayloadKind.SHELLCODE,
             "test staged code",
             memory=(MemoryRequirement(len(data), Permission.READ | Permission.EXECUTE, "code", alignment),),
+            data_requirement_index=0,
             metadata={"requires_instruction_cache_sync_after_runtime_write": needs_cache_sync},
         )
 
@@ -269,6 +314,39 @@ class PayloadStagerTests(unittest.TestCase):
         staged = PayloadStager(memory, legacy).stage(self.code_payload(), 0x1100)
         self.assertFalse(staged.permission_changed)
         self.assertEqual(bytes(backend.data[0x100:0x101]), b"\x90")
+
+    def test_first_stage_ignores_independent_second_stage_alignment(self) -> None:
+        target = resolve_target("arm")
+        backend = MemoryBackend(0x1000)
+        memory = ArbitraryMemory(target, read_at=backend.read, write_at=backend.write)
+        payload = Payload(
+            b"\0" * 4,
+            target,
+            PayloadKind.SHELLCODE,
+            "first stage with independent mapping",
+            memory=(
+                MemoryRequirement(4, Permission.READ | Permission.EXECUTE, "first-stage bytes", 4),
+                MemoryRequirement(0x1000, Permission.READ | Permission.EXECUTE, "second-stage mapping", 0x1000),
+            ),
+            data_requirement_index=0,
+        )
+        staged = PayloadStager(memory, mitigations(nx=False)).stage(payload, 0x1104, executable_region=True)
+        self.assertEqual(staged.load_address, 0x1104)
+        self.assertEqual(backend.write_calls, [(0x1104, b"\0" * 4)])
+
+    def test_data_payload_alignment_is_checked_before_writing(self) -> None:
+        memory, backend = memory_for("x86")
+        payload = Payload(
+            b"data",
+            memory.target,
+            PayloadKind.DATA,
+            "aligned data",
+            memory=(MemoryRequirement(4, Permission.READ, "serialized data", 4),),
+            data_requirement_index=0,
+        )
+        with self.assertRaisesRegex(ConstraintError, "payload-data requirement 4"):
+            PayloadStager(memory, mitigations()).stage(payload, 0x1102)
+        self.assertEqual(backend.write_calls, [])
 
     def test_asserted_executable_region_allows_new_qemu(self) -> None:
         memory, _ = memory_for("x86")
@@ -309,6 +387,22 @@ class PayloadStagerTests(unittest.TestCase):
         self.assertEqual(staged.execute(trigger), "ran")
         self.assertEqual(entries, [0x1120])
 
+    def test_mismatched_trigger_is_rejected_before_staging_or_permission_hooks(self) -> None:
+        memory, backend = memory_for("x86")
+        permission_calls: list[tuple[int, int]] = []
+        stager = PayloadStager(
+            memory,
+            mitigations(),
+            make_executable=lambda address, size: permission_calls.append((address, size)),
+        )
+        trigger = CallbackControlFlowTrigger(resolve_target("arm"), lambda _address: None)
+        with self.assertRaisesRegex(ConstraintError, "control-flow trigger target"):
+            stager.stage_and_execute(self.code_payload(), 0x1120, trigger)
+        with self.assertRaisesRegex(TypeError, "ControlFlowTrigger"):
+            stager.stage_and_execute(self.code_payload(), 0x1120, object())  # type: ignore[arg-type]
+        self.assertEqual(backend.write_calls, [])
+        self.assertEqual(permission_calls, [])
+
     def test_thumb_trigger_gets_state_bit(self) -> None:
         target = resolve_target("thumb")
         backend = MemoryBackend(0x1000)
@@ -319,10 +413,16 @@ class PayloadStagerTests(unittest.TestCase):
             PayloadKind.SHELLCODE,
             "thumb nop",
             memory=(MemoryRequirement(2, Permission.READ | Permission.EXECUTE, "code", 2),),
+            data_requirement_index=0,
         )
         entries: list[int] = []
         trigger = CallbackControlFlowTrigger(target, lambda address: entries.append(address))
-        PayloadStager(memory, mitigations(nx=False)).stage_and_execute(payload, 0x1100, trigger)
+        PayloadStager(memory, mitigations(nx=False)).stage_and_execute(
+            payload,
+            0x1100,
+            trigger,
+            executable_region=True,
+        )
         self.assertEqual(entries, [0x1101])
 
 
@@ -335,6 +435,10 @@ class ExecveWorkflowTests(unittest.TestCase):
                 argv_offset = data.argv_address - base
                 first_pointer = data.payload.data[argv_offset : argv_offset + target.word_size]
                 self.assertEqual(first_pointer, target.pack(data.argument_addresses[0]))
+                self.assertEqual(len(data.payload.memory), 1)
+                self.assertEqual(data.payload.memory[0].size, len(data.payload.data))
+                self.assertEqual(data.payload.memory[0].permissions, Permission.READ)
+                self.assertEqual(data.payload.memory[0].alignment, target.word_size)
 
     def test_execve_data_uses_32_bit_little_endian_pointers(self) -> None:
         target = resolve_target("x86")
@@ -378,6 +482,39 @@ class ExecveWorkflowTests(unittest.TestCase):
         offset = data.load_address - backend.base
         self.assertEqual(bytes(backend.data[offset : offset + len(data.payload.data)]), data.payload.data)
 
+    def test_execve_call_target_is_validated_before_staging(self) -> None:
+        target = resolve_target("x86_64")
+        backend = MemoryBackend(0x400000)
+        memory = ArbitraryMemory(target, read_at=backend.read, write_at=backend.write)
+        stager = PayloadStager(memory, mitigations())
+        data = build_shell_command_execve_data("id", target, 0x400100)
+        workflow = ExecveCallWorkflow.from_libc(
+            data,
+            exact_libc("x86_64", {"execve": 0xD4AD0}),
+            RuntimeLayout(libc_base=0x7F0000000000),
+        )
+        wrong_call = CallbackFunctionCall(resolve_target("mips64"), lambda _address, _arguments: None)
+        with self.assertRaisesRegex(ConstraintError, "not process/ABI-compatible"):
+            workflow.execute(stager, wrong_call)
+        with self.assertRaisesRegex(TypeError, "FunctionCallPrimitive"):
+            workflow.execute(stager, object())  # type: ignore[arg-type]
+        self.assertEqual(backend.write_calls, [])
+
+    def test_arm_libc_is_process_compatible_with_thumb_without_changing_symbol_state(self) -> None:
+        thumb = resolve_target("thumb")
+        arm_libc = exact_libc("arm", {"execve": 0x2000})
+        data = build_shell_command_execve_data("id", thumb, 0x2000)
+        workflow = ExecveCallWorkflow.from_libc(data, arm_libc, RuntimeLayout(libc_base=0x70000000))
+        backend = MemoryBackend(0x2000)
+        memory = ArbitraryMemory(thumb, read_at=backend.read, write_at=backend.write)
+        calls: list[tuple[int, tuple[int, ...]]] = []
+        call = CallbackFunctionCall(thumb, lambda address, arguments: calls.append((address, arguments)))
+
+        workflow.execute(PayloadStager(memory, mitigations()), call)
+
+        self.assertEqual(calls[0][0], 0x70002000)
+        self.assertEqual(calls[0][0] & 1, 0)
+
     def test_execve_workflow_rejects_raw_unproven_function_address(self) -> None:
         data = build_shell_command_execve_data("id", resolve_target("x86"), 0x2000)
         with self.assertRaisesRegex(TypeError, "ExactLibcFunction"):
@@ -390,7 +527,12 @@ class ExecveWorkflowTests(unittest.TestCase):
 
 
 class GotSystemWorkflowTests(unittest.TestCase):
-    def make_workflow(self, relro: Relro = Relro.PARTIAL) -> GotSystemWorkflow:
+    def make_workflow(
+        self,
+        relro: Relro = Relro.PARTIAL,
+        *,
+        got_slot_writable: bool = True,
+    ) -> GotSystemWorkflow:
         target = resolve_target("x86_64")
         libc = exact_libc("x86_64", {"system": 0x4C490})
         return GotSystemWorkflow.from_libc(
@@ -402,6 +544,7 @@ class GotSystemWorkflowTests(unittest.TestCase):
             plt_address=0x401030,
             command_address=0x400200,
             command="id",
+            got_slot_writable=got_slot_writable,
         )
 
     def test_partial_relro_overwrite_calls_plt_and_restores_got(self) -> None:
@@ -438,6 +581,87 @@ class GotSystemWorkflowTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "remote call failed"):
             workflow.execute(memory, CallbackFunctionCall(workflow.target, fail))
+        self.assertEqual(memory.read_ptr(workflow.got_address), original)
+
+    def test_got_is_restored_when_overwrite_verification_fails(self) -> None:
+        workflow = self.make_workflow()
+        backend = MemoryBackend(0x400000)
+        original = 0x7F0000080ED0
+        system = 0x7F000004C490
+        backend.data[0x80:0x88] = workflow.target.pack(original)
+        corrupt_system_read = True
+
+        def read(address: int, size: int) -> bytes:
+            nonlocal corrupt_system_read
+            result = backend.read(address, size)
+            if address == workflow.got_address and result == workflow.target.pack(system) and corrupt_system_read:
+                corrupt_system_read = False
+                return result[:-1] + bytes((result[-1] ^ 0xFF,))
+            return result
+
+        memory = ArbitraryMemory(workflow.target, read_at=read, write_at=backend.write)
+        call = CallbackFunctionCall(workflow.target, lambda _address, _arguments: self.fail("call must not run"))
+
+        with self.assertRaises(WriteVerificationError):
+            workflow.execute(memory, call, verify=True)
+        self.assertEqual(bytes(backend.data[0x80:0x88]), workflow.target.pack(original))
+
+    def test_got_is_restored_when_overwrite_reports_a_short_write(self) -> None:
+        workflow = self.make_workflow()
+        backend = MemoryBackend(0x400000)
+        original = 0x7F0000080ED0
+        system_bytes = workflow.target.pack(0x7F000004C490)
+        backend.data[0x80:0x88] = workflow.target.pack(original)
+
+        def short_system_write(address: int, data: bytes) -> int:
+            if address == workflow.got_address and data == system_bytes:
+                backend.write_calls.append((address, data[:4]))
+                backend.data[0x80:0x84] = data[:4]
+                return 4
+            return backend.write(address, data)
+
+        memory = ArbitraryMemory(workflow.target, read_at=backend.read, write_at=short_system_write)
+        call = CallbackFunctionCall(workflow.target, lambda _address, _arguments: self.fail("call must not run"))
+
+        with self.assertRaises(ShortWriteError):
+            workflow.execute(memory, call)
+        self.assertEqual(bytes(backend.data[0x80:0x88]), workflow.target.pack(original))
+
+    def test_partial_relro_requires_explicit_slot_writability_before_io(self) -> None:
+        workflow = self.make_workflow(got_slot_writable=False)
+        backend = MemoryBackend(0x400000)
+        memory = ArbitraryMemory(workflow.target, read_at=backend.read, write_at=backend.write)
+        call = CallbackFunctionCall(workflow.target, lambda _address, _arguments: None)
+        with self.assertRaisesRegex(ConstraintError, "got_slot_writable=True"):
+            workflow.execute(memory, call)
+        self.assertEqual(backend.read_calls, [])
+        self.assertEqual(backend.write_calls, [])
+
+    def test_thumb_got_workflow_accepts_arm_libc_and_preserves_both_state_bits(self) -> None:
+        thumb = resolve_target("thumb")
+        workflow = GotSystemWorkflow.from_libc(
+            thumb,
+            mitigations(),
+            exact_libc("arm", {"system": 0x4000}),
+            RuntimeLayout(libc_base=0x70000000),
+            got_address=0x2080,
+            plt_address=0x2100,
+            command_address=0x2200,
+            command="id",
+            got_slot_writable=True,
+        )
+        backend = MemoryBackend(0x2000)
+        original = 0x70001001
+        backend.data[0x80:0x84] = thumb.pack(original)
+        memory = ArbitraryMemory(thumb, read_at=backend.read, write_at=backend.write)
+        observed: list[tuple[int, int]] = []
+
+        def call_at(address: int, _arguments: tuple[int, ...]) -> None:
+            observed.append((address, memory.read_ptr(workflow.got_address)))
+
+        workflow.execute(memory, CallbackFunctionCall(thumb, call_at))
+
+        self.assertEqual(observed, [(0x2101, 0x70004000)])
         self.assertEqual(memory.read_ptr(workflow.got_address), original)
 
     def test_full_relro_rejects_before_any_memory_access(self) -> None:

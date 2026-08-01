@@ -15,9 +15,11 @@ from payloads import (
     LibcIdentity,
     LibcImage,
     Linkage,
+    MemoryRequirement,
     Mitigations,
     Payload,
     PayloadKind,
+    Permission,
     Relro,
     RuntimeLayout,
     UnsupportedTargetError,
@@ -99,6 +101,11 @@ class RuntimeModelTests(unittest.TestCase):
         legacy_qemu.require_shellcode_path()
         legacy_qemu.require_got_overwrite()
 
+        executable_stack_only = Mitigations(False, False, Relro.NONE, Linkage.DYNAMIC, ExecutionPolicy.ELF_PERMISSIONS)
+        with self.assertRaises(ConstraintError):
+            executable_stack_only.require_shellcode_path()
+        executable_stack_only.require_shellcode_path(executable_region=True)
+
     def test_payload_metadata_is_copied_and_immutable(self) -> None:
         metadata = {"operation": "execve"}
         payload = Payload(b"\x90", resolve_target("x86"), PayloadKind.SHELLCODE, "test", metadata=metadata)
@@ -106,6 +113,31 @@ class RuntimeModelTests(unittest.TestCase):
         self.assertEqual(payload.metadata["operation"], "execve")
         with self.assertRaises(TypeError):
             payload.metadata["new"] = "value"  # type: ignore[index]
+
+    def test_payload_data_requirement_is_explicit_and_must_cover_bytes(self) -> None:
+        target = resolve_target("arm")
+        requirement = MemoryRequirement(4, Permission.READ | Permission.EXECUTE, "serialized bytes", 4)
+        payload = Payload(
+            b"\0" * 4,
+            target,
+            PayloadKind.SHELLCODE,
+            "explicit data requirement",
+            memory=(requirement,),
+            data_requirement_index=0,
+        )
+        self.assertIs(payload.data_requirement, requirement)
+
+        with self.assertRaisesRegex(ValueError, "smaller than payload.data"):
+            Payload(
+                b"\0" * 8,
+                target,
+                PayloadKind.DATA,
+                "undersized requirement",
+                memory=(requirement,),
+                data_requirement_index=0,
+            )
+        with self.assertRaisesRegex(ValueError, "select an existing"):
+            Payload(b"x", target, PayloadKind.DATA, "bad index", data_requirement_index=0)
 
 
 class LibcIdentityTests(unittest.TestCase):

@@ -24,10 +24,12 @@ from dataclasses import dataclass, field
 from math import lcm
 from typing import Any, Protocol, runtime_checkable
 
+from pwnc.types.provider import ByteOrder, BytesProvider
+
 from .errors import ConstraintError, MemoryAccessError, UnsupportedTargetError
 from .libc import LibcIdentity, LibcImage
-from .model import Mitigations, Payload, PayloadKind, Permission, RuntimeLayout
-from .target import FunctionPointerModel, Target
+from .model import MemoryRequirement, Mitigations, Payload, PayloadKind, Permission, RuntimeLayout
+from .target import Architecture, FunctionPointerModel, Target
 
 ReadAt = Callable[[int, int], bytes]
 WriteAt = Callable[[int, bytes], int | None]
@@ -228,10 +230,11 @@ class ArbitraryMemory:
     ) -> ArbitraryMemory:
         """Adapt a ``pwnc.types.BytesProvider``-shaped object structurally.
 
-        No provider class is imported and ``isinstance`` is not used.  This
-        also works with debugger providers from outside pwnc which expose
-        ``read(offset, size)``, optional ``write(offset, data)``, and either an
-        ``address`` property or an explicit ``base_address`` here.
+        Input adaptation is deliberately structural rather than requiring
+        nominal ``BytesProvider`` membership.  This also works with debugger
+        providers from outside pwnc which expose ``read(offset, size)``,
+        optional ``write(offset, data)``, and either an ``address`` property or
+        an explicit ``base_address`` here.
         """
 
         if not callable(getattr(provider, "read", None)):
@@ -314,15 +317,32 @@ class ArbitraryMemory:
         raw = bytes(data)
         _check_range(self.target, address, len(raw))
         writer = self._require_writer()
-        offset = 0
-        for chunk_address, chunk_size in _chunks(
+        write_chunks = _chunks(
             address,
             len(raw),
             maximum=self.traits.write_chunk,
             alignment=self.traits.write_alignment,
             width=self.traits.write_width,
             operation="write",
-        ):
+        )
+        should_verify = self.traits.verify_writes if verify is None else verify
+        if should_verify:
+            if self.read_at is None:
+                raise ConstraintError("write verification requested, but no read_at callback is available")
+            # Validate every read-back constraint before the first write.  A
+            # width/alignment mismatch must not leave memory mutated merely
+            # because verification could never have been performed.
+            _chunks(
+                address,
+                len(raw),
+                maximum=self.traits.read_chunk,
+                alignment=self.traits.read_alignment,
+                width=self.traits.read_width,
+                operation="read",
+            )
+
+        offset = 0
+        for chunk_address, chunk_size in write_chunks:
             chunk = raw[offset : offset + chunk_size]
             try:
                 result = writer(chunk_address, chunk)
@@ -338,10 +358,7 @@ class ArbitraryMemory:
                     raise ShortWriteError(chunk_address, chunk_size, result)
             offset += chunk_size
 
-        should_verify = self.traits.verify_writes if verify is None else verify
         if should_verify:
-            if self.read_at is None:
-                raise ConstraintError("write verification requested, but no read_at callback is available")
             actual = self.read(address, len(raw))
             if actual != raw:
                 raise WriteVerificationError(address, raw, actual)
@@ -375,13 +392,12 @@ class ArbitraryMemory:
 
 
 @dataclass(frozen=True, slots=True)
-class ArbitraryMemoryBytesProvider:
-    """A dependency-free, ``BytesProvider``-shaped view of arbitrary memory.
+class ArbitraryMemoryBytesProvider(BytesProvider):
+    """A nominal :class:`pwnc.types.BytesProvider` view of arbitrary memory.
 
-    It intentionally uses structural typing rather than subclassing
-    ``pwnc.types.BytesProvider``.  Consumers which require nominal ABC
-    membership can wrap the ``read``/``write`` methods in their local provider
-    subclass without making the standalone payload package depend on pwnc.
+    This outward adapter can be passed directly to ``pwnc.types.Type.use``.
+    The inverse :meth:`ArbitraryMemory.from_bytes_provider` remains structural
+    so external debugger/provider implementations need not inherit the ABC.
     """
 
     memory: ArbitraryMemory
@@ -391,9 +407,8 @@ class ArbitraryMemoryBytesProvider:
 
     def __post_init__(self) -> None:
         _check_range(self.memory.target, self._base_address, 0)
-        # These integer values match pwnc.types.provider.ByteOrder, while the
-        # adapter itself does not import that module.
-        object.__setattr__(self, "byteorder", 0 if self.memory.target.endian.value == "little" else 1)
+        byteorder = ByteOrder.Little if self.memory.target.endian.value == "little" else ByteOrder.Big
+        object.__setattr__(self, "byteorder", byteorder)
         object.__setattr__(self, "ptrbits", self.memory.target.bits)
 
     @property
@@ -478,13 +493,58 @@ def _require_same_target(actual: Target, expected: Target, what: str) -> None:
         raise ConstraintError(f"{what} target {actual.name} does not match payload target {expected.name}")
 
 
+def _process_targets_compatible(left: Target, right: Target) -> bool:
+    """Return whether two targets describe the same process ABI.
+
+    ARM and Thumb are instruction states of the same 32-bit ARM EABI process.
+    They intentionally remain distinct payload targets, but a libc ELF is
+    identified as ARM even when a Thumb payload/call primitive uses it.
+    """
+
+    if left == right:
+        return True
+    return (
+        {left.arch, right.arch} == {Architecture.ARM, Architecture.THUMB}
+        and left.bits == right.bits
+        and left.endian is right.endian
+        and left.abi is right.abi
+        and left.os == right.os
+    )
+
+
+def _require_process_compatible(actual: Target, expected: Target, what: str) -> None:
+    if not _process_targets_compatible(actual, expected):
+        raise ConstraintError(f"{what} target {actual.name} is not process/ABI-compatible with {expected.name}")
+
+
+def _validate_control_flow_trigger(
+    trigger: ControlFlowTrigger,
+    target: Target,
+    entry_address: int,
+) -> None:
+    if trigger is None:
+        raise ConstraintError("arbitrary read/write cannot execute a payload; supply a control-flow trigger")
+    if not isinstance(trigger, ControlFlowTrigger):
+        raise TypeError("trigger must implement ControlFlowTrigger")
+    _require_same_target(trigger.target, target, "control-flow trigger")
+    _check_range(target, entry_address, 1)
+
+
 def _call_address(function: ExactLibcFunction, primitive: FunctionCallPrimitive) -> int:
-    _require_same_target(primitive.target, function.target, "call primitive")
+    if not isinstance(primitive, FunctionCallPrimitive):
+        raise TypeError("call must implement FunctionCallPrimitive")
+    _require_process_compatible(primitive.target, function.target, "call primitive")
     if function.target.function_pointer_model is FunctionPointerModel.PPC64_ELFV1_DESCRIPTOR:
         if not primitive.function_descriptor_aware:
             raise UnsupportedTargetError("PPC64 ELFv1 calls require a function-descriptor and TOC-aware call primitive")
-        return function.address
-    return function.target.function_pointer(function.address)
+        address = function.address
+    else:
+        # Preserve the exact function's instruction-state semantics.  In
+        # particular, an ARM libc symbol used by a Thumb process must not gain
+        # a Thumb bit merely because the caller primitive is Thumb-targeted.
+        address = function.target.function_pointer(function.address)
+    _check_range(primitive.target, address, 1)
+    return address
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,11 +561,7 @@ class StagedPayload:
     def execute(self, trigger: ControlFlowTrigger) -> Any:
         """Transfer control explicitly; staging alone never executes bytes."""
 
-        if trigger is None:
-            raise ConstraintError("arbitrary read/write cannot execute a payload; supply a control-flow trigger")
-        if not isinstance(trigger, ControlFlowTrigger):
-            raise TypeError("trigger must implement ControlFlowTrigger")
-        _require_same_target(trigger.target, self.payload.target, "control-flow trigger")
+        _validate_control_flow_trigger(trigger, self.payload.target, self.entry_address)
         return trigger.trigger(self.entry_address)
 
 
@@ -535,16 +591,14 @@ class PayloadStager:
 
     @staticmethod
     def _needs_execution(payload: Payload) -> bool:
-        return payload.kind is PayloadKind.SHELLCODE or any(
-            requirement.permissions & Permission.EXECUTE for requirement in payload.memory
+        return payload.kind is PayloadKind.SHELLCODE or bool(
+            payload.data_requirement and payload.data_requirement.permissions & Permission.EXECUTE
         )
 
     @staticmethod
-    def _code_alignment(payload: Payload) -> int:
-        alignments = [
-            requirement.alignment for requirement in payload.memory if requirement.permissions & Permission.EXECUTE
-        ]
-        return max(alignments, default=1)
+    def _payload_alignment(payload: Payload) -> int:
+        requirement = payload.data_requirement
+        return requirement.alignment if requirement is not None else 1
 
     def stage(
         self,
@@ -576,12 +630,13 @@ class PayloadStager:
             needs_execution and not executable_region and not self.mitigations.writable_memory_is_executable
         )
 
+        alignment = self._payload_alignment(payload)
+        if load_address % alignment:
+            raise ConstraintError(
+                f"payload load address {load_address:#x} is not aligned to payload-data requirement {alignment}"
+            )
+
         if needs_execution:
-            alignment = self._code_alignment(payload)
-            if load_address % alignment:
-                raise ConstraintError(
-                    f"payload load address {load_address:#x} is not aligned to code requirement {alignment}"
-                )
             self.mitigations.require_shellcode_path(
                 can_change_permissions=self.make_executable is not None,
                 executable_region=executable_region,
@@ -626,8 +681,10 @@ class PayloadStager:
     ) -> Any:
         """Stage and invoke through a mandatory, explicit trigger."""
 
-        if trigger is None:
-            raise ConstraintError("arbitrary read/write cannot execute a payload; supply a control-flow trigger")
+        if not isinstance(payload, Payload):
+            raise TypeError("payload must be Payload")
+        entry_address = payload.entry(load_address)
+        _validate_control_flow_trigger(trigger, payload.target, entry_address)
         staged = self.stage(payload, load_address, executable_region=executable_region, verify=verify)
         return staged.execute(trigger)
 
@@ -760,7 +817,15 @@ def build_execve_data_payload(
         target=target,
         kind=PayloadKind.DATA,
         description="execve path, argv, and environment data",
-        memory=(),
+        memory=(
+            MemoryRequirement(
+                len(image),
+                Permission.READ,
+                "execve path, argv, and environment image",
+                alignment=target.word_size,
+            ),
+        ),
+        data_requirement_index=0,
         metadata={
             "operation": "execve-data",
             "load_address": load_address,
@@ -805,11 +870,13 @@ class ExecveCallWorkflow:
     execve: ExactLibcFunction
 
     def __post_init__(self) -> None:
+        if not isinstance(self.data, ExecveDataPayload):
+            raise TypeError("data must be ExecveDataPayload")
         if not isinstance(self.execve, ExactLibcFunction):
             raise TypeError("execve must be an ExactLibcFunction resolved from LibcImage")
         if self.execve.symbol != "execve":
             raise ValueError(f"expected exact libc symbol 'execve', got {self.execve.symbol!r}")
-        _require_same_target(self.execve.target, self.data.payload.target, "exact libc function")
+        _require_process_compatible(self.execve.target, self.data.payload.target, "exact libc function")
 
     @classmethod
     def from_libc(
@@ -827,9 +894,11 @@ class ExecveCallWorkflow:
         *,
         verify: bool | None = None,
     ) -> Any:
+        if not isinstance(stager, PayloadStager):
+            raise TypeError("stager must be PayloadStager")
         _require_same_target(stager.memory.target, self.data.payload.target, "payload stager")
-        stager.stage(self.data.payload, self.data.load_address, verify=verify)
         function_address = _call_address(self.execve, call)
+        stager.stage(self.data.payload, self.data.load_address, verify=verify)
         return call.call(
             function_address,
             (self.data.path_address, self.data.argv_address, self.data.envp_address),
@@ -852,13 +921,16 @@ class GotSystemWorkflow:
     plt_address: int
     command_address: int
     command: str | bytes
+    got_slot_writable: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.system, ExactLibcFunction):
             raise TypeError("system must be an ExactLibcFunction resolved from LibcImage")
+        if not isinstance(self.got_slot_writable, bool):
+            raise TypeError("got_slot_writable must be bool")
         if self.system.symbol != "system":
             raise ValueError(f"expected exact libc symbol 'system', got {self.system.symbol!r}")
-        _require_same_target(self.system.target, self.target, "exact libc function")
+        _require_process_compatible(self.system.target, self.target, "exact libc function")
         _check_range(self.target, self.got_address, self.target.word_size)
         _check_range(self.target, self.plt_address, 1)
         encoded = _cstring(self.command, "command")
@@ -877,6 +949,7 @@ class GotSystemWorkflow:
         plt_address: int,
         command_address: int,
         command: str | bytes,
+        got_slot_writable: bool,
     ) -> GotSystemWorkflow:
         return cls(
             target,
@@ -886,6 +959,7 @@ class GotSystemWorkflow:
             plt_address,
             command_address,
             command,
+            got_slot_writable,
         )
 
     def execute(
@@ -897,23 +971,35 @@ class GotSystemWorkflow:
     ) -> Any:
         # All strategy and target checks happen before the first read/write.
         self.mitigations.require_got_overwrite()
+        if not self.got_slot_writable:
+            raise ConstraintError(
+                "GOT overwrite requires an explicit got_slot_writable=True assertion for this exact runtime slot"
+            )
         _require_same_target(memory.target, self.target, "arbitrary-memory primitive")
-        _require_same_target(call.target, self.target, "call primitive")
+        if not isinstance(call, FunctionCallPrimitive):
+            raise TypeError("call must implement FunctionCallPrimitive")
+        _require_process_compatible(call.target, self.target, "call primitive")
         system_address = _call_address(self.system, call)
         if self.target.function_pointer_model is FunctionPointerModel.PPC64_ELFV1_DESCRIPTOR:
             raise UnsupportedTargetError(
                 "PPC64 ELFv1 GOT replacement needs descriptor/TOC material, not a raw system address"
             )
         plt_address = self.target.function_pointer(self.plt_address)
+        _check_range(call.target, plt_address, 1)
 
         original = memory.read_ptr(self.got_address)
         command = bytes(self.command) + b"\0"
-        memory.write(self.command_address, command, verify=verify)
-        memory.write_ptr(self.got_address, system_address, verify=verify)
+        overwrite_attempted = False
         try:
+            memory.write(self.command_address, command, verify=verify)
+            # Set the flag before invoking the primitive: a short/error result
+            # may still mean that a prefix of the target pointer was changed.
+            overwrite_attempted = True
+            memory.write_ptr(self.got_address, system_address, verify=verify)
             return call.call(plt_address, (self.command_address,))
         finally:
-            memory.write_ptr(self.got_address, original, verify=verify)
+            if overwrite_attempted:
+                memory.write_ptr(self.got_address, original, verify=verify)
 
 
 __all__ = [

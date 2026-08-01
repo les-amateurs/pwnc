@@ -53,6 +53,7 @@ class Payload:
     entry_offset: int = 0
     memory: tuple[MemoryRequirement, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    data_requirement_index: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, bytes):
@@ -61,7 +62,22 @@ class Payload:
             raise ValueError("entry_offset must point inside non-empty payload data")
         if not self.data and self.entry_offset:
             raise ValueError("empty payload must have entry_offset=0")
+        if self.data_requirement_index is not None:
+            if isinstance(self.data_requirement_index, bool) or not isinstance(self.data_requirement_index, int):
+                raise TypeError("data_requirement_index must be int or None")
+            if not 0 <= self.data_requirement_index < len(self.memory):
+                raise ValueError("data_requirement_index must select an existing memory requirement")
+            if self.memory[self.data_requirement_index].size < len(self.data):
+                raise ValueError("payload-data memory requirement is smaller than payload.data")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+    @property
+    def data_requirement(self) -> MemoryRequirement | None:
+        """The requirement for the serialized bytes, excluding auxiliary storage."""
+
+        if self.data_requirement_index is None:
+            return None
+        return self.memory[self.data_requirement_index]
 
     def entry(self, load_address: int) -> int:
         return self.target.entry_address(load_address + self.entry_offset)
@@ -157,7 +173,16 @@ class Mitigations:
 
     @property
     def writable_memory_is_executable(self) -> bool:
-        return not self.nx or self.execution_policy is ExecutionPolicy.QEMU_LEGACY_ALL_EXECUTABLE
+        """Whether *every* writable staging location may be treated as executable.
+
+        An executable stack (the usual meaning of ``nx=False`` in ELF
+        tooling) says nothing about an arbitrary heap, BSS, or anonymous
+        mapping.  Only the explicitly observed legacy-QEMU policy provides a
+        blanket writable-implies-executable guarantee.  Callers selecting a
+        particular executable stack/segment must use ``executable_region``.
+        """
+
+        return self.execution_policy is ExecutionPolicy.QEMU_LEGACY_ALL_EXECUTABLE
 
     @property
     def got_is_writable(self) -> bool:
@@ -166,7 +191,9 @@ class Mitigations:
     def require_shellcode_path(self, *, can_change_permissions: bool = False, executable_region: bool = False) -> None:
         if self.writable_memory_is_executable or executable_region or can_change_permissions:
             return
-        if self.execution_policy is ExecutionPolicy.UNKNOWN:
+        if not self.nx:
+            detail = "NX is disabled, but the selected writable region is not proven executable"
+        elif self.execution_policy is ExecutionPolicy.UNKNOWN:
             detail = "NX is enabled and the QEMU/native execute policy is unknown"
         else:
             detail = "NX is enforced by the runtime"

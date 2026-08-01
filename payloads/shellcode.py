@@ -581,6 +581,7 @@ def exit_shellcode(status: int, target: Target, *, assembler: LLVMAssembler | No
                 alignment=_instruction_alignment(target),
             ),
         ),
+        data_requirement_index=0,
         metadata={
             "operation": "exit",
             "status": status,
@@ -972,6 +973,7 @@ def mmap_stager(
                 alignment=page_size,
             ),
         ),
+        data_requirement_index=0,
         metadata={
             "operation": "allocate-read-execute",
             "stage_size": size,
@@ -1038,6 +1040,7 @@ def command_shellcode(
                 alignment=target.convention.stack_alignment,
             ),
         ),
+        data_requirement_index=0,
         metadata={
             "operation": "run-command",
             "syscall": "execve",
@@ -1107,6 +1110,7 @@ def orw_shellcode(
                 alignment=target.convention.stack_alignment,
             ),
         ),
+        data_requirement_index=0,
         metadata={
             "operation": "open-read-write",
             "max_bytes": max_bytes,

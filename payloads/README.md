@@ -344,11 +344,13 @@ workflows has QEMU end-to-end coverage.
 not inspect a process or QEMU version automatically.
 
 - `ELF_PERMISSIONS` and `QEMU_ELF_PERMISSIONS` mean mapping execute bits are
-  respected. With NX enabled, writable storage is not assumed executable.
+  respected. Writable storage is not assumed executable. In particular, an
+  executable stack (`nx=False`) does not prove that an arbitrary heap, BSS, or
+  anonymous staging address is executable.
 - `QEMU_LEGACY_ALL_EXECUTABLE` models older/configured user-mode QEMU behavior
   where writable guest memory can be executed despite ELF permissions.
-- `UNKNOWN` is conservative: with NX enabled,
-  `require_shellcode_path()` requires a known executable region or an
+- `UNKNOWN` is conservative: `require_shellcode_path()` requires a known
+  executable region or an
   `mprotect`/`mmap`-style permission-changing primitive.
 
 `require_got_overwrite()` permits a dynamic GOT overwrite only with no or
