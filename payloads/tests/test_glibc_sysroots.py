@@ -78,6 +78,17 @@ class GlibcSysrootManifestTests(unittest.TestCase):
                 self.assertIn(expected_release[spec.lane], artifact.name)
                 self.assertIn("toolchains.bootlin.com/downloads/releases/", artifact.url)
 
+    def test_224_bootlin_archives_have_unversioned_internal_tops(self) -> None:
+        specs = [spec for spec in self.manifest.sysroots if spec.lane == "glibc-2.24"]
+        self.assertTrue(specs)
+        for spec in specs:
+            artifact = spec.artifacts[0]
+            slug, separator, _ = artifact.name.partition("--glibc--stable-")
+            with self.subTest(spec=spec.id):
+                self.assertEqual(separator, "--glibc--stable-")
+                self.assertEqual(spec.extraction_top, f"{slug}--glibc--stable")
+                self.assertNotEqual(artifact.name.removesuffix(".tar.bz2"), spec.extraction_top)
+
     def test_noble_mips64_roots_are_real_n64_not_bootlin_n32(self) -> None:
         for endian in ("little", "big"):
             spec = resolve_sysroot(resolve_target("mips64", endian=endian))
@@ -129,7 +140,10 @@ class GlibcSysrootManifestTests(unittest.TestCase):
         targets = {target for (lane, target), _ in self.manifest.by_lane_target.items() if lane == "glibc-2.24"}
         self.assertIn(resolve_target("ppc64").name, targets)
         self.assertIn(resolve_target("ppc64le").name, targets)
+        self.assertNotIn(resolve_target("mips64").name, targets)
         self.assertNotIn(resolve_target("riscv32").name, targets)
+        with self.assertRaisesRegex(UnsupportedSysrootError, "no glibc-2.24"):
+            self.manifest.resolve("mips64", "glibc-2.24")
 
     def test_241_lane_covers_flags2_layout_and_riscv32(self) -> None:
         specs = [spec for spec in self.manifest.sysroots if spec.lane == "glibc-2.41"]

@@ -4,12 +4,12 @@
   "bootlin_releases": {
     "glibc-2.24": {
       "artifact_release": "2017.05-toolchains-1-1",
+      "archive_top_template": "{slug}--glibc--stable",
       "archive_suffix": ".tar.bz2",
       "glibc_version": "2.24",
       "sha256": {
         "aarch64be": "26f5034c9613f57bb924b356edac8b602321bf15fb5aea216cfd31d6d7adb1c2",
         "armebv7-eabihf": "840a2f1bc884d5fc637284317d1d31cea023c2c35f2407479595096149bb6e08",
-        "mips64": "07c178cd3d637b4355889f9548029f4c6c5d0d00b16e20cf2b9fb36baa0850e4",
         "powerpc64-power8": "6c68f47f0821db60e3ecd03edabba10c8fedc9fb96332ac2f55d412e21560326",
         "powerpc64le-power8": "eebeaa394c9fdb38789bc1f310baf9b09e1bde8cd178eead1eb635a1f49551ba",
         "x86-64-core-i7": "5a2a296ff2bdfa60ff1b0b59d8ede8f1211b9a0f695ce7b7006a173c0ea2e5b8",
@@ -438,18 +438,6 @@
       "loader": "lib/ld-linux-aarch64_be.so.1",
       "libc": "lib/libc.so.6",
       "elf": {"class": 64, "endian": "big", "machine": 183},
-      "version_marker": "stable release version 2.24"
-    },
-    {
-      "id": "mips64-n64-glibc-2.24",
-      "lane": "glibc-2.24",
-      "targets": ["mips64-be-mips-n64"],
-      "source": {"kind": "bootlin", "release": "glibc-2.24", "slug": "mips64"},
-      "compiler": {"kind": "bootlin"},
-      "qemu": "qemu-mips64",
-      "loader": "lib/ld.so.1",
-      "libc": "lib/libc.so.6",
-      "elf": {"class": 64, "endian": "big", "machine": 8},
       "version_marker": "stable release version 2.24"
     },
     {

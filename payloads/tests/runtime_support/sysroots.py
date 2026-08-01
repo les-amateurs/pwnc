@@ -408,8 +408,22 @@ def _parse_sysroot(
             raise SysrootError(f"{spec_id}: no checksum for Bootlin slug {slug!r}")
         release_name = _required_string(release, "artifact_release")
         suffix = _required_string(release, "archive_suffix")
-        extraction_top = f"{slug}--glibc--stable-{release_name}"
-        name = f"{extraction_top}{suffix}"
+        archive_stem = f"{slug}--glibc--stable-{release_name}"
+        archive_top_template = release.get("archive_top_template")
+        if archive_top_template is None:
+            extraction_top = archive_stem
+        elif (
+            not isinstance(archive_top_template, str)
+            or archive_top_template.count("{slug}") != 1
+            or "{" in archive_top_template.replace("{slug}", "")
+            or "}" in archive_top_template.replace("{slug}", "")
+        ):
+            raise SysrootError(f"{spec_id}: invalid Bootlin archive_top_template")
+        else:
+            extraction_top = archive_top_template.replace("{slug}", slug)
+        if len(PurePosixPath(extraction_top).parts) != 1 or extraction_top in {".", ".."}:
+            raise SysrootError(f"{spec_id}: Bootlin archive top must be one safe path component")
+        name = f"{archive_stem}{suffix}"
         url = f"https://toolchains.bootlin.com/downloads/releases/toolchains/{slug}/tarballs/{name}"
         artifacts = (ArtifactSpec(name, url, _validate_sha256(hashes[slug], spec_id), "tar"),)
         glibc_version = _required_string(release, "glibc_version")
