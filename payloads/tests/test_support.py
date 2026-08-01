@@ -20,6 +20,7 @@ _NATIVE_X86_TARGETS = _RET2LIBC_QEMU_TARGETS
 _NATIVE_CAPABILITIES = {
     Capability.COMMAND,
     Capability.ORW,
+    Capability.SENDFILE_ORW,
     Capability.STAGER,
     Capability.RET2LIBC,
     Capability.STATIC_ROP,
@@ -53,7 +54,12 @@ class SupportMatrixTests(unittest.TestCase):
 
     def test_shellcode_coverage_matches_implementation_and_qemu_tests(self) -> None:
         for target in SUPPORTED_TARGETS:
-            for capability in (Capability.COMMAND, Capability.ORW, Capability.STAGER):
+            for capability in (
+                Capability.COMMAND,
+                Capability.ORW,
+                Capability.SENDFILE_ORW,
+                Capability.STAGER,
+            ):
                 with self.subTest(target=target.name, capability=capability.value):
                     coverage = capability_support(target, capability)
                     expected = SupportLevel.IMPLEMENTED if target.name == _PPC32_LE else SupportLevel.QEMU_VERIFIED
@@ -62,6 +68,9 @@ class SupportMatrixTests(unittest.TestCase):
                     self.assertEqual(coverage.qemu_verified, target.name != _PPC32_LE)
                     if target.name == _PPC32_LE:
                         self.assertTrue(any("CommandAssemblyTests" in item for item in coverage.evidence))
+                    if capability is Capability.SENDFILE_ORW:
+                        self.assertIn("without a read buffer", coverage.detail)
+                        self.assertTrue(any("sendfile_orw_shellcode" in item for item in coverage.evidence))
 
     def test_arb_executor_is_target_generic_but_not_qemu_executed(self) -> None:
         for target in SUPPORTED_TARGETS:
@@ -147,7 +156,7 @@ class SupportMatrixTests(unittest.TestCase):
 
     def test_export_is_versioned_and_json_serializable(self) -> None:
         exported = support_matrix_data()
-        self.assertEqual(exported["schema_version"], 2)
+        self.assertEqual(exported["schema_version"], 3)
         self.assertEqual(exported["capabilities"], [capability.value for capability in Capability])
         self.assertEqual(len(exported["targets"]), len(SUPPORTED_TARGETS))
         encoded = json.dumps(exported, sort_keys=True)

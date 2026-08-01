@@ -20,7 +20,7 @@ from typing import Any
 
 from .target import ABI, SUPPORTED_TARGETS, Endian, Target, resolve_target
 
-SUPPORT_SCHEMA_VERSION = 2
+SUPPORT_SCHEMA_VERSION = 3
 
 
 class Capability(str, Enum):
@@ -28,6 +28,7 @@ class Capability(str, Enum):
 
     COMMAND = "command"
     ORW = "orw"
+    SENDFILE_ORW = "sendfile-orw"
     STAGER = "stager"
     RET2LIBC = "ret2libc"
     STATIC_ROP = "static-rop"
@@ -148,6 +149,7 @@ _IMPLEMENTED: Mapping[Capability, frozenset[str]] = MappingProxyType(
     {
         Capability.COMMAND: _SHELLCODE_IMPLEMENTED,
         Capability.ORW: _SHELLCODE_IMPLEMENTED,
+        Capability.SENDFILE_ORW: _SHELLCODE_IMPLEMENTED,
         Capability.STAGER: _SHELLCODE_IMPLEMENTED,
         Capability.RET2LIBC: _DIRECT_CALL_IMPLEMENTED,
         Capability.STATIC_ROP: _ALL_TARGET_NAMES,
@@ -160,6 +162,7 @@ _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
     {
         Capability.COMMAND: _SHELLCODE_QEMU_VERIFIED,
         Capability.ORW: _SHELLCODE_QEMU_VERIFIED,
+        Capability.SENDFILE_ORW: _SHELLCODE_QEMU_VERIFIED,
         Capability.STAGER: _SHELLCODE_QEMU_VERIFIED,
         Capability.RET2LIBC: _RET2LIBC_QEMU_VERIFIED,
         Capability.STATIC_ROP: _STATIC_ROP_QEMU_VERIFIED,
@@ -172,6 +175,7 @@ _NATIVE_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
     {
         Capability.COMMAND: _NATIVE_X86_VERIFIED,
         Capability.ORW: _NATIVE_X86_VERIFIED,
+        Capability.SENDFILE_ORW: _NATIVE_X86_VERIFIED,
         Capability.STAGER: _NATIVE_X86_VERIFIED,
         Capability.RET2LIBC: _NATIVE_X86_VERIFIED,
         Capability.STATIC_ROP: _NATIVE_X86_VERIFIED,
@@ -192,6 +196,14 @@ _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyTyp
         Capability.ORW: (
             "payloads.shellcode.orw_shellcode",
             "payloads/tests/test_shellcode.py::CommandAssemblyTests.test_orw_assembles_for_all_implemented_targets",
+        ),
+        Capability.SENDFILE_ORW: (
+            "payloads.shellcode.sendfile_orw_source",
+            "payloads.shellcode.sendfile_orw_shellcode",
+            (
+                "payloads/tests/test_shellcode.py::"
+                "CommandAssemblyTests.test_sendfile_orw_assembles_for_all_targets_without_read_buffer"
+            ),
         ),
         Capability.STAGER: (
             "payloads.shellcode.mmap_stager",
@@ -232,6 +244,10 @@ _QEMU_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
         Capability.ORW: (
             "payloads/tests/test_shellcode_qemu.py::CommandQemuTests.test_raw_orw_shellcode_preserves_binary_file_bytes"
         ),
+        Capability.SENDFILE_ORW: (
+            "payloads/tests/test_shellcode_qemu.py::"
+            "CommandQemuTests.test_raw_sendfile_orw_shellcode_preserves_binary_file_bytes"
+        ),
         Capability.STAGER: (
             "payloads/tests/test_shellcode_qemu.py::CommandQemuTests.test_rw_to_rx_mmap_stager_runs_exact_second_stage"
         ),
@@ -258,6 +274,10 @@ _NATIVE_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
             "payloads/tests/test_native_x86.py::"
             "NativeShellcodeTests.test_raw_orw_shellcode_preserves_binary_file_bytes_in_both_native_x86_modes"
         ),
+        Capability.SENDFILE_ORW: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeShellcodeTests.test_raw_sendfile_orw_shellcode_runs_without_a_read_buffer_in_both_native_x86_modes"
+        ),
         Capability.STAGER: (
             "payloads/tests/test_native_x86.py::"
             "NativeShellcodeTests.test_rw_to_rx_mmap_stager_runs_exact_child_in_both_native_x86_modes"
@@ -277,6 +297,7 @@ _UNIMPLEMENTED_DETAIL: Mapping[Capability, str] = MappingProxyType(
     {
         Capability.COMMAND: "target is recognized, but command shellcode lowering is not implemented",
         Capability.ORW: "target is recognized, but no open/read/write shellcode builder is implemented",
+        Capability.SENDFILE_ORW: "target is recognized, but no open/sendfile shellcode builder is implemented",
         Capability.STAGER: "target is recognized, but mmap/read/mprotect shellcode lowering is not implemented",
         Capability.RET2LIBC: "target is recognized, but its ABI is not supported by the ret2libc call builder",
         Capability.STATIC_ROP: "target is recognized, but no static-binary ROP builder is implemented",
@@ -293,6 +314,8 @@ def _implemented_detail(target: Target, capability: Capability) -> str:
         return "position-independent /bin/sh -c command shellcode builder exists"
     if capability is Capability.ORW:
         return "position-independent one-pass open/read/write shellcode builder exists"
+    if capability is Capability.SENDFILE_ORW:
+        return "position-independent one-pass open/sendfile shellcode builder exists without a read buffer"
     if capability is Capability.STAGER:
         return "position-independent mmap/read/mprotect/cache-finalize/jump stager exists"
     if capability is Capability.RET2LIBC:
@@ -388,7 +411,10 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
                 "interception in the opt-in QEMU test"
             )
         else:
-            detail = "builder exists and raw payload execution is covered by the opt-in QEMU test"
+            detail = (
+                _implemented_detail(target, capability)
+                + "; raw payload execution is covered by the opt-in QEMU test"
+            )
         evidence.append(_QEMU_EVIDENCE[capability])
         if native_verified:
             evidence.append(_NATIVE_EVIDENCE[capability])
