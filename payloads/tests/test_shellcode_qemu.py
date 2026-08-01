@@ -28,6 +28,7 @@ from payloads import (
     orw_shellcode,
     resolve_target,
 )
+from payloads.shellcode import sendfile_orw_shellcode
 from payloads.tests.test_shellcode import PRIMARY_TARGETS
 
 _QEMU = {
@@ -322,6 +323,38 @@ class CommandQemuTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
                 self.assertEqual(result.stdout, expected)
+
+    def test_raw_sendfile_orw_shellcode_preserves_binary_file_bytes(self) -> None:
+        assembler = LLVMAssembler()
+        expected = bytes(range(256)) + b"\0pwnc sendfile ORW\n"
+        for architecture, endian in QEMU_TARGETS:
+            target = resolve_target(architecture, endian=endian)
+            with self.subTest(target=target.name), tempfile.TemporaryDirectory(prefix="pwnc-qemu-") as directory:
+                source_file = Path(directory, "sendfile-input")
+                source_file.write_bytes(expected)
+                payload = sendfile_orw_shellcode(
+                    str(source_file),
+                    target,
+                    count=len(expected) + 32,
+                    assembler=assembler,
+                )
+                executable = Path(directory, "payload.elf")
+                _link_raw_payload(payload.data, target, executable)
+                qemu = _QEMU[(target.arch, endian)]
+                result = subprocess.run(
+                    [qemu, "-strace", str(executable)],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                trace = result.stderr.decode(errors="replace")
+                self.assertEqual(result.returncode, 0, trace)
+                self.assertEqual(result.stdout, expected)
+                self.assertRegex(
+                    trace,
+                    rf"\b{payload.metadata['sendfile_syscall']}\(1,\d+,0,{payload.metadata['count']}",
+                )
+                self.assertNotRegex(trace, r"\b(?:read|write)\(")
 
     def test_rw_to_rx_mmap_stager_runs_exact_second_stage(self) -> None:
         assembler = LLVMAssembler()

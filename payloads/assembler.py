@@ -1,4 +1,4 @@
-"""Relocation-free raw shellcode assembly using LLVM's multi-target assembler."""
+"""Relocation-free raw shellcode assembly using Zig and LLVM backends."""
 
 from __future__ import annotations
 
@@ -7,9 +7,17 @@ import subprocess
 import tempfile
 from io import BytesIO
 from pathlib import Path
+from typing import Protocol
 
 from .errors import AssemblyError
 from .target import ABI, Architecture, Endian, Target
+
+
+class Assembler(Protocol):
+    """Structural interface accepted by shellcode builders."""
+
+    def assemble(self, source: str, target: Target) -> bytes: ...
+
 
 _LLVM_TRIPLES: dict[tuple[Architecture, Endian, ABI], str] = {
     (Architecture.X86, Endian.LITTLE, ABI.I386_SYSV): "i386-linux-gnu",
@@ -109,4 +117,77 @@ class LLVMAssembler:
         return data
 
 
-__all__ = ["LLVMAssembler", "llvm_triple"]
+class ZigAssembler:
+    """Prefer ``zig cc`` assembly and retain LLVM as a checked fallback.
+
+    Zig's integrated toolchain covers nearly the complete target catalog from
+    one host installation.  The generated object is parsed exactly like an
+    LLVM object, including rejection of relocations against ``.text``.  When
+    both backends support a source they must emit identical bytes.
+    """
+
+    def __init__(
+        self,
+        executable: str | None = None,
+        *,
+        fallback: Assembler | None = None,
+        verify_with_fallback: bool = True,
+    ) -> None:
+        self.executable = executable or shutil.which("zig") or "zig"
+        self.fallback = fallback or LLVMAssembler()
+        self.verify_with_fallback = verify_with_fallback
+
+    @property
+    def available(self) -> bool:
+        return Path(self.executable).is_file() or shutil.which(self.executable) is not None
+
+    def _fallback(self, source: str, target: Target, zig_diagnostics: str) -> bytes:
+        try:
+            return self.fallback.assemble(source, target)
+        except AssemblyError as fallback_error:
+            raise AssemblyError(
+                f"zig cc failed for {target.name}: {zig_diagnostics}; "
+                f"fallback failed: {fallback_error}"
+            ) from fallback_error
+
+    def assemble(self, source: str, target: Target) -> bytes:
+        if not self.available:
+            return self._fallback(source, target, "zig was not found")
+        with tempfile.TemporaryDirectory(prefix="pwnc-payload-zig-") as directory:
+            source_path = Path(directory, "payload.S")
+            object_path = Path(directory, "payload.o")
+            source_path.write_text(source)
+            process = subprocess.run(
+                [
+                    self.executable,
+                    "cc",
+                    "-target",
+                    target.zig_target,
+                    "-c",
+                    str(source_path),
+                    "-o",
+                    str(object_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if process.returncode:
+                diagnostics = process.stderr.strip() or process.stdout.strip() or "no diagnostics"
+                return self._fallback(source, target, diagnostics)
+            try:
+                observed = LLVMAssembler._extract_text(object_path.read_bytes(), target)
+            except OSError as exc:
+                raise AssemblyError(f"zig cc did not produce an object for {target.name}: {exc}") from exc
+
+        if self.verify_with_fallback:
+            reference = self.fallback.assemble(source, target)
+            if observed != reference:
+                raise AssemblyError(
+                    f"Zig and LLVM emitted different shellcode for {target.name} "
+                    f"({len(observed)} != {len(reference)} bytes)"
+                )
+        return observed
+
+
+__all__ = ["Assembler", "LLVMAssembler", "ZigAssembler", "llvm_triple"]

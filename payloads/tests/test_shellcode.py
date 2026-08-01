@@ -19,6 +19,7 @@ from payloads import (
     qemu_semihosting_command_source,
     resolve_target,
 )
+from payloads.shellcode import sendfile_orw_shellcode, sendfile_orw_source
 
 PRIMARY_TARGETS = (
     ("x86", None),
@@ -104,6 +105,61 @@ class OrwSourceTests(unittest.TestCase):
             orw_source("/flag", target, max_bytes=0)
         with self.assertRaises(ValueError):
             orw_source("/flag", target, output_fd=0x10000)
+
+
+class SendfileOrwSourceTests(unittest.TestCase):
+    def test_all_catalog_targets_lower_without_a_read_buffer(self) -> None:
+        for architecture, endian in SHELLCODE_TARGETS:
+            with self.subTest(architecture=architecture, endian=endian):
+                target = resolve_target(architecture, endian=endian)
+                source, stack_size = sendfile_orw_source("/flag", target, count=257)
+                _, buffered_stack_size = orw_source("/flag", target, max_bytes=257)
+                self.assertIn("_start:", source)
+                self.assertIn(".Lsendfile_fail:", source)
+                self.assertEqual(stack_size % target.convention.stack_alignment, 0)
+                self.assertLess(stack_size, buffered_stack_size)
+
+    def test_source_uses_exact_linux_sendfile_syscall_numbers(self) -> None:
+        expected = {
+            "x86": 187,
+            "x86_64": 40,
+            "arm": 187,
+            "thumb": 187,
+            "arm64": 71,
+            "mips32": 4207,
+            "mips64": 5039,
+            "riscv32": 71,
+            "riscv64": 71,
+            "powerpc32": 186,
+            "powerpc64": 186,
+            "sparc32": 39,
+            "sparc64": 39,
+            "s390x": 187,
+        }
+        assembler = LLVMAssembler()
+        for architecture, number in expected.items():
+            with self.subTest(architecture=architecture):
+                target = resolve_target(architecture)
+                payload = sendfile_orw_shellcode("/flag", target, count=257, assembler=assembler)
+                self.assertEqual(payload.metadata["sendfile_syscall_number"], number)
+                self.assertEqual(
+                    payload.metadata["sendfile_syscall"], "sendfile64" if architecture == "riscv32" else "sendfile"
+                )
+
+    def test_sendfile_validation(self) -> None:
+        target = resolve_target("x86_64")
+        with self.assertRaises(ValueError):
+            sendfile_orw_source("", target)
+        with self.assertRaises(ValueError):
+            sendfile_orw_source(b"/bad\0path", target)
+        with self.assertRaises(ValueError):
+            sendfile_orw_source("/flag", target, count=0)
+        with self.assertRaises(ValueError):
+            sendfile_orw_source("/flag", resolve_target("x86"), count=1 << 32)
+        with self.assertRaises(ValueError):
+            sendfile_orw_source("/flag", target, output_fd=0x10000)
+        with self.assertRaises(ValueError):
+            sendfile_orw_source("/" + "A" * 1800, target)
 
 
 class StagerSourceTests(unittest.TestCase):
@@ -220,6 +276,32 @@ class CommandAssemblyTests(unittest.TestCase):
                 payload = orw_shellcode("/flag", target, max_bytes=257, assembler=assembler)
                 self.assertGreater(len(payload.data), 8)
                 self.assertEqual(payload.metadata["operation"], "open-read-write")
+
+    def test_sendfile_orw_assembles_for_all_targets_without_read_buffer(self) -> None:
+        assembler = LLVMAssembler()
+        for architecture, endian in SHELLCODE_TARGETS:
+            with self.subTest(architecture=architecture, endian=endian):
+                target = resolve_target(architecture, endian=endian)
+                payload = sendfile_orw_shellcode("/flag", target, count=257, assembler=assembler)
+                self.assertGreater(len(payload.data), 8)
+                self.assertEqual(payload.metadata["operation"], "open-sendfile")
+                self.assertEqual(payload.metadata["count"], 257)
+                self.assertEqual(payload.metadata["offset_pointer"], None)
+                self.assertFalse(payload.metadata["uses_read_buffer"])
+                self.assertIn("sendfile path", payload.memory[1].purpose)
+                self.assertNotIn("buffer", payload.memory[1].purpose)
+                expected_source = "linux-uapi" if architecture in {"mips64", "riscv32"} else "pwntools:"
+                self.assertTrue(payload.metadata["syscall_constants_source"].startswith(expected_source))
+
+    def test_sendfile_orw_materializes_full_width_counts(self) -> None:
+        assembler = LLVMAssembler()
+        for architecture, endian in SHELLCODE_TARGETS:
+            with self.subTest(architecture=architecture, endian=endian):
+                target = resolve_target(architecture, endian=endian)
+                count = 0x81234567 if target.bits == 32 else 0x8123456789ABCDEF
+                payload = sendfile_orw_shellcode("/flag", target, count=count, assembler=assembler)
+                self.assertEqual(payload.metadata["count"], count)
+                self.assertEqual(payload.memory[1].size, target.convention.stack_alignment)
 
     def test_exit_and_rw_to_rx_stager_assemble_for_all_implemented_targets(self) -> None:
         assembler = LLVMAssembler()

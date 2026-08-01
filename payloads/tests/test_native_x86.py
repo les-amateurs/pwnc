@@ -38,6 +38,7 @@ from payloads import (
     resolve_target,
 )
 from payloads.rop import build_ret2libc_system
+from payloads.shellcode import sendfile_orw_shellcode
 from payloads.tests.test_rop_qemu import (
     _RET2LIBC_SOURCE,
     _assemble_static_fixture,
@@ -281,6 +282,32 @@ class NativeShellcodeTests(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
                 self.assertEqual(result.stdout, expected)
+
+    def test_raw_sendfile_orw_shellcode_runs_without_a_read_buffer_in_both_native_x86_modes(self) -> None:
+        assembler = LLVMAssembler()
+        expected = bytes(range(256)) + b"\0PWNC native sendfile ORW\n"
+        for target in _NATIVE_TARGETS:
+            with (
+                self.subTest(target=target.name),
+                tempfile.TemporaryDirectory(prefix="pwnc-native-sendfile-") as directory,
+            ):
+                source_file = Path(directory, "sendfile-input")
+                source_file.write_bytes(expected)
+                payload = sendfile_orw_shellcode(
+                    str(source_file),
+                    target,
+                    count=len(expected) + 32,
+                    assembler=assembler,
+                )
+                executable = Path(directory, "payload.elf")
+                _link_raw_payload(payload.data, target, executable)
+                _assert_exact_entry_bytes(self, executable, payload.data)
+
+                result = subprocess.run([str(executable)], capture_output=True, timeout=10, check=False)
+
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+                self.assertEqual(result.stdout, expected)
+                self.assertFalse(payload.metadata["uses_read_buffer"])
 
     def test_rw_to_rx_mmap_stager_runs_exact_child_in_both_native_x86_modes(self) -> None:
         assembler = LLVMAssembler()
