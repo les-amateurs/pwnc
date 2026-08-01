@@ -6,6 +6,7 @@ import unittest
 from payloads import (
     SUPPORTED_TARGETS,
     LLVMAssembler,
+    UnsupportedTargetError,
     command_shellcode,
     command_source,
     exit_shellcode,
@@ -14,6 +15,8 @@ from payloads import (
     mmap_stager_source,
     orw_shellcode,
     orw_source,
+    qemu_semihosting_command_shellcode,
+    qemu_semihosting_command_source,
     resolve_target,
 )
 
@@ -45,6 +48,17 @@ EXTRA_SHELLCODE_TARGETS = (
 )
 
 SHELLCODE_TARGETS = PRIMARY_TARGETS + EXTRA_SHELLCODE_TARGETS
+
+QEMU_USER_SEMIHOSTING_TARGETS = (
+    ("arm", "little"),
+    ("arm", "big"),
+    ("thumb", "little"),
+    ("thumb", "big"),
+    ("arm64", "little"),
+    ("arm64", "big"),
+    ("riscv32", None),
+    ("riscv64", None),
+)
 
 
 class CommandSourceTests(unittest.TestCase):
@@ -116,6 +130,75 @@ class StagerSourceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mmap_stager_source(1, resolve_target("x86"), page_size=1 << 32)
 
+    def test_x86_mmap_checks_only_linux_error_pointer_range(self) -> None:
+        source32, _ = mmap_stager_source(16, resolve_target("x86"))
+        source64, _ = mmap_stager_source(16, resolve_target("x86_64"))
+        self.assertIn("cmp eax, 0xfffff001\njae .Lstage_fail", source32)
+        self.assertIn("cmp rax, -4095\njae .Lstage_fail", source64)
+        self.assertNotIn("mov eax, 192\nint 0x80\ntest eax, eax\njs .Lstage_fail", source32)
+
+
+class QemuSemihostingSourceTests(unittest.TestCase):
+    def test_supported_matrix_is_exactly_the_automatic_qemu_user_targets(self) -> None:
+        supported = {
+            resolve_target(architecture, endian=endian).name for architecture, endian in QEMU_USER_SEMIHOSTING_TARGETS
+        }
+        self.assertEqual(
+            supported,
+            {
+                "arm-le-arm-eabi",
+                "arm-be-arm-eabi",
+                "thumb-le-arm-eabi",
+                "thumb-be-arm-eabi",
+                "arm64-le-aarch64-aapcs64",
+                "arm64-be-aarch64-aapcs64",
+                "riscv32-le-riscv-ilp32",
+                "riscv64-le-riscv-lp64",
+            },
+        )
+        for target in SUPPORTED_TARGETS:
+            with self.subTest(target=target.name):
+                if target.name in supported:
+                    source, stack_size = qemu_semihosting_command_source("printf pwnc", target)
+                    self.assertIn("_start:", source)
+                    self.assertEqual(stack_size % target.convention.stack_alignment, 0)
+                else:
+                    with self.assertRaisesRegex(
+                        UnsupportedTargetError,
+                        f"automatic QEMU user-mode semihosting is not implemented for {target.name}",
+                    ):
+                        qemu_semihosting_command_source("printf pwnc", target)
+
+    def test_source_uses_exact_architecture_traps(self) -> None:
+        expected = {
+            ("arm", "little"): "svc #0x123456",
+            ("arm", "big"): "svc #0x123456",
+            ("thumb", "little"): "svc #0xab",
+            ("thumb", "big"): "svc #0xab",
+            ("arm64", "little"): "hlt #0xf000",
+            ("arm64", "big"): "hlt #0xf000",
+        }
+        for (architecture, endian), trap in expected.items():
+            with self.subTest(architecture=architecture, endian=endian):
+                source, _ = qemu_semihosting_command_source("printf pwnc", resolve_target(architecture, endian=endian))
+                self.assertIn(trap, source)
+        for architecture in ("riscv32", "riscv64"):
+            with self.subTest(architecture=architecture):
+                source, _ = qemu_semihosting_command_source("printf pwnc", resolve_target(architecture))
+                self.assertIn(
+                    ".balign 16\nslli zero, zero, 0x1f\nebreak\nsrai zero, zero, 0x7",
+                    source,
+                )
+
+    def test_command_validation(self) -> None:
+        target = resolve_target("arm64")
+        with self.assertRaises(ValueError):
+            qemu_semihosting_command_source("", target)
+        with self.assertRaises(ValueError):
+            qemu_semihosting_command_source(b"bad\0command", target)
+        with self.assertRaises(ValueError):
+            qemu_semihosting_command_source("A" * 1800, target)
+
 
 @unittest.skipUnless(shutil.which("llvm-mc"), "llvm-mc is not installed")
 class CommandAssemblyTests(unittest.TestCase):
@@ -164,6 +247,38 @@ class CommandAssemblyTests(unittest.TestCase):
         self.assertFalse(child.metadata["requires_instruction_cache_sync_after_runtime_write"])
         self.assertTrue(stager.metadata["instruction_cache_finalized"])
         self.assertFalse(stager.metadata["requires_instruction_cache_sync_after_runtime_write"])
+
+    def test_qemu_semihosting_escape_assembles_with_exact_trap_bytes(self) -> None:
+        assembler = LLVMAssembler()
+        expected_traps = {
+            ("arm", "little"): bytes.fromhex("56 34 12 ef"),
+            ("arm", "big"): bytes.fromhex("ef 12 34 56"),
+            ("thumb", "little"): bytes.fromhex("ab df"),
+            ("thumb", "big"): bytes.fromhex("df ab"),
+            ("arm64", "little"): bytes.fromhex("00 00 5e d4"),
+            ("arm64", "big"): bytes.fromhex("00 00 5e d4"),
+            ("riscv32", None): bytes.fromhex("13 10 f0 01 73 00 10 00 13 50 70 40"),
+            ("riscv64", None): bytes.fromhex("13 10 f0 01 73 00 10 00 13 50 70 40"),
+        }
+        for (architecture, endian), trap in expected_traps.items():
+            with self.subTest(architecture=architecture, endian=endian):
+                target = resolve_target(architecture, endian=endian)
+                payload = qemu_semihosting_command_shellcode("printf pwnc", target, assembler=assembler)
+                self.assertIn(trap, payload.data)
+                self.assertEqual(payload.metadata["semihosting_call"], "SYS_SYSTEM")
+                self.assertEqual(payload.metadata["semihosting_operation_number"], 0x12)
+                self.assertTrue(payload.metadata["command_executes_on_host"])
+                self.assertTrue(payload.metadata["qemu_user_automatic_interception"])
+                expected_alignment = 16 if architecture.startswith("riscv") else 4
+                self.assertEqual(payload.memory[0].alignment, expected_alignment)
+
+    def test_qemu_semihosting_materializes_nontrivial_argument_offsets(self) -> None:
+        assembler = LLVMAssembler()
+        for architecture, endian in QEMU_USER_SEMIHOSTING_TARGETS:
+            with self.subTest(architecture=architecture, endian=endian):
+                target = resolve_target(architecture, endian=endian)
+                payload = qemu_semihosting_command_shellcode("A" * 1301, target, assembler=assembler)
+                self.assertGreater(len(payload.data), 8)
 
 
 if __name__ == "__main__":

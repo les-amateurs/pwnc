@@ -81,6 +81,8 @@ from .shellcode import (
     mmap_stager_source,
     orw_shellcode,
     orw_source,
+    qemu_semihosting_command_shellcode,
+    qemu_semihosting_command_source,
 )
 from .support import (
     SUPPORT_MATRIX,
@@ -198,6 +200,8 @@ __all__ = [
     "mmap_stager_source",
     "orw_shellcode",
     "orw_source",
+    "qemu_semihosting_command_shellcode",
+    "qemu_semihosting_command_source",
     "resolve_exact_libc_function",
     "resolve_target",
     "support_matrix_data",
