@@ -1018,7 +1018,8 @@ def qemu_semihosting_command_shellcode(
 
     source, stack_size = qemu_semihosting_command_source(command, target)
     data = (assembler or LLVMAssembler()).assemble(source, target)
-    code_alignment = 16 if target.arch in {Architecture.RISCV32, Architecture.RISCV64} else 4
+    riscv_signature = target.arch in {Architecture.RISCV32, Architecture.RISCV64}
+    code_alignment = 16 if riscv_signature else _instruction_alignment(target)
     return Payload(
         data=data,
         target=target,
@@ -1045,6 +1046,7 @@ def qemu_semihosting_command_shellcode(
             "semihosting_operation_number": 0x12,
             "command_executes_on_host": True,
             "qemu_user_automatic_interception": True,
+            "semihosting_trap_same_page_required": riscv_signature,
             "trusted_command_required": True,
             "position_independent": True,
             "requires_instruction_cache_sync_after_runtime_write": _requires_instruction_cache_sync(target),

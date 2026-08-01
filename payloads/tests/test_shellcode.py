@@ -269,8 +269,13 @@ class CommandAssemblyTests(unittest.TestCase):
                 self.assertEqual(payload.metadata["semihosting_operation_number"], 0x12)
                 self.assertTrue(payload.metadata["command_executes_on_host"])
                 self.assertTrue(payload.metadata["qemu_user_automatic_interception"])
-                expected_alignment = 16 if architecture.startswith("riscv") else 4
+                expected_alignment = 16 if architecture.startswith("riscv") else 2 if architecture == "thumb" else 4
                 self.assertEqual(payload.memory[0].alignment, expected_alignment)
+                if architecture.startswith("riscv"):
+                    self.assertEqual(payload.data.index(trap) % 16, 0)
+                    self.assertTrue(payload.metadata["semihosting_trap_same_page_required"])
+                else:
+                    self.assertFalse(payload.metadata["semihosting_trap_same_page_required"])
 
     def test_qemu_semihosting_materializes_nontrivial_argument_offsets(self) -> None:
         assembler = LLVMAssembler()
