@@ -19,15 +19,15 @@ callbacks which cannot report counts, enable read-back verification in
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from math import lcm
-from typing import Any, Callable, Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from .errors import ConstraintError, MemoryAccessError, UnsupportedTargetError
 from .libc import LibcIdentity, LibcImage
 from .model import Mitigations, Payload, PayloadKind, Permission, RuntimeLayout
 from .target import FunctionPointerModel, Target
-
 
 ReadAt = Callable[[int, int], bytes]
 WriteAt = Callable[[int, bytes], int | None]
@@ -42,9 +42,7 @@ class ShortReadError(MemoryAccessError):
         self.address = address
         self.expected = expected
         self.actual = actual
-        super().__init__(
-            f"short read at {address:#x}: expected exactly {expected} bytes, got {actual}"
-        )
+        super().__init__(f"short read at {address:#x}: expected exactly {expected} bytes, got {actual}")
 
 
 class ShortWriteError(MemoryAccessError):
@@ -54,9 +52,7 @@ class ShortWriteError(MemoryAccessError):
         self.address = address
         self.expected = expected
         self.actual = actual
-        super().__init__(
-            f"short write at {address:#x}: expected exactly {expected} bytes, wrote {actual}"
-        )
+        super().__init__(f"short write at {address:#x}: expected exactly {expected} bytes, wrote {actual}")
 
 
 class WriteVerificationError(MemoryAccessError):
@@ -146,9 +142,7 @@ def _check_range(target: Target, address: int, size: int) -> None:
     _checked_nonnegative(address, "address")
     _checked_nonnegative(size, "size")
     if address > target.mask or (size and address + size - 1 > target.mask):
-        raise MemoryAccessError(
-            f"range {address:#x}+{size:#x} does not fit the {target.bits}-bit target address space"
-        )
+        raise MemoryAccessError(f"range {address:#x}+{size:#x} does not fit the {target.bits}-bit target address space")
 
 
 def _chunks(
@@ -163,13 +157,9 @@ def _chunks(
     if not size:
         return ()
     if address % alignment:
-        raise MemoryAccessError(
-            f"{operation} address {address:#x} is not aligned to {alignment} bytes"
-        )
+        raise MemoryAccessError(f"{operation} address {address:#x} is not aligned to {alignment} bytes")
     if size % width:
-        raise MemoryAccessError(
-            f"{operation} size {size} is not a multiple of primitive width {width}"
-        )
+        raise MemoryAccessError(f"{operation} size {size} is not a multiple of primitive width {width}")
     transfer_step = lcm(alignment, width)
     result: list[tuple[int, int]] = []
     offset = 0
@@ -235,7 +225,7 @@ class ArbitraryMemory:
         *,
         traits: IOPrimitiveTraits | None = None,
         base_address: int | None = None,
-    ) -> "ArbitraryMemory":
+    ) -> ArbitraryMemory:
         """Adapt a ``pwnc.types.BytesProvider``-shaped object structurally.
 
         No provider class is imported and ``isinstance`` is not used.  This
@@ -248,15 +238,11 @@ class ArbitraryMemory:
             raise TypeError("provider must expose read(offset, size)")
         provider_bits = getattr(provider, "ptrbits", None)
         if provider_bits is not None and provider_bits != target.bits:
-            raise ConstraintError(
-                f"provider pointer width {provider_bits} does not match target width {target.bits}"
-            )
+            raise ConstraintError(f"provider pointer width {provider_bits} does not match target width {target.bits}")
         provider_byteorder = getattr(provider, "byteorder", None)
         expected_byteorder = 0 if target.endian.value == "little" else 1
         if provider_byteorder in (0, 1) and provider_byteorder != expected_byteorder:
-            raise ConstraintError(
-                f"provider byte order does not match {target.endian.value}-endian target"
-            )
+            raise ConstraintError(f"provider byte order does not match {target.endian.value}-endian target")
         if base_address is None:
             try:
                 base_address = provider.address
@@ -266,9 +252,7 @@ class ArbitraryMemory:
 
         def provider_read(address: int, size: int) -> bytes:
             if address < base:
-                raise MemoryAccessError(
-                    f"absolute read address {address:#x} is below provider base {base:#x}"
-                )
+                raise MemoryAccessError(f"absolute read address {address:#x} is below provider base {base:#x}")
             return provider.read(address - base, size)
 
         provider_write_method = getattr(provider, "write", None)
@@ -277,9 +261,7 @@ class ArbitraryMemory:
 
             def provider_write(address: int, data: bytes) -> int | None:
                 if address < base:
-                    raise MemoryAccessError(
-                        f"absolute write address {address:#x} is below provider base {base:#x}"
-                    )
+                    raise MemoryAccessError(f"absolute write address {address:#x} is below provider base {base:#x}")
                 return provider_write_method(address - base, data)
 
         return cls(target, read_at=provider_read, write_at=provider_write, traits=traits)
@@ -379,16 +361,14 @@ class ArbitraryMemory:
         """Return whether a range is readable when invalid reads are declared safe."""
 
         if not self.traits.invalid_read_safe:
-            raise ConstraintError(
-                "probe is disabled because invalid_read_safe was not declared for this primitive"
-            )
+            raise ConstraintError("probe is disabled because invalid_read_safe was not declared for this primitive")
         try:
             self.read(address, size)
         except MemoryAccessError:
             return False
         return True
 
-    def as_bytes_provider(self, base_address: int = 0) -> "ArbitraryMemoryBytesProvider":
+    def as_bytes_provider(self, base_address: int = 0) -> ArbitraryMemoryBytesProvider:
         """Expose this interface through the small ``BytesProvider`` protocol."""
 
         return ArbitraryMemoryBytesProvider(self, base_address)
@@ -426,7 +406,7 @@ class ArbitraryMemoryBytesProvider:
     def write(self, offset: int, data: bytes) -> None:
         self.memory.write(self._base_address + offset, data)
 
-    def rebase(self, address: int) -> "ArbitraryMemoryBytesProvider":
+    def rebase(self, address: int) -> ArbitraryMemoryBytesProvider:
         return ArbitraryMemoryBytesProvider(self.memory, address)
 
 
@@ -498,13 +478,11 @@ def _require_same_target(actual: Target, expected: Target, what: str) -> None:
         raise ConstraintError(f"{what} target {actual.name} does not match payload target {expected.name}")
 
 
-def _call_address(function: "ExactLibcFunction", primitive: FunctionCallPrimitive) -> int:
+def _call_address(function: ExactLibcFunction, primitive: FunctionCallPrimitive) -> int:
     _require_same_target(primitive.target, function.target, "call primitive")
     if function.target.function_pointer_model is FunctionPointerModel.PPC64_ELFV1_DESCRIPTOR:
         if not primitive.function_descriptor_aware:
-            raise UnsupportedTargetError(
-                "PPC64 ELFv1 calls require a function-descriptor and TOC-aware call primitive"
-            )
+            raise UnsupportedTargetError("PPC64 ELFv1 calls require a function-descriptor and TOC-aware call primitive")
         return function.address
     return function.target.function_pointer(function.address)
 
@@ -564,9 +542,7 @@ class PayloadStager:
     @staticmethod
     def _code_alignment(payload: Payload) -> int:
         alignments = [
-            requirement.alignment
-            for requirement in payload.memory
-            if requirement.permissions & Permission.EXECUTE
+            requirement.alignment for requirement in payload.memory if requirement.permissions & Permission.EXECUTE
         ]
         return max(alignments, default=1)
 
@@ -597,9 +573,7 @@ class PayloadStager:
             needs_execution and payload.metadata.get("requires_instruction_cache_sync_after_runtime_write", False)
         )
         permission_change_needed = bool(
-            needs_execution
-            and not executable_region
-            and not self.mitigations.writable_memory_is_executable
+            needs_execution and not executable_region and not self.mitigations.writable_memory_is_executable
         )
 
         if needs_execution:
@@ -682,7 +656,7 @@ class ExactLibcFunction:
         image: LibcImage,
         symbol: str,
         layout: RuntimeLayout,
-    ) -> "ExactLibcFunction":
+    ) -> ExactLibcFunction:
         if not isinstance(image, LibcImage):
             raise TypeError("image must be an exact LibcImage, not a version or raw offset")
         if not isinstance(layout, RuntimeLayout):
@@ -843,7 +817,7 @@ class ExecveCallWorkflow:
         data: ExecveDataPayload,
         libc: LibcImage,
         layout: RuntimeLayout,
-    ) -> "ExecveCallWorkflow":
+    ) -> ExecveCallWorkflow:
         return cls(data, ExactLibcFunction.resolve(libc, "execve", layout))
 
     def execute(
@@ -903,7 +877,7 @@ class GotSystemWorkflow:
         plt_address: int,
         command_address: int,
         command: str | bytes,
-    ) -> "GotSystemWorkflow":
+    ) -> GotSystemWorkflow:
         return cls(
             target,
             mitigations,
@@ -946,9 +920,9 @@ __all__ = [
     "ArbitraryMemory",
     "ArbitraryMemoryBytesProvider",
     "BytesProviderAdapter",
+    "CacheSyncPrimitive",
     "CallbackControlFlowTrigger",
     "CallbackFunctionCall",
-    "CacheSyncPrimitive",
     "ControlFlowTrigger",
     "ExactLibcFunction",
     "ExecveCallWorkflow",
@@ -956,8 +930,8 @@ __all__ = [
     "FunctionCallPrimitive",
     "GotSystemWorkflow",
     "IOPrimitiveTraits",
-    "PermissionPrimitive",
     "PayloadStager",
+    "PermissionPrimitive",
     "PrimitiveTraits",
     "ReadAt",
     "ShortReadError",

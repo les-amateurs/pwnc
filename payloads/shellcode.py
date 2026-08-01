@@ -9,7 +9,6 @@ from .errors import UnsupportedTargetError
 from .model import MemoryRequirement, Payload, PayloadKind, Permission
 from .target import Architecture, Target
 
-
 _MAX_STACK_IMAGE = 1792
 
 
@@ -104,9 +103,7 @@ def _header(target: Target) -> list[str]:
     if target.arch in {Architecture.X86, Architecture.X86_64}:
         lines.append(".intel_syntax noprefix")
     elif target.arch in {Architecture.ARM, Architecture.THUMB}:
-        lines.extend(
-            (".syntax unified", ".arch armv7-a", ".thumb" if target.arch is Architecture.THUMB else ".arm")
-        )
+        lines.extend((".syntax unified", ".arch armv7-a", ".thumb" if target.arch is Architecture.THUMB else ".arm"))
     elif target.arch in {Architecture.MIPS32, Architecture.MIPS64}:
         lines.extend((".set noreorder", ".set nomips16"))
     elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
@@ -201,9 +198,7 @@ def _aarch64_load(register: str, value: int) -> list[str]:
     first = next(index for index, part in enumerate(parts) if part)
     lines = [f"movz {register}, #{parts[first]}, lsl #{first * 16}"]
     lines.extend(
-        f"movk {register}, #{part}, lsl #{index * 16}"
-        for index, part in enumerate(parts)
-        if part and index != first
+        f"movk {register}, #{part}, lsl #{index * 16}" for index, part in enumerate(parts) if part and index != first
     )
     return lines
 
@@ -271,9 +266,7 @@ def _riscv_execve(target: Target, stack: _ExecveStack) -> list[str]:
     for offset, value in _word_chunks(target, stack.data):
         lines.extend((f"li t0, 0x{value:x}", f"{store} t0, {offset}(sp)"))
     for index, offset in enumerate((stack.path_offset, stack.dash_c_offset, stack.command_offset)):
-        lines.extend(
-            (f"addi t1, sp, {offset}", f"{store} t1, {stack.argv_offset + index * target.word_size}(sp)")
-        )
+        lines.extend((f"addi t1, sp, {offset}", f"{store} t1, {stack.argv_offset + index * target.word_size}(sp)"))
     lines.extend(
         (
             f"addi a0, sp, {stack.path_offset}",
@@ -592,6 +585,8 @@ def exit_shellcode(status: int, target: Target, *, assembler: LLVMAssembler | No
             "operation": "exit",
             "status": status,
             "position_independent": True,
+            "requires_instruction_cache_sync_after_runtime_write": target.arch
+            not in {Architecture.X86, Architecture.X86_64},
             "assembly": source,
         },
     )
@@ -807,7 +802,6 @@ def _mips_stager(target: Target, size: int, map_size: int, input_fd: int) -> lis
     add_register = "daddu" if is_64 else "addu"
     subtract = "dsubu" if is_64 else "subu"
     load = "dli" if is_64 else "li"
-    store = "sd" if is_64 else "sw"
     mmap_number = 5009 if is_64 else 4210
     read_number = 5000 if is_64 else 4003
     mprotect_number = 5010 if is_64 else 4125
@@ -986,6 +980,8 @@ def mmap_stager(
             "mapping_transition": "rw-to-rx",
             "exact_read_loop": True,
             "instruction_cache_finalized": target.arch not in {Architecture.X86, Architecture.X86_64},
+            "requires_instruction_cache_sync_after_runtime_write": target.arch
+            not in {Architecture.X86, Architecture.X86_64},
             "position_independent": True,
             "assembly": source,
         },

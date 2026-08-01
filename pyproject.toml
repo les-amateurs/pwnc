@@ -4,6 +4,10 @@ version = "0.1.0"
 description = ""
 authors = ["unvariant <unvariant.winter@gmail.com>"]
 readme = "README.md"
+packages = [
+    { include = "pwnc" },
+    { include = "payloads" },
+]
 
 [tool.poetry.scripts]
 pwnc = "pwnc.pwncli:main"

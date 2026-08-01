@@ -11,7 +11,6 @@ from pathlib import Path
 from .errors import AssemblyError
 from .target import ABI, Architecture, Endian, Target
 
-
 _LLVM_TRIPLES: dict[tuple[Architecture, Endian, ABI], str] = {
     (Architecture.X86, Endian.LITTLE, ABI.I386_SYSV): "i386-linux-gnu",
     (Architecture.X86_64, Endian.LITTLE, ABI.AMD64_SYSV): "x86_64-linux-gnu",

@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_shellcode import PRIMARY_TARGETS
+
 from payloads import (
     ABI,
     Architecture,
@@ -25,9 +27,6 @@ from payloads import (
     orw_shellcode,
     resolve_target,
 )
-
-from test_shellcode import PRIMARY_TARGETS
-
 
 _QEMU = {
     (Architecture.X86, None): "qemu-i386",

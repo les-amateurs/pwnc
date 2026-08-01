@@ -8,11 +8,11 @@ available, its GNU build ID.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping
 
 from .errors import PayloadError
 from .model import Address, Image, RuntimeLayout
@@ -112,11 +112,7 @@ class LibcImage:
             glibc_version=glibc_version,
         )
         requested = set(symbols) if symbols is not None else None
-        offsets = {
-            name: int(value)
-            for name, value in elf.symbols.items()
-            if requested is None or name in requested
-        }
+        offsets = {name: int(value) for name, value in elf.symbols.items() if requested is None or name in requested}
         if requested is not None:
             missing = requested.difference(offsets)
             if missing:

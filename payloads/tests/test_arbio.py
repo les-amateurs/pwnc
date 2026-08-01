@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from payloads import (
+    SUPPORTED_TARGETS,
     ConstraintError,
     ExecutionPolicy,
     LibcIdentity,
@@ -15,7 +16,6 @@ from payloads import (
     Permission,
     Relro,
     RuntimeLayout,
-    SUPPORTED_TARGETS,
     resolve_target,
 )
 from payloads.arbio import (

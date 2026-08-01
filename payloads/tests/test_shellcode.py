@@ -16,7 +16,6 @@ from payloads import (
     resolve_target,
 )
 
-
 PRIMARY_TARGETS = (
     ("x86", None),
     ("x86_64", None),

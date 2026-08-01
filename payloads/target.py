@@ -8,9 +8,9 @@ convention.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable
 
 from .errors import UnsupportedTargetError
 
@@ -195,9 +195,7 @@ _ARM = _cc(
 _AARCH64 = _cc(
     tuple(f"x{i}" for i in range(8)), "x0", "sp", "pc", "x30", "x8", tuple(f"x{i}" for i in range(6)), "svc 0", 16
 )
-_MIPS32 = _cc(
-    ("a0", "a1", "a2", "a3"), "v0", "sp", "pc", "ra", "v0", ("a0", "a1", "a2", "a3"), "syscall", 8
-)
+_MIPS32 = _cc(("a0", "a1", "a2", "a3"), "v0", "sp", "pc", "ra", "v0", ("a0", "a1", "a2", "a3"), "syscall", 8)
 _MIPS64 = _cc(
     tuple(f"a{i}" for i in range(8)), "v0", "sp", "pc", "ra", "v0", tuple(f"a{i}" for i in range(6)), "syscall", 16
 )
@@ -417,13 +415,18 @@ def resolve_target(
         return candidates[0]
 
     # Defaults are deliberately centralized here, never inferred downstream.
-    default_endian = Endian.BIG if arch in {
-        Architecture.POWERPC32,
-        Architecture.POWERPC64,
-        Architecture.SPARC32,
-        Architecture.SPARC64,
-        Architecture.S390X,
-    } else Endian.LITTLE
+    default_endian = (
+        Endian.BIG
+        if arch
+        in {
+            Architecture.POWERPC32,
+            Architecture.POWERPC64,
+            Architecture.SPARC32,
+            Architecture.SPARC64,
+            Architecture.S390X,
+        }
+        else Endian.LITTLE
+    )
     defaults = [target for target in candidates if target.endian is default_endian]
     if arch is Architecture.POWERPC64:
         preferred_abi = ABI.POWERPC64_ELFV1 if default_endian is Endian.BIG else ABI.POWERPC64_ELFV2
@@ -436,11 +439,11 @@ def resolve_target(
 
 __all__ = [
     "ABI",
+    "SUPPORTED_TARGETS",
     "Architecture",
     "CallingConvention",
     "Endian",
     "FunctionPointerModel",
-    "SUPPORTED_TARGETS",
     "Target",
     "resolve_target",
 ]
