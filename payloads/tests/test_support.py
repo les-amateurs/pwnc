@@ -16,6 +16,7 @@ from payloads.target import SUPPORTED_TARGETS, resolve_target
 _PPC32_LE = resolve_target("powerpc32", endian="little").name
 _PPC64_ELFV1 = resolve_target("ppc64").name
 _RET2LIBC_QEMU_TARGETS = {resolve_target("x86").name, resolve_target("x86_64").name}
+_FSOP_QEMU_TARGETS = {target.name for target in SUPPORTED_TARGETS} - {_PPC32_LE}
 _NATIVE_X86_TARGETS = _RET2LIBC_QEMU_TARGETS
 _RISCV_TARGETS = {resolve_target("riscv32").name, resolve_target("riscv64").name}
 _NATIVE_CAPABILITIES = {
@@ -102,6 +103,13 @@ class SupportMatrixTests(unittest.TestCase):
                 self.assertEqual(coverage.level, expected)
                 self.assertEqual(coverage.implemented, target.name not in _DIRECT_CALL_UNSUPPORTED)
                 self.assertEqual(coverage.qemu_verified, target.name in _RET2LIBC_QEMU_TARGETS)
+                has_pinned_libc_rop = any("GlibcQemuX86LibcROPTests" in item for item in coverage.evidence)
+                self.assertEqual(has_pinned_libc_rop, target.name in _RET2LIBC_QEMU_TARGETS)
+                if target.name in _RET2LIBC_QEMU_TARGETS:
+                    self.assertIn("open/read/write", coverage.detail)
+                    self.assertIn("open/sendfile", coverage.detail)
+                    self.assertIn("writable area", coverage.detail)
+                    self.assertIn("hardcoded fd 3", coverage.detail)
 
     def test_static_rop_qemu_coverage_matches_runtime_matrix(self) -> None:
         for target in SUPPORTED_TARGETS:
@@ -120,14 +128,16 @@ class SupportMatrixTests(unittest.TestCase):
                 else:
                     self.assertTrue(direct_call_evidence)
 
-    def test_fsop_is_structural_everywhere_with_exact_native_x86_claims(self) -> None:
+    def test_fsop_qemu_coverage_matches_full_glibc_239_runtime_matrix(self) -> None:
         self.assertEqual(len(SUPPORTED_TARGETS), 21)
+        self.assertEqual(len(_FSOP_QEMU_TARGETS), 20)
         for target in SUPPORTED_TARGETS:
             with self.subTest(target=target.name):
                 coverage = capability_support(target, Capability.FSOP)
-                self.assertEqual(coverage.level, SupportLevel.IMPLEMENTED)
+                expected = SupportLevel.QEMU_VERIFIED if target.name in _FSOP_QEMU_TARGETS else SupportLevel.IMPLEMENTED
+                self.assertEqual(coverage.level, expected)
                 self.assertTrue(coverage.implemented)
-                self.assertFalse(coverage.qemu_verified)
+                self.assertEqual(coverage.qemu_verified, target.name in _FSOP_QEMU_TARGETS)
                 self.assertEqual(coverage.native_verified, target.name in _NATIVE_X86_TARGETS)
                 self.assertIn("exact-libc-bound", coverage.detail)
                 self.assertIn("glibc-version-dependent", coverage.detail)
@@ -135,11 +145,18 @@ class SupportMatrixTests(unittest.TestCase):
                 self.assertIn("all 21 catalog targets", coverage.detail)
                 self.assertTrue(any("payloads.fsop.FSOP" in item for item in coverage.evidence))
                 self.assertTrue(any("test_fsop.py" in item for item in coverage.evidence))
-                self.assertFalse(any("test_fsop_qemu.py" in item for item in coverage.evidence))
+                self.assertEqual(
+                    any("test_glibc_qemu.py" in item and "GlibcQemuFSOPTests" in item for item in coverage.evidence),
+                    target.name in _FSOP_QEMU_TARGETS,
+                )
                 self.assertEqual(
                     any("NativeFSOPTests" in item for item in coverage.evidence),
                     target.name in _NATIVE_X86_TARGETS,
                 )
+                if target.name in _FSOP_QEMU_TARGETS:
+                    self.assertIn("exact pinned glibc 2.39 artifact", coverage.detail)
+                    self.assertIn("House of Apple 2", coverage.detail)
+                    self.assertIn("House of Cat", coverage.detail)
                 if target.name in _RISCV_TARGETS:
                     self.assertIn("legacy fake-vtable routes", coverage.detail)
                     self.assertIn("validation bypass", coverage.detail)

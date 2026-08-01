@@ -123,6 +123,9 @@ _SHELLCODE_IMPLEMENTED = _ALL_TARGET_NAMES
 _SHELLCODE_QEMU_VERIFIED = _ALL_TARGET_NAMES - frozenset({"powerpc32-le-powerpc-sysv"})
 _STATIC_ROP_QEMU_VERIFIED = _SHELLCODE_QEMU_VERIFIED
 _RET2LIBC_QEMU_VERIFIED = frozenset({"x86-le-i386-sysv", "x86_64-le-amd64-sysv"})
+# The no-selector pinned-glibc test makes every mapped 2.39 target mandatory;
+# PPC32 little-endian has no upstream glibc sysroot to map.
+_FSOP_QEMU_VERIFIED = _ALL_TARGET_NAMES - frozenset({"powerpc32-le-powerpc-sysv"})
 _NATIVE_X86_VERIFIED = frozenset({"x86-le-i386-sysv", "x86_64-le-amd64-sysv"})
 _QEMU_SEMIHOSTING_IMPLEMENTED = frozenset(
     {
@@ -168,7 +171,7 @@ _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.STAGER: _SHELLCODE_QEMU_VERIFIED,
         Capability.RET2LIBC: _RET2LIBC_QEMU_VERIFIED,
         Capability.STATIC_ROP: _STATIC_ROP_QEMU_VERIFIED,
-        Capability.FSOP: frozenset(),
+        Capability.FSOP: _FSOP_QEMU_VERIFIED,
         Capability.ARB_EXECUTOR: frozenset(),
         Capability.QEMU_SEMIHOSTING: _QEMU_SEMIHOSTING_IMPLEMENTED,
     }
@@ -279,13 +282,18 @@ _QEMU_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
             "Ret2libcQemuTests.test_exact_loaded_libc_system_chain_executes_from_live_base"
         ),
         Capability.STATIC_ROP: "payloads/tests/test_rop_qemu.py::StaticRopQemuTests",
-        Capability.FSOP: "no end-to-end FSOP activation test in current tree",
+        Capability.FSOP: ("payloads/tests/test_glibc_qemu.py::GlibcQemuFSOPTests.test_exact_glibc_fsop_matrix"),
         Capability.ARB_EXECUTOR: "no QEMU execution test in current tree",
         Capability.QEMU_SEMIHOSTING: (
             "payloads/tests/test_semihost_qemu.py::"
             "QemuSemihostingExecutionTests.test_host_command_escape_executes_on_every_automatic_qemu_user_target"
         ),
     }
+)
+
+_PINNED_GLIBC_ROP_QEMU_EVIDENCE = (
+    "payloads/tests/test_glibc_qemu.py::"
+    "GlibcQemuX86LibcROPTests.test_exact_libc_orw_and_sendfile_programs_use_challenge_gadgets"
 )
 
 _NATIVE_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
@@ -439,8 +447,9 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
     if qemu_verified:
         if capability is Capability.RET2LIBC:
             detail = (
-                "builder exists and a live-base chain against the exact loaded libc artifact is covered by the "
-                "opt-in QEMU test"
+                "builders exist; opt-in QEMU tests execute a live-base system chain against the exact loaded host "
+                "libc and composable open/read/write and open/sendfile programs against pinned x86 libc artifacts, "
+                "using an external path in a supplied writable area and an explicitly hardcoded fd 3 exfil stage"
             )
         elif capability is Capability.STATIC_ROP:
             if target.name in _DIRECT_CALL_UNSUPPORTED:
@@ -455,11 +464,19 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
                 "intentional SYS_SYSTEM host-command escape executes through automatic qemu-user semihosting "
                 "interception in the opt-in QEMU test"
             )
+        elif capability is Capability.FSOP:
+            detail = (
+                _implemented_detail(target, capability)
+                + "; builder-produced House of Apple 2 fflush and House of Cat fseek dispatches reach the "
+                "fixture callback against the exact pinned glibc 2.39 artifact in the opt-in qemu-user test"
+            )
         else:
             detail = (
                 _implemented_detail(target, capability) + "; raw payload execution is covered by the opt-in QEMU test"
             )
         evidence.append(_QEMU_EVIDENCE[capability])
+        if capability is Capability.RET2LIBC:
+            evidence.append(_PINNED_GLIBC_ROP_QEMU_EVIDENCE)
         if native_verified:
             evidence.append(_NATIVE_EVIDENCE[capability])
             detail += "; direct execution on native Linux i386 and AMD64 is also covered"

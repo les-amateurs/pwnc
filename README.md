@@ -16,6 +16,12 @@ See the [payload framework documentation](https://github.com/les-amateurs/pwnc/b
 for the supported-target matrix, public API examples, execution-policy model,
 QEMU evidence, and limitations.
 
+The opt-in runtime tests include 33 SHA-256-pinned glibc sysroot specs, direct
+native i386/AMD64 execution, qemu-user dynamic-libc/FSOP/ROP fixtures, and an
+exact QEMU 7.1.0/7.2.0 AArch64 execute-permission boundary. The payload
+documentation distinguishes checked full-matrix contracts from focused local
+runs and test-owned exploit fixtures.
+
 ## commands
 
 ### kernel

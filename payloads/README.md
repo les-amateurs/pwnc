@@ -506,14 +506,22 @@ must already carry the ISA-state bit (exact symbols preserve their recorded
 
 FILE, wide-data, and jump-table bytes are layout-tested for every repository
 architecture and endian variant. This is structural serialization coverage,
-not a blanket live-exploit claim. Exact-artifact House of Apple 2 direct
-`fflush` and House of Cat `fseek` dispatches run against the host glibc in both
-native i386 and AMD64 tests; no QEMU FSOP, legacy fake-vtable, or list-trigger
-execution evidence is claimed. Upstream glibc does not provide PPC32
-little-endian, so that target describes supplied downstream/custom artifacts
-only. The builder likewise does not claim that a selected glibc build, call
-site, lock state, or `_IO_list_all` insertion is reachable without the runtime
-preconditions reported by `FSOPPayload`.
+not a blanket live-exploit claim. The pinned-sysroot QEMU suite's default
+contract runs heap-stream payloads against the full glibc 2.39 lane: House of
+Apple 2 through direct `fflush(fp)` and House of Cat through `fseek(fp, ...)`
+for all 20 qemu-user-runnable catalog targets. It also covers a glibc 2.23
+AMD64 legacy fake-vtable `fflush` route and representative glibc 2.24 and 2.41
+wide routes. The distinct native suite runs the two modern routes against the
+loaded host glibc in i386 and AMD64 modes.
+
+Those fixtures provide a test-owned heap FILE pointer and invoke `fflush` or
+`fseek` directly. They do not prove an allocator corruption, `_IO_list_all`
+insertion, exit/flush-all traversal, a standard-stream overwrite, or every
+custom dispatch slot. Upstream glibc does not provide PPC32 little-endian, so
+that target describes supplied downstream/custom artifacts only and has no
+pinned-sysroot QEMU claim. The builder likewise does not claim that a selected
+glibc build, call site, lock state, or list insertion is reachable without the
+runtime preconditions reported by `FSOPPayload`.
 
 ## Arbitrary-read/write adapters and execution
 
@@ -650,6 +658,24 @@ respect guest execute permissions. Even when memory is executable, a payload
 whose metadata requests instruction-cache synchronization still needs the
 target-specific finalization step after self-modifying or runtime-written code.
 
+### Pinned QEMU execute-permission boundary
+
+The separate version suite fixes one observed boundary to AArch64 linux-user.
+Its manifest pins the official [QEMU 7.1.0 source
+archive](https://download.qemu.org/qemu-7.1.0.tar.xz), [QEMU 7.2.0 source
+archive](https://download.qemu.org/qemu-7.2.0.tar.xz), their SHA-256 digests,
+and upstream commit
+[`cdf713085131`](https://qemu.googlesource.com/qemu/+/cdf7130851318004e6512dbfdb73156fe59c7a59).
+That commit changed user-mode instruction fetch from returning an address
+without a permission check to probing `MMU_INST_FETCH` access. It is absent
+from 7.1.0 and present in 7.2.0.
+
+The live probe copies an AArch64 `exit(42)` sequence to a fresh anonymous
+mapping. With the mapping left RW, QEMU 7.1.0 exits 42 while QEMU 7.2.0 raises
+guest `SIGSEGV`; after changing the same mapping to RX, both releases exit 42.
+This establishes that exact AArch64 boundary. It does not turn a QEMU version
+number into evidence for every target, vendor patch set, or configuration.
+
 ## Tests
 
 Run the normal foundation, lowering, assembly, and matrix tests with:
@@ -658,9 +684,9 @@ Run the normal foundation, lowering, assembly, and matrix tests with:
 python3 -m unittest discover -s payloads/tests -v
 ```
 
-Assembly tests skip when `llvm-mc` is unavailable. End-to-end execution is
-opt-in because it needs LLVM, LLD, and the complete set of QEMU user emulators
-for the QEMU-verified matrix:
+Assembly tests skip when `llvm-mc` is unavailable. General end-to-end QEMU
+execution is opt-in because it needs LLVM, LLD, Zig, and the complete set of
+qemu-user emulators claimed by that matrix:
 
 ```sh
 PWNC_QEMU_TESTS=1 python3 -m unittest discover -s payloads/tests -v
@@ -678,30 +704,119 @@ support in addition to LLVM and LLD. Once enabled, a missing prerequisite or a
 kernel that cannot execute i386 ELF files fails the run rather than skipping
 one half of the matrix.
 
-The native FSOP fixture feeds builder-produced heap FILE, wide-data, and jump
-table bytes to the exact loaded host libc. In both i386 and AMD64 modes it
-checks House of Apple 2 through direct `fflush(fp)` and House of Cat through
-`fseek(fp, ...)`; each route must reach a non-returning fixture callback.
+### Pinned glibc sysroots
 
-The shellcode QEMU tests place exactly the bytes returned by the command, ORW,
-and RW-to-RX stager builders in a minimal static ELF, then check command output,
-binary file bytes, and execution of an exact second-stage exit payload. They use
-no foreign libc or sysroot. The semihosting test runs every one of the eight
-automatic qemu-user variants with no semihosting flag and checks a file written
-by the host command. The static ROP tests patch the exact materialized chain
-into a fixture and pivot to its first word; syscall and direct-call exits are
-deliberately distinct. The ret2libc tests use `-L /` with sanitized loader
-environment variables so that the libc path parsed by the framework is the
-artifact actually loaded by the guest. They require suitable native compiler
-and multilib support in addition to the i386 and AMD64 emulators.
+`payloads/tests/runtime_support/glibc_sysroots.json` contains 33
+content-pinned runtime specifications. Every input has an exact HTTPS URL and
+SHA-256; provisioning validates the libc and loader ELF class, endian,
+machine, PPC64 ABI flags where applicable, and a glibc version marker.
+
+| Lane | Sysroot specs | Catalog targets | Purpose |
+| --- | ---: | ---: | --- |
+| glibc 2.23 | 1 | 1 | Exact Ubuntu Xenial AMD64 legacy fake-vtable lane |
+| glibc 2.24 | 6 | 7 | Representative validation-boundary lane spanning 32/64-bit and both endians |
+| glibc 2.39 | 18 | 20 | Full baseline for every qemu-user-runnable catalog target |
+| glibc 2.41 | 8 | 9 | Representative `_flags2` layout lane spanning 32/64-bit and both endians |
+
+ARM and Thumb share one libc root per endian but are compiled and executed as
+distinct target-state runs. The 2.24 and 2.41 matrices are representative,
+not architecture-by-version cross products; their AArch64 representative is
+big-endian, while the full 2.39 lane includes both AArch64 endians. PPC32
+little-endian is explicitly unsupported because there is no standardized
+upstream Linux/glibc ABI for it. The SPARC32 baseline uses the real Ubuntu
+SPARC V8+ multilib root and requires an external `sparc64-linux-gnu-gcc -m32`
+compiler; a missing compiler is an error in an enabled run.
+
+Provision one root through the checked API (there is deliberately no implicit
+download in the normal test suite):
+
+```python
+from payloads.tests.runtime_support import provision_sysroot
+
+root = provision_sysroot(
+    "aarch64",
+    "/tmp/pwnc-runtime-sysroot-cache",
+    lane="glibc-2.39",
+)
+print(root.libc)
+print(root.compiler_argv)
+print(root.qemu_argv("/tmp/dynamic-fixture"))
+```
+
+Run every pinned spec and every target mapped by it with:
+
+```sh
+PWNC_GLIBC_QEMU_TESTS=1 \
+PWNC_GLIBC_SYSROOT_CACHE=/tmp/pwnc-runtime-sysroot-cache \
+python3 -m unittest payloads.tests.test_glibc_qemu -v
+```
+
+For a focused development run, select exact manifest IDs:
+
+```sh
+PWNC_GLIBC_QEMU_TESTS=1 \
+PWNC_GLIBC_SYSROOT_CACHE=/tmp/pwnc-runtime-sysroot-cache \
+PWNC_GLIBC_QEMU_SPECS=aarch64-glibc-2.39,amd64-xenial-glibc-2.23 \
+python3 -m unittest payloads.tests.test_glibc_qemu -v
+```
+
+With no selector, all 33 specs are mandatory. A selected run is useful
+evidence only for those IDs; development validation for this change used
+focused samples and did not execute the entire 2.39 lane in one local run.
+The FSOP support cells are QEMU-verified because the checked-in no-selector
+test contract covers all 20 mapped 2.39 target variants, not because every
+FSOP activation or exploitation precondition is covered.
+
+The dynamic fixture is invoked with the provisioned loader directly,
+`--inhibit-cache`, and an exact `--library-path`; it does not use raw `qemu -L`.
+It then requires the path reported by `dladdr` to be the provisioned libc via
+`samefile`, binds SHA-256/build ID/version to `LibcImage`, and checks the leaked
+base-plus-symbol equation. This attests the libc used by the payload. It is not
+a chroot and does not prove that every possible transitive DSO came from the
+sysroot. The qemu-user binary for this glibc suite is the named host executable,
+not a version-pinned emulator; use the separate version suite for QEMU-policy
+evidence.
+
+### Pinned QEMU releases
+
+Provision and execute the exact 7.1.0/7.2.0 boundary pair with:
+
+```sh
+python3 -m payloads.tests.provision_qemu_versions --root /tmp/pwnc-qemu
+PWNC_QEMU_VERSION_ROOT=/tmp/pwnc-qemu \
+PWNC_QEMU_VERSION_TESTS=1 \
+python3 -m unittest payloads.tests.test_qemu_versions -v
+```
+
+The provisioner downloads and verifies the official source archives, builds
+only `aarch64-linux-user`, validates each `--version` banner, hashes each output
+binary, and writes `attestation.json`. Its default builder pins the Ubuntu
+22.04 base-image digest, but the Dockerfile resolves unversioned packages from
+mutable `apt` repositories. The suite is therefore source-pinned and
+output-attested, not guaranteed to produce bit-identical binaries at a later
+date. `--native-build` is an explicit, less isolated compatibility path.
+
+### What the execution evidence means
+
+| Suite | Real runtime evidence | Test-owned or not established |
+| --- | --- | --- |
+| Native i386/AMD64 | Direct host-kernel execution and the exact loaded host libc; FSOP callback dispatch and live-base ret2libc | Compiled fixtures, supplied control transfer, and challenge preconditions |
+| General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, and materialized ROP control flow | Minimal static ELF envelopes and semantic ROP gadgets are test-owned; shellcode cases use no foreign libc |
+| Pinned glibc qemu-user | Real dynamic programs, exact pinned loader/libc identity, target-endian FSOP ingestion, live Apple 2/Cat dispatch, glibc 2.23 legacy dispatch, and x86 libc ORW/sendfile chains | Heap FILE placement, activation call, callbacks, challenge ELF, and its pivot/gadgets are test fixtures; the host QEMU version is not pinned |
+| QEMU 7.1/7.2 boundary | Exact source releases, observed banners/output hashes, and RW-versus-RX AArch64 instruction fetch | A purpose-built static probe; no libc, payload exploit, non-AArch64, or native-hardware claim |
+
+The x86 pinned-libc ROP fixture supplies the file path in writable main-image
+storage, composes `open` with either `read`/`write` or `sendfile`, deliberately
+hardcodes the observed next descriptor as fd 3, and lowers through pwntools
+using the exact challenge ELF as the extra gadget image. It verifies binary
+file output and the intended exit code. That is a real chain against the pinned
+libc and real fixture gadgets, but the fixture is not an arbitrary challenge.
 
 PPC32 little-endian remains covered by source and relocation-free assembly
-tests but is intentionally absent from QEMU evidence. With the opt-in variable
-unset, execution classes are skipped. Once `PWNC_QEMU_TESTS=1` is set, a
-missing compiler, linker, multilib runtime, or claimed emulator fails the run
-instead of silently turning it into evidence-free success. The ret2libc test
-establishes correct use of the disclosed live base; it does not claim that
-repeated QEMU runs produce different ASLR layouts.
+tests but is intentionally absent from QEMU/glibc execution evidence. With an
+opt-in variable unset, its execution classes skip. Once a suite is enabled,
+missing mandatory emulators, compilers, linkers, or runtime artifacts fail
+instead of silently becoming evidence-free success.
 
 ## Limitations
 
@@ -717,8 +832,10 @@ repeated QEMU runs produce different ASLR layouts.
 - Arbitrary-memory workflows do not turn read/write callbacks into a function
   call, instruction-cache flush, or jump. Those capabilities must be supplied
   explicitly, and GOT restoration is only best-effort while control returns.
-- QEMU payload tests do not establish native-hardware behavior and do not test
-  old-versus-new QEMU execute-permission policy.
+- QEMU payload tests do not establish native-hardware behavior. The pinned
+  old/new execute-permission result is limited to the exact upstream AArch64
+  QEMU 7.1.0/7.2.0 builds and the anonymous-mapping probe described above; it
+  is not a blanket policy assertion for every architecture or QEMU build.
 - Raw command/ORW payloads and the generic arbitrary-memory stager do not make
   memory executable by themselves. The mmap stager performs its own second
   stage RW-to-RX transition, but its first stage still needs an executable
