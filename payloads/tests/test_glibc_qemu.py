@@ -280,6 +280,10 @@ def _compile(
     target: Target,
 ) -> None:
     target_flags = ("-mthumb",) if target.arch is Architecture.THUMB else ()
+    # GCC 6 in the 2.24 SDK predates the driver's ``-no-pie`` spelling; that
+    # toolchain already links ET_EXEC by default and accepts ``-fno-pie`` for
+    # compilation.  Newer SDKs and Zig receive both compile/link switches.
+    non_pie_flags = ("-fno-pie",) if provisioned.spec.lane == "glibc-2.24" else ("-fno-pie", "-no-pie")
     command = (
         *provisioned.compiler_argv,
         *target_flags,
@@ -290,8 +294,7 @@ def _compile(
         "-O0",
         "-Wall",
         "-Wextra",
-        "-fno-pie",
-        "-no-pie",
+        *non_pie_flags,
         "-fno-stack-protector",
         "-Wl,-z,noexecstack",
         "-o",
@@ -392,6 +395,41 @@ def _protocol_header(target: Target, *sizes: int) -> bytes:
         if not 0 <= size <= _PROTOCOL_LIMIT:
             raise AssertionError(f"protocol size is out of range: {size}")
     return b"".join(size.to_bytes(4, target.endian.value) for size in sizes)
+
+
+def _io_vtable_bounds(libc: LibcImage) -> IOVtableBounds:
+    """Attest the primary-vtable range from the exact libc artifact.
+
+    Older glibc link scripts retain a dedicated ``__libc_IO_vtables`` output
+    section, which gives the validation bounds directly.  Newer release
+    artifacts may merge that input section into ``.data.rel.ro`` and strip its
+    start/stop symbols; in those artifacts the two exported, exact jump-table
+    objects bracket the biased pointer used by the supported Apple/Cat routes.
+    """
+
+    if libc.path is None:
+        raise AssertionError("live FSOP libc has no exact artifact path")
+    try:
+        from elftools.elf.elffile import ELFFile
+    except ImportError as exc:  # pragma: no cover - project dependency
+        raise AssertionError("pyelftools is required for live FSOP bounds") from exc
+
+    file_jumps = libc.offset("_IO_file_jumps")
+    wfile_jumps = libc.offset("_IO_wfile_jumps")
+    with Path(libc.path).open("rb") as stream:
+        elf = ELFFile(stream)
+        section = elf.get_section_by_name("__libc_IO_vtables")
+        if section is not None:
+            start = int(section.header.sh_addr)
+            end = start + int(section.header.sh_size)
+            if not (start <= file_jumps < end and start <= wfile_jumps < end):
+                raise AssertionError("exact __libc_IO_vtables section does not contain both exported jump tables")
+            source = "exact libc __libc_IO_vtables ELF section"
+        else:
+            start = min(file_jumps, wfile_jumps)
+            end = max(file_jumps, wfile_jumps) + 21 * libc.target.word_size
+            source = "exact libc exported _IO_file_jumps/_IO_wfile_jumps bracket"
+    return IOVtableBounds.from_libc_offsets(libc, start, end, source=source)
 
 
 def _auxiliary_image(test: unittest.TestCase, writes: Iterable[object], base: int, capacity: int) -> bytes:
@@ -508,12 +546,7 @@ class GlibcQemuFSOPTests(unittest.TestCase):
 
             bounds = None
             if family is FSOPFamily.WIDE:
-                bounds = IOVtableBounds.from_libc_offsets(
-                    libc,
-                    libc.offset("_IO_file_jumps"),
-                    libc.offset("_IO_wfile_jumps") + 21 * libc.target.word_size,
-                    source="exact live libc _IO_file_jumps.._IO_wfile_jumps span",
-                )
+                bounds = _io_vtable_bounds(libc)
             builder = FSOP(
                 libc,
                 stream=FSOPStream.HEAP,
