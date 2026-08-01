@@ -31,6 +31,7 @@ from payloads import (
     SUPPORTED_TARGETS,
     Address,
     Architecture,
+    ELFProfile,
     ExactELFAdapter,
     FSOPActivation,
     FSOPFamily,
@@ -423,6 +424,8 @@ class GlibcQemuFSOPTests(unittest.TestCase):
                     _assert_compiled_target(self, profile.target, target)
                     self.assertFalse(profile.pie)
                     self.assertIs(profile.linkage, Linkage.DYNAMIC)
+                    self.assertTrue(profile.nx, profile.nx_evidence)
+                    self.assertEqual(profile.interpreter, f"/{spec.loader}")
 
                     if spec.lane == "glibc-2.23":
                         routes = (("fflush", FSOPFamily.LEGACY, FSOPActivation.FFLUSH, None),)
@@ -448,7 +451,7 @@ class GlibcQemuFSOPTests(unittest.TestCase):
         self,
         provisioned: ProvisionedSysroot,
         executable: Path,
-        profile: object,
+        profile: ELFProfile,
         intended_target: Target,
         route: str,
         family: FSOPFamily,
@@ -570,6 +573,8 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                 _assert_compiled_target(self, profile.target, target)
                 self.assertFalse(profile.pie)
                 self.assertIs(profile.linkage, Linkage.DYNAMIC)
+                self.assertTrue(profile.nx, profile.nx_evidence)
+                self.assertEqual(profile.interpreter, f"/{spec.loader}")
                 main_adapter = ExactELFAdapter.from_file(executable, expected_target=target)
                 expected = bytes(range(256)) + b"\0PWNC libc ROP\n"
                 input_file = root / "orw-input"
@@ -591,7 +596,7 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
         self,
         provisioned: ProvisionedSysroot,
         executable: Path,
-        profile: object,
+        profile: ELFProfile,
         main_adapter: ExactELFAdapter,
         target: Target,
         input_file: Path,
@@ -629,6 +634,9 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                 chain_base, profile.symbol_offsets["pwnc_chain"] + 0xF0000 + (8 if target.bits == 32 else 0)
             )
             self.assertEqual(storage_address, profile.symbol_offsets["pwnc_storage"])
+            chain_mapping = next(item for item in profile.load_ranges if item.contains(chain_base, 0x10000))
+            self.assertTrue(chain_mapping.writable)
+            self.assertFalse(chain_mapping.executable)
             builder = LibcROPBuilder.from_file(
                 provisioned.libc,
                 input_file,
