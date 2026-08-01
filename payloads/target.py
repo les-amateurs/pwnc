@@ -353,17 +353,6 @@ _BIG_ENDIAN_ALIASES = {
     "aarch64_be",
     "mipseb",
     "mips64eb",
-    "powerpc",
-    "powerpc32",
-    "ppc",
-    "ppc32",
-    "powerpc64",
-    "ppc64",
-    "sparc",
-    "sparc32",
-    "sparc64",
-    "s390",
-    "s390x",
 }
 _LITTLE_ENDIAN_ALIASES = {"mipsel", "mips64el", "powerpcle", "ppcle", "powerpc64le", "ppc64le"}
 

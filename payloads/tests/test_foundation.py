@@ -51,6 +51,10 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(big.pack(0x11223344), b"\x11\x22\x33\x44")
         self.assertEqual(big.unpack(b"\x11\x22\x33\x44"), 0x11223344)
 
+    def test_explicit_endian_overrides_unsuffixed_powerpc_default(self) -> None:
+        self.assertEqual(resolve_target("powerpc32", endian="little"), resolve_target("powerpcle"))
+        self.assertEqual(resolve_target("ppc64", endian="little"), resolve_target("ppc64le"))
+
     def test_conflicting_alias_is_rejected(self) -> None:
         with self.assertRaises(UnsupportedTargetError):
             resolve_target("mipsel", endian="big")

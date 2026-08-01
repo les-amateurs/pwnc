@@ -16,13 +16,13 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import TypeAlias
 
 from .errors import AddressResolutionError, PayloadError, UnsupportedTargetError
-from .libc import LibcImage
+from .libc import LibcIdentity, LibcImage
 from .model import Address, Image, Payload, PayloadKind, RuntimeLayout
 from .target import ABI, Architecture, FunctionPointerModel, Target
 
@@ -101,7 +101,80 @@ class AddressExpression:
         return AddressExpression(self.base, self.addend - subtrahend)
 
 
-AddressValue: TypeAlias = int | Address | AddressExpression
+@dataclass(frozen=True, slots=True)
+class LibcBoundAddress:
+    """A libc-relative address tied to one exact libc artifact.
+
+    A plain ``Address(..., Image.LIBC)`` says only which runtime base to add;
+    it cannot say which artifact supplied the offset.  Ret2libc builders use
+    this record to prevent combining command, gadget, and symbol offsets from
+    different libc builds while retaining late ASLR resolution.
+    """
+
+    identity: LibcIdentity
+    offset: int
+    label: str | None = None
+    addend: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, LibcIdentity):
+            raise TypeError("LibcBoundAddress.identity must be a LibcIdentity")
+        if isinstance(self.offset, bool) or not isinstance(self.offset, int):
+            raise TypeError("LibcBoundAddress.offset must be an int")
+        if self.offset < 0:
+            raise ValueError("LibcBoundAddress.offset cannot be negative")
+        if isinstance(self.addend, bool) or not isinstance(self.addend, int):
+            raise TypeError("LibcBoundAddress.addend must be an int")
+
+    @classmethod
+    def from_image(
+        cls,
+        libc: LibcImage,
+        offset: int,
+        label: str | None = None,
+    ) -> LibcBoundAddress:
+        return cls(libc.identity, offset, label)
+
+    @property
+    def base(self) -> Address:
+        """The underlying symbolic libc address, without losing provenance."""
+
+        return Address(self.offset, Image.LIBC, self.label)
+
+    def resolve(self, layout: RuntimeLayout | None = None) -> int:
+        return self.base.resolve(layout) + self.addend
+
+    def __add__(self, addend: int) -> LibcBoundAddress:
+        if not isinstance(addend, int):
+            return NotImplemented
+        return LibcBoundAddress(self.identity, self.offset, self.label, self.addend + addend)
+
+    def __sub__(self, subtrahend: int) -> LibcBoundAddress:
+        if not isinstance(subtrahend, int):
+            return NotImplemented
+        return LibcBoundAddress(self.identity, self.offset, self.label, self.addend - subtrahend)
+
+
+def bind_libc_address(
+    libc: LibcImage,
+    offset_or_symbol: int | str,
+    label: str | None = None,
+) -> LibcBoundAddress:
+    """Bind a libc-relative offset or loaded symbol to ``libc.identity``."""
+
+    if not isinstance(libc, LibcImage):
+        raise TypeError("libc must be a LibcImage")
+    if isinstance(offset_or_symbol, str):
+        offset = libc.offset(offset_or_symbol)
+        label = offset_or_symbol if label is None else label
+    elif isinstance(offset_or_symbol, bool) or not isinstance(offset_or_symbol, int):
+        raise TypeError("libc address must be an int offset or symbol name")
+    else:
+        offset = offset_or_symbol
+    return LibcBoundAddress.from_image(libc, offset, label)
+
+
+AddressValue: TypeAlias = int | Address | AddressExpression | LibcBoundAddress
 
 
 class PointerKind(str, Enum):
@@ -113,8 +186,8 @@ class PointerKind(str, Enum):
 
 
 def _check_address_value(value: object, description: str = "word") -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, Address, AddressExpression)):
-        raise TypeError(f"{description} must be int, Address, or AddressExpression")
+    if isinstance(value, bool) or not isinstance(value, (int, Address, AddressExpression, LibcBoundAddress)):
+        raise TypeError(f"{description} must be int, Address, AddressExpression, or LibcBoundAddress")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +204,7 @@ class ChainWord:
             object.__setattr__(self, "pointer_kind", PointerKind(self.pointer_kind))
 
     def resolve(self, target: Target, layout: RuntimeLayout | None = None) -> int:
-        if isinstance(self.value, (Address, AddressExpression)):
+        if isinstance(self.value, (Address, AddressExpression, LibcBoundAddress)):
             value = self.value.resolve(layout)
         else:
             value = self.value
@@ -157,14 +230,16 @@ def _runtime_word_equivalent(target: Target, left: WordValue, right: WordValue) 
     left_word = left if isinstance(left, ChainWord) else ChainWord(left)
     right_word = right if isinstance(right, ChainWord) else ChainWord(right)
 
-    def address_key(value: AddressValue) -> tuple[object, int, int]:
+    def address_key(value: AddressValue) -> tuple[object, int, int, str | None]:
+        if isinstance(value, LibcBoundAddress):
+            return Image.LIBC.value, value.offset, value.addend, value.identity.sha256
         if isinstance(value, AddressExpression):
             image = value.base.image.value if isinstance(value.base.image, Image) else value.base.image
-            return image, value.base.value, value.addend
+            return image, value.base.value, value.addend, None
         if isinstance(value, Address):
             image = value.image.value if isinstance(value.image, Image) else value.image
-            return image, value.value, 0
-        return Image.ABSOLUTE.value, value, 0
+            return image, value.value, 0, None
+        return Image.ABSOLUTE.value, value, 0, None
 
     def conversion_key(kind: PointerKind) -> str:
         model = target.function_pointer_model
@@ -180,6 +255,82 @@ def _runtime_word_equivalent(target: Target, left: WordValue, right: WordValue) 
 
 
 @dataclass(frozen=True, slots=True)
+class CallFrame:
+    """Concrete stack contract at the called function's entry point.
+
+    ``entry_sp_offset`` is measured from the address of ``ROPChain.words[0]``.
+    ``entry_sp_alignment_bias`` expresses ABIs such as x86 SysV, where the
+    return-address-sized bias, rather than SP itself, is aligned.  The first
+    ``caller_area_size`` bytes at entry SP are emitted by the chain and are
+    available to the callee as its mandatory caller-owned area.
+    """
+
+    entry_sp_offset: int
+    entry_sp_alignment: int
+    caller_area_size: int = 0
+    entry_sp_alignment_bias: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("entry_sp_offset", self.entry_sp_offset),
+            ("entry_sp_alignment", self.entry_sp_alignment),
+            ("caller_area_size", self.caller_area_size),
+            ("entry_sp_alignment_bias", self.entry_sp_alignment_bias),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"CallFrame.{name} must be an int")
+        if self.entry_sp_offset < 0:
+            raise ValueError("CallFrame.entry_sp_offset cannot be negative")
+        if self.entry_sp_alignment <= 0 or self.entry_sp_alignment & (self.entry_sp_alignment - 1):
+            raise ValueError("CallFrame.entry_sp_alignment must be a positive power of two")
+        if self.caller_area_size < 0:
+            raise ValueError("CallFrame.caller_area_size cannot be negative")
+        if not 0 <= self.entry_sp_alignment_bias < self.entry_sp_alignment:
+            raise ValueError("CallFrame.entry_sp_alignment_bias must be smaller than the alignment")
+
+    @property
+    def function_entry_sp_offset(self) -> int:
+        """Descriptive alias for :attr:`entry_sp_offset`."""
+
+        return self.entry_sp_offset
+
+    @property
+    def stack_alignment(self) -> int:
+        """Descriptive alias for :attr:`entry_sp_alignment`."""
+
+        return self.entry_sp_alignment
+
+    @property
+    def reserved_bytes(self) -> int:
+        """Descriptive alias for :attr:`caller_area_size`."""
+
+        return self.caller_area_size
+
+    @property
+    def required_chain_base_remainder(self) -> int:
+        """The chain-base residue modulo alignment required by this frame."""
+
+        return (-self.entry_sp_offset - self.entry_sp_alignment_bias) % self.entry_sp_alignment
+
+    def entry_sp_for(self, chain_base: int) -> int:
+        if isinstance(chain_base, bool) or not isinstance(chain_base, int):
+            raise TypeError("chain_base must be an int")
+        return chain_base + self.entry_sp_offset
+
+    def validate_entry_sp(self, entry_sp: int) -> int:
+        """Validate and return a concrete function-entry stack pointer."""
+
+        if isinstance(entry_sp, bool) or not isinstance(entry_sp, int):
+            raise TypeError("entry_sp must be an int")
+        if entry_sp < 0:
+            raise ROPBuildError("function-entry SP cannot be negative")
+        if (entry_sp + self.entry_sp_alignment_bias) % self.entry_sp_alignment:
+            bias = f" after adding bias {self.entry_sp_alignment_bias}" if self.entry_sp_alignment_bias else ""
+            raise ROPBuildError(f"function-entry SP {entry_sp:#x} is not {self.entry_sp_alignment}-byte aligned{bias}")
+        return entry_sp
+
+
+@dataclass(frozen=True, slots=True)
 class ROPChain:
     """An immutable symbolic ROP chain."""
 
@@ -188,15 +339,24 @@ class ROPChain:
     description: str = "ROP chain"
     kind: PayloadKind = PayloadKind.ROP
     steps: tuple[str, ...] = ()
+    call_frame: CallFrame | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "words", tuple(self.words))
         object.__setattr__(self, "steps", tuple(self.steps))
         if not isinstance(self.kind, PayloadKind):
             object.__setattr__(self, "kind", PayloadKind(self.kind))
+        if self.call_frame is not None and not isinstance(self.call_frame, CallFrame):
+            raise TypeError("ROPChain.call_frame must be a CallFrame or None")
         for word in self.words:
             if not isinstance(word, ChainWord):
                 raise TypeError("ROPChain.words must contain ChainWord records")
+        if self.call_frame is not None:
+            end = self.call_frame.entry_sp_offset + self.call_frame.caller_area_size
+            if end > self.byte_length:
+                raise ROPBuildError("call frame's mandatory caller area extends beyond the emitted chain")
+            if self.call_frame.caller_area_size % self.target.word_size:
+                raise ROPBuildError("call frame's mandatory caller area must contain whole target words")
 
     @property
     def word_count(self) -> int:
@@ -206,23 +366,100 @@ class ROPChain:
     def byte_length(self) -> int:
         return self.word_count * self.target.word_size
 
+    @property
+    def function_entry_sp_offset(self) -> int | None:
+        return self.call_frame.entry_sp_offset if self.call_frame is not None else None
+
+    @property
+    def function_entry_sp_alignment(self) -> int | None:
+        return self.call_frame.entry_sp_alignment if self.call_frame is not None else None
+
+    def function_entry_sp(self, chain_base: int) -> int:
+        """Return function-entry SP for a concrete address of ``words[0]``."""
+
+        if self.call_frame is None:
+            raise ROPBuildError("this ROP chain does not describe a function call")
+        return self.call_frame.entry_sp_for(chain_base)
+
+    def validate_call_frame(
+        self,
+        chain_base: int | None = None,
+        *,
+        entry_sp: int | None = None,
+    ) -> int:
+        """Validate a concrete chain base, entry SP, or both against the ABI."""
+
+        if self.call_frame is None:
+            raise ROPBuildError("this ROP chain does not describe a function call")
+        if chain_base is None and entry_sp is None:
+            raise TypeError("chain_base or entry_sp is required")
+        expected_entry_sp: int | None = None
+        if chain_base is not None:
+            if isinstance(chain_base, bool) or not isinstance(chain_base, int):
+                raise TypeError("chain_base must be an int")
+            if not 0 <= chain_base <= self.target.mask:
+                raise ROPBuildError(f"chain base {chain_base:#x} does not fit the target pointer width")
+            expected_entry_sp = self.call_frame.entry_sp_for(chain_base)
+        if entry_sp is None:
+            entry_sp = expected_entry_sp
+        elif isinstance(entry_sp, bool) or not isinstance(entry_sp, int):
+            raise TypeError("entry_sp must be an int")
+        if expected_entry_sp is not None and entry_sp != expected_entry_sp:
+            raise ROPBuildError(
+                f"function-entry SP {entry_sp:#x} does not equal chain base plus entry offset ({expected_entry_sp:#x})"
+            )
+        assert entry_sp is not None
+        if entry_sp > self.target.mask:
+            raise ROPBuildError(f"function-entry SP {entry_sp:#x} does not fit the target pointer width")
+        return self.call_frame.validate_entry_sp(entry_sp)
+
+    def validate_entry_sp(self, entry_sp: int, *, chain_base: int | None = None) -> int:
+        """Convenience alias for entry-SP-oriented validation."""
+
+        return self.validate_call_frame(chain_base, entry_sp=entry_sp)
+
     def resolved_words(self, layout: RuntimeLayout | None = None) -> tuple[int, ...]:
         """Resolve every address, including Thumb/function-pointer semantics."""
 
         return tuple(word.resolve(self.target, layout) for word in self.words)
 
-    def materialize(self, layout: RuntimeLayout | None = None) -> bytes:
+    def materialize(
+        self,
+        layout: RuntimeLayout | None = None,
+        *,
+        chain_base: int | None = None,
+        entry_sp: int | None = None,
+    ) -> bytes:
         """Resolve and target-pack the complete chain."""
 
+        if chain_base is not None or entry_sp is not None:
+            self.validate_call_frame(chain_base, entry_sp=entry_sp)
         return b"".join(self.target.pack(value) for value in self.resolved_words(layout))
 
-    def as_payload(self, layout: RuntimeLayout | None = None) -> Payload:
+    def as_payload(
+        self,
+        layout: RuntimeLayout | None = None,
+        *,
+        chain_base: int | None = None,
+        entry_sp: int | None = None,
+    ) -> Payload:
+        metadata: dict[str, object] = {
+            "word_roles": tuple(word.role for word in self.words),
+            "steps": self.steps,
+        }
+        if self.call_frame is not None:
+            metadata["call_frame"] = {
+                "entry_sp_offset": self.call_frame.entry_sp_offset,
+                "entry_sp_alignment": self.call_frame.entry_sp_alignment,
+                "entry_sp_alignment_bias": self.call_frame.entry_sp_alignment_bias,
+                "caller_area_size": self.call_frame.caller_area_size,
+            }
         return Payload(
-            self.materialize(layout),
+            self.materialize(layout, chain_base=chain_base, entry_sp=entry_sp),
             self.target,
             self.kind,
             self.description,
-            metadata={"word_roles": tuple(word.role for word in self.words), "steps": self.steps},
+            metadata=metadata,
         )
 
 
@@ -275,6 +512,13 @@ class SemanticGadget:
             raise ROPBuildError("every gadget register slot must be inside its stack frame")
         if len(set(register_slots.values())) != len(register_slots):
             raise ROPBuildError("one gadget frame slot cannot supply multiple register loads")
+        clobbers = frozenset(str(register) for register in self.clobbers)
+        if any(not register for register in clobbers):
+            raise ROPBuildError("gadget clobber register names cannot be empty")
+        contradictory = frozenset(register_slots).intersection(clobbers)
+        if contradictory:
+            names = ", ".join(sorted(contradictory))
+            raise ROPBuildError(f"gadget registers cannot be both stack-loaded and clobbered: {names}")
         next_pc_loads = tuple(register for register, slot in register_slots.items() if slot == self.next_pc_slot)
         if self.next_pc_register is None:
             if next_pc_loads:
@@ -298,7 +542,7 @@ class SemanticGadget:
 
         object.__setattr__(self, "register_slots", MappingProxyType(register_slots))
         object.__setattr__(self, "fixed_slots", MappingProxyType(fixed_slots))
-        object.__setattr__(self, "clobbers", frozenset(str(register) for register in self.clobbers))
+        object.__setattr__(self, "clobbers", clobbers)
 
     @property
     def loaded_registers(self) -> frozenset[str]:
@@ -430,7 +674,9 @@ def build_register_chain(
     else:
         words.append(terminal)
 
-    words.extend(_word(value, f"tail[{index}]") for index, value in enumerate(tail))
+    words.extend(
+        value if isinstance(value, ChainWord) else _word(value, f"tail[{index}]") for index, value in enumerate(tail)
+    )
     return ROPChain(
         target,
         tuple(words),
@@ -456,9 +702,48 @@ def _ensure_direct_call_supported(target: Target) -> None:
 
 
 def _is_relative_to(value: AddressValue, image: Image) -> bool:
+    if isinstance(value, LibcBoundAddress):
+        return image is Image.LIBC
     if isinstance(value, AddressExpression):
         value = value.base
     return isinstance(value, Address) and (value.image is image or value.image == image.value)
+
+
+def _require_libc_binding(libc: LibcImage, value: WordValue, description: str) -> None:
+    """Reject an unbound or differently-bound libc-relative chain word."""
+
+    address = value.value if isinstance(value, ChainWord) else value
+    if isinstance(address, LibcBoundAddress):
+        if address.identity.sha256 != libc.identity.sha256:
+            raise ROPBuildError(
+                f"{description} belongs to libc {address.identity.sha256[:12]}, "
+                f"not selected libc {libc.identity.sha256[:12]}"
+            )
+        return
+    if _is_relative_to(address, Image.LIBC):
+        raise ROPBuildError(
+            f"{description} is libc-relative but has no exact LibcIdentity binding; use bind_libc_address()"
+        )
+
+
+def _mandatory_caller_area_size(target: Target) -> int:
+    """Return bytes the ABI requires the caller to expose at entry SP."""
+
+    return {
+        ABI.MIPS_O32: 16,
+        ABI.POWERPC_SYSV: 16,
+        ABI.POWERPC64_ELFV2: 32,
+        ABI.S390X_SYSV: 160,
+    }.get(target.abi, 0)
+
+
+def _entry_sp_alignment_bias(target: Target) -> int:
+    # SysV x86 aligns the pre-call stack.  The hardware-pushed return address
+    # means entry SP plus one target word, rather than entry SP itself, is the
+    # aligned value.  Link-register ABIs enter with an unbiased SP.
+    if target.abi in {ABI.I386_SYSV, ABI.AMD64_SYSV}:
+        return target.word_size
+    return 0
 
 
 def build_call(
@@ -479,13 +764,14 @@ def build_call(
     i386 SysV uses its real cdecl shape: ``function, return, arguments...``.
     Register ABIs require caller-supplied :class:`SemanticGadget` records.
     AMD64 stack arguments beyond the first six are supported; other register
-    ABIs currently reject overflow arguments instead of guessing at ABI home
-    areas or aggregate layout.
+    ABIs currently reject overflow arguments instead of guessing at their
+    placement or aggregate layout.  Mandatory caller-owned areas are emitted
+    for MIPS o32, PPC32, PPC64 ELFv2, and s390x.
 
     MIPS shared-library entries conventionally require ``t9`` to contain the
     function address, and PPC64 ELFv2 global entries require ``r12``.  These are
-    prepared automatically for libc-relative functions, or explicitly with
-    ``prepare_abi_function_address=True``.
+    prepared automatically for libc-relative functions; static ELFv2 calls
+    also request ``r12`` explicitly.
     """
 
     _ensure_direct_call_supported(target)
@@ -506,7 +792,7 @@ def build_call(
             raise UnsupportedROPError(
                 "stack function arguments",
                 target,
-                f"only {register_capacity} word arguments fit registers; this ABI's overflow/home area is not modeled",
+                f"only {register_capacity} word arguments fit registers; overflow argument placement is not modeled",
             )
         for register, value in zip(convention.function_arguments, arguments):
             if register in register_values:
@@ -548,16 +834,35 @@ def build_call(
         else:
             register_values[call_address_register] = required
 
-    return build_register_chain(
+    caller_area_size = _mandatory_caller_area_size(target)
+    if caller_area_size % target.word_size:
+        raise ROPBuildError("ABI caller-area size is not representable as target words")
+    filler_value = filler.value if isinstance(filler, ChainWord) else filler
+    caller_area = tuple(
+        ChainWord(filler_value, f"ABI caller area[{index}]", PointerKind.DATA)
+        for index in range(caller_area_size // target.word_size)
+    )
+    complete_tail = (*tail, *caller_area)
+    chain = build_register_chain(
         target,
         register_values,
         gadgets,
         function,
         continuation_kind=PointerKind.FUNCTION,
         filler=filler,
-        tail=tail,
+        tail=complete_tail,
         description=description,
         kind=kind,
+    )
+    entry_sp_offset = (chain.word_count - len(complete_tail)) * target.word_size
+    return replace(
+        chain,
+        call_frame=CallFrame(
+            entry_sp_offset=entry_sp_offset,
+            entry_sp_alignment=convention.stack_alignment,
+            entry_sp_alignment_bias=_entry_sp_alignment_bias(target),
+            caller_area_size=caller_area_size,
+        ),
     )
 
 
@@ -619,9 +924,25 @@ def build_ret2libc_system(
     extra_registers: Mapping[str, WordValue] | None = None,
     filler: WordValue = 0,
 ) -> ROPChain:
-    """Build ``system(command)`` against one exact dynamic libc artifact."""
+    """Build ``system(command)`` against one exact dynamic libc artifact.
 
-    function = Address(libc.offset(system_symbol), Image.LIBC, system_symbol)
+    Every libc-relative operand must be a :class:`LibcBoundAddress` produced by
+    :func:`bind_libc_address`.  Absolute and other-image data addresses remain
+    valid because their provenance is independent of the selected libc.
+    """
+
+    _require_libc_binding(libc, command, "command address")
+    if return_to is not None:
+        _require_libc_binding(libc, return_to, "return address")
+    for register, value in (extra_registers or {}).items():
+        _require_libc_binding(libc, value, f"extra register {register}")
+    _require_libc_binding(libc, filler, "filler")
+    for gadget in gadgets:
+        _require_libc_binding(libc, gadget.address, f"gadget {gadget.description!r}")
+        for slot, value in gadget.fixed_slots.items():
+            _require_libc_binding(libc, value, f"gadget {gadget.description!r} fixed slot {slot}")
+
+    function = bind_libc_address(libc, system_symbol)
     return build_call(
         libc.target,
         function,
@@ -658,7 +979,7 @@ def build_static_call(
         return_to=return_to,
         extra_registers=extra_registers,
         filler=filler,
-        prepare_abi_function_address=False,
+        prepare_abi_function_address=target.abi is ABI.POWERPC64_ELFV2,
         description=f"static main-image call to {label}",
     )
 
@@ -695,14 +1016,17 @@ __all__ = [
     "AddressExpression",
     "AddressResolutionError",
     "AddressValue",
+    "CallFrame",
     "ChainWord",
     "GadgetSelectionError",
+    "LibcBoundAddress",
     "PointerKind",
     "ROPBuildError",
     "ROPChain",
     "SemanticGadget",
     "UnsupportedROPError",
     "WordValue",
+    "bind_libc_address",
     "build_call",
     "build_register_chain",
     "build_ret2libc_system",

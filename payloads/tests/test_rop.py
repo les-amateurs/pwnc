@@ -8,8 +8,10 @@ from payloads.rop import (
     ChainWord,
     GadgetSelectionError,
     PointerKind,
+    ROPBuildError,
     SemanticGadget,
     UnsupportedROPError,
+    bind_libc_address,
     build_call,
     build_register_chain,
     build_ret2libc_system,
@@ -48,7 +50,7 @@ class DeferredAddressTests(unittest.TestCase):
             "pop rdi; ret",
         )
         libc = LibcImage(LibcIdentity("01" * 32), target, {"system": 0x52290})
-        command = Address(0x1B45BD, Image.LIBC, "/bin/sh")
+        command = bind_libc_address(libc, 0x1B45BD, "/bin/sh")
         chain = build_ret2libc_system(libc, command, gadgets=(gadget,), return_to=0)
 
         self.assertEqual(chain.kind, PayloadKind.RET2LIBC)
@@ -67,14 +69,77 @@ class DeferredAddressTests(unittest.TestCase):
         )
 
 
+class LibcProvenanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.target = resolve_target("x86_64")
+        self.libc = LibcImage(LibcIdentity("10" * 32), self.target, {"system": 0x50000})
+        self.other_libc = LibcImage(LibcIdentity("20" * 32), self.target, {"system": 0x50000})
+
+    def test_libc_relative_command_must_be_bound_to_selected_identity(self) -> None:
+        with self.assertRaisesRegex(ROPBuildError, "no exact LibcIdentity binding"):
+            build_ret2libc_system(self.libc, Address(0x180000, Image.LIBC))
+        with self.assertRaisesRegex(ROPBuildError, self.other_libc.identity.sha256[:12]):
+            build_ret2libc_system(self.libc, bind_libc_address(self.other_libc, 0x180000))
+
+    def test_libc_relative_gadget_must_be_bound_to_selected_identity(self) -> None:
+        raw_gadget = SemanticGadget(
+            self.target,
+            Address(0x1000, Image.LIBC, "pop rdi; ret"),
+            2,
+            {"rdi": 0},
+            1,
+            "libc pop rdi",
+        )
+        with self.assertRaisesRegex(ROPBuildError, "gadget .* no exact LibcIdentity binding"):
+            build_ret2libc_system(
+                self.libc,
+                Address(0x80, Image.STACK, "command buffer"),
+                gadgets=(raw_gadget,),
+            )
+
+        wrong_gadget = SemanticGadget(
+            self.target,
+            bind_libc_address(self.other_libc, 0x1000, "pop rdi; ret"),
+            2,
+            {"rdi": 0},
+            1,
+            "other-libc pop rdi",
+        )
+        with self.assertRaisesRegex(ROPBuildError, self.other_libc.identity.sha256[:12]):
+            build_ret2libc_system(
+                self.libc,
+                Address(0x80, Image.STACK, "command buffer"),
+                gadgets=(wrong_gadget,),
+            )
+
+    def test_bound_gadget_and_non_libc_command_stay_symbolic(self) -> None:
+        gadget = SemanticGadget(
+            self.target,
+            bind_libc_address(self.libc, 0x1000, "pop rdi; ret"),
+            2,
+            {"rdi": 0},
+            1,
+            "libc pop rdi",
+        )
+        command = Address(0x80, Image.STACK, "command buffer")
+        chain = build_ret2libc_system(self.libc, command, gadgets=(gadget,))
+
+        with self.assertRaises(AddressResolutionError):
+            chain.materialize()
+        self.assertEqual(
+            chain.resolved_words(RuntimeLayout(libc_base=0x70000000, stack_base=0x7FFFFFF0)),
+            (0x70001000, 0x80000070, 0x70050000, 0),
+        )
+
+
 class CallingConventionTests(unittest.TestCase):
     def test_i386_ret2libc_uses_real_cdecl_stack_shape_and_little_endian_words(self) -> None:
         target = resolve_target("x86")
         libc = LibcImage(LibcIdentity("02" * 32), target, {"system": 0x3ADA0, "exit": 0x2E9D0})
         chain = build_ret2libc_system(
             libc,
-            Address(0x15BA0B, Image.LIBC, "/bin/sh"),
-            return_to=Address(0x2E9D0, Image.LIBC, "exit"),
+            bind_libc_address(libc, 0x15BA0B, "/bin/sh"),
+            return_to=bind_libc_address(libc, "exit"),
         )
         layout = RuntimeLayout(libc_base=0xF7D00000)
         expected = (0xF7D3ADA0, 0xF7D2E9D0, 0xF7E5BA0B)
@@ -143,13 +208,20 @@ class CallingConventionTests(unittest.TestCase):
         libc = LibcImage(LibcIdentity("03" * 32), target, {"system": 0x41000})
         chain = build_ret2libc_system(
             libc,
-            Address(0x100000, Image.LIBC),
+            bind_libc_address(libc, 0x100000, "/bin/sh"),
             gadgets=(gadget,),
             return_to=0,
         )
         words = chain.resolved_words(RuntimeLayout(libc_base=0x70000000))
 
-        self.assertEqual(words, (0x1000, 0x70100000, 0x70041000, 0, 0))
+        self.assertEqual(words, (0x1000, 0x70100000, 0x70041000, 0, 0, 0, 0, 0, 0))
+        self.assertIsNotNone(chain.call_frame)
+        self.assertEqual(chain.call_frame.caller_area_size, 16)
+        self.assertEqual(chain.function_entry_sp_offset, 20)
+        self.assertEqual(chain.function_entry_sp_alignment, 8)
+        self.assertEqual(chain.validate_call_frame(0x70000004), 0x70000018)
+        with self.assertRaises(ROPBuildError):
+            chain.materialize(RuntimeLayout(libc_base=0x70000000), chain_base=0x70000000)
 
     def test_aarch64_call_needs_distinct_branch_and_return_registers(self) -> None:
         target = resolve_target("arm64")
@@ -180,6 +252,11 @@ class CallingConventionTests(unittest.TestCase):
 
 
 class SemanticGadgetTests(unittest.TestCase):
+    def test_register_slot_cannot_also_be_declared_clobbered(self) -> None:
+        target = resolve_target("x86_64")
+        with self.assertRaisesRegex(ROPBuildError, "both stack-loaded and clobbered: rdi"):
+            SemanticGadget(target, 0x1000, 2, {"rdi": 0}, 1, clobbers={"rdi"})
+
     def test_primary_register_abis_use_caller_supplied_semantics(self) -> None:
         aliases = (
             "x86_64",
@@ -289,6 +366,75 @@ class StaticAndPeculiarAbiTests(unittest.TestCase):
 
         self.assertEqual(call.resolved_words(layout), (0x400100, 0xCAFE, 0x400500, 0))
         self.assertEqual(syscall.resolved_words(layout), (0x400200, 60, 0, 0x400600))
+
+    def test_static_ppc64_elfv2_prepares_r12_and_reserves_minimum_frame(self) -> None:
+        target = resolve_target("powerpc64le")
+        gadget = SemanticGadget(
+            target,
+            Address(0x100, Image.MAIN, "restore and branch ctr"),
+            4,
+            {"r3": 0, "lr": 1, "r12": 2, "ctr": 3},
+            3,
+            "restore r3, lr, r12, ctr; bctr",
+            next_pc_register="ctr",
+        )
+        chain = build_static_call(
+            target,
+            0x500,
+            (7,),
+            gadgets=(gadget,),
+            return_to=Address(0x900, Image.MAIN, "return"),
+        )
+        layout = RuntimeLayout(main_base=0x10000000)
+
+        self.assertEqual(
+            chain.resolved_words(layout),
+            (0x10000100, 7, 0x10000900, 0x10000500, 0x10000500, 0, 0, 0, 0),
+        )
+        self.assertEqual(chain.call_frame.caller_area_size, 32)
+        self.assertEqual(chain.call_frame.entry_sp_offset, 40)
+        self.assertEqual(chain.call_frame.entry_sp_alignment, 16)
+        self.assertEqual(chain.call_frame.required_chain_base_remainder, 8)
+        self.assertEqual(chain.validate_entry_sp(0x10000030, chain_base=0x10000008), 0x10000030)
+
+    def test_powerpc32_calls_reserve_the_linkage_frame_in_both_byte_orders(self) -> None:
+        for endian in ("big", "little"):
+            with self.subTest(endian=endian):
+                target = resolve_target("powerpc32", endian=endian)
+                gadget = SemanticGadget(
+                    target,
+                    0x1000,
+                    3,
+                    {"r3": 0, "lr": 1, "ctr": 2},
+                    2,
+                    "restore argument, lr, ctr; bctr",
+                    next_pc_register="ctr",
+                )
+                chain = build_call(target, 0x4000, (7,), gadgets=(gadget,), return_to=0x5000)
+
+                self.assertEqual(chain.resolved_words(), (0x1000, 7, 0x5000, 0x4000, 0, 0, 0, 0))
+                self.assertEqual(chain.call_frame.caller_area_size, 16)
+                self.assertEqual(chain.call_frame.entry_sp_alignment, 16)
+
+    def test_s390x_call_reserves_caller_save_area(self) -> None:
+        target = resolve_target("s390x")
+        gadget = SemanticGadget(
+            target,
+            0x1000,
+            3,
+            {"r2": 0, "r14": 1, "r1": 2},
+            2,
+            "restore argument, return, and branch register",
+            next_pc_register="r1",
+        )
+        chain = build_call(target, 0x4000, (7,), gadgets=(gadget,), return_to=0x5000)
+
+        self.assertEqual(chain.resolved_words()[:4], (0x1000, 7, 0x5000, 0x4000))
+        self.assertEqual(chain.resolved_words()[4:], (0,) * 20)
+        self.assertEqual(chain.call_frame.caller_area_size, 160)
+        self.assertEqual(chain.call_frame.entry_sp_offset, 32)
+        self.assertEqual(chain.call_frame.entry_sp_alignment, 8)
+        self.assertEqual(chain.validate_call_frame(entry_sp=0x7FFFFFE0), 0x7FFFFFE0)
 
     def test_ppc64_elfv1_function_calls_are_rejected_but_syscalls_are_not(self) -> None:
         target = resolve_target("ppc64")
