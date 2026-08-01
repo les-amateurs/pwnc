@@ -12,6 +12,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+from pwnlib.context import context as pwntools_context
+from pwnlib.util.packing import pack as pwntools_pack
+from pwnlib.util.packing import unpack as pwntools_unpack
+
 from .errors import UnsupportedTargetError
 
 
@@ -106,6 +110,28 @@ class Target:
         suffix = "le" if self.endian is Endian.LITTLE else "be"
         return f"{self.arch.value}-{suffix}-{self.abi.value}"
 
+    def local_context(self):
+        """Return an isolated pwntools context for this exact target.
+
+        Pwntools owns useful packing, ELF, ROP, and shellcraft machinery, but
+        its process-global context must not leak between builders.  Callers
+        should use this as a context manager::
+
+            with target.local_context():
+                ...
+
+        The stricter :class:`Target` still owns ABI distinctions which a
+        pwntools architecture name alone cannot express (MIPS o32/n64,
+        PPC64 ELFv1/v2, and ARM-vs-Thumb function pointers).
+        """
+
+        return pwntools_context.local(
+            arch=self.pwntools_arch,
+            bits=self.bits,
+            endian=self.endian.value,
+            os=self.os,
+        )
+
     def pack(self, value: int, *, signed: bool = False, truncate: bool = False) -> bytes:
         """Pack one target-width integer.
 
@@ -121,14 +147,26 @@ class Target:
             value &= self.mask
             signed = False
         try:
-            return value.to_bytes(self.word_size, self.endian.value, signed=signed)
-        except OverflowError as exc:
+            with self.local_context():
+                return pwntools_pack(
+                    value,
+                    word_size=self.bits,
+                    endianness=self.endian.value,
+                    sign=signed,
+                )
+        except (OverflowError, ValueError) as exc:
             raise OverflowError(f"{value:#x} does not fit {self.bits}-bit {self.name}") from exc
 
     def unpack(self, data: bytes, *, signed: bool = False) -> int:
         if len(data) != self.word_size:
             raise ValueError(f"expected exactly {self.word_size} bytes, got {len(data)}")
-        return int.from_bytes(data, self.endian.value, signed=signed)
+        with self.local_context():
+            return pwntools_unpack(
+                data,
+                word_size=self.bits,
+                endianness=self.endian.value,
+                sign=signed,
+            )
 
     def pack_words(self, words: Iterable[int], *, truncate: bool = False) -> bytes:
         return b"".join(self.pack(word, truncate=truncate) for word in words)

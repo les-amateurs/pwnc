@@ -5,7 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pwnlib.context import context as pwntools_context
+
 from payloads import (
+    SUPPORTED_TARGETS,
     Address,
     AddressResolutionError,
     ConstraintError,
@@ -66,6 +69,34 @@ class TargetTests(unittest.TestCase):
         with self.assertRaises(OverflowError):
             target.pack(1 << 32)
         self.assertEqual(target.pack(-1, truncate=True), b"\xff" * 4)
+
+    def test_pwntools_context_is_exact_and_does_not_leak(self) -> None:
+        original = (
+            pwntools_context.arch,
+            pwntools_context.bits,
+            pwntools_context.endian,
+            pwntools_context.os,
+        )
+        for target in SUPPORTED_TARGETS:
+            with self.subTest(target=target.name):
+                with target.local_context():
+                    self.assertEqual(pwntools_context.arch, target.pwntools_arch)
+                    self.assertEqual(pwntools_context.bits, target.bits)
+                    self.assertEqual(pwntools_context.endian, target.endian.value)
+                    self.assertEqual(pwntools_context.os, target.os)
+                value = 0x11223344 if target.bits == 32 else 0x1122334455667788
+                expected = value.to_bytes(target.word_size, target.endian.value)
+                self.assertEqual(target.pack(value), expected)
+                self.assertEqual(target.unpack(expected), value)
+        self.assertEqual(
+            (
+                pwntools_context.arch,
+                pwntools_context.bits,
+                pwntools_context.endian,
+                pwntools_context.os,
+            ),
+            original,
+        )
 
     def test_thumb_entry_sets_state_bit(self) -> None:
         target = resolve_target("thumb")
