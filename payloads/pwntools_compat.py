@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -284,12 +284,52 @@ class ExactELFAdapter:
     def fresh_rop(self, *, runtime_base: int | None = None) -> tuple[ELF, ROP]:
         """Create a pwntools ROP object for the targets we verify automatically."""
 
+        images, rop = self.fresh_rop_group(runtime_base=runtime_base)
+        return images[0], rop
+
+    def fresh_rop_group(
+        self,
+        *,
+        runtime_base: int | None = None,
+        extra_images: Sequence[tuple[ExactELFAdapter, int | None]] = (),
+    ) -> tuple[tuple[ELF, ...], ROP]:
+        """Create one ROP search space from exact, target-compatible ELFs.
+
+        ``self`` remains the primary image (normally libc).  Extra images are
+        useful for the challenge binary's register-loading and stack-cleanup
+        gadgets when the selected libc does not happen to contain a complete
+        sequence.  A ``None`` base preserves an ELF's linked virtual
+        addresses; PIE images need their disclosed runtime base explicitly.
+        Every adapter rechecks its artifact digest before pwntools sees it.
+        """
+
         if self.target.abi not in {ABI.I386_SYSV, ABI.AMD64_SYSV}:
             raise PwntoolsROPUnsupported(
                 f"automatic pwntools ROP lowering is only claimed for i386/AMD64, not {self.target.name}"
             )
-        elf = self.fresh_elf(runtime_base=runtime_base)
+        normalized = tuple(extra_images)
+        seen = {self.identity.sha256}
+        for index, item in enumerate(normalized):
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError(f"extra image {index} must be an (ExactELFAdapter, runtime_base) tuple")
+            adapter, base = item
+            if not isinstance(adapter, ExactELFAdapter):
+                raise TypeError(f"extra image {index} must contain an ExactELFAdapter")
+            if _target_key(adapter.target) != _target_key(self.target):
+                raise PwntoolsCompatibilityError(
+                    f"extra image target {adapter.target.name} does not match primary target {self.target.name}"
+                )
+            if adapter.identity.sha256 in seen:
+                raise PwntoolsCompatibilityError("a ROP search space cannot contain the same exact ELF twice")
+            seen.add(adapter.identity.sha256)
+            if base is not None and (isinstance(base, bool) or not isinstance(base, int)):
+                raise TypeError(f"extra image {index} runtime base must be an int or None")
+
+        images: list[ELF] = []
         try:
+            images.append(self.fresh_elf(runtime_base=runtime_base))
+            for adapter, base in normalized:
+                images.append(adapter.fresh_elf(runtime_base=base))
             with (
                 _suppress_rop_cache_resource_warning(),
                 context.local(
@@ -300,11 +340,12 @@ class ExactELFAdapter:
                     log_level="error",
                 ),
             ):
-                rop = ROP(elf)
+                rop = ROP(images)
         except Exception:
-            elf.close()
+            for image in images:
+                image.close()
             raise
-        return elf, rop
+        return tuple(images), rop
 
 
 def pack_target_word(target: Target, value: int) -> bytes:

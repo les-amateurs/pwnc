@@ -364,13 +364,18 @@ class LibcROPProgram:
         layout: RuntimeLayout,
         chain_base: int,
         inline_path_address: int | None,
+        extra_images: Sequence[tuple[ExactELFAdapter, int | None]],
     ) -> bytes:
         if layout.libc_base is None:
             raise LibcROPError("pwntools lowering needs the exact runtime libc base")
         try:
-            elf, rop = self.adapter.fresh_rop(runtime_base=layout.libc_base)
+            images, rop = self.adapter.fresh_rop_group(
+                runtime_base=layout.libc_base,
+                extra_images=extra_images,
+            )
         except (PwntoolsCompatibilityError, PwntoolsROPUnsupported) as exc:
             raise LibcROPError(str(exc)) from exc
+        elf = images[0]
 
         inline = {"path": inline_path_address} if inline_path_address is not None else {}
         try:
@@ -402,7 +407,8 @@ class LibcROPProgram:
                         f"pwntools cannot link the composed calls for {self.target.name}: {exc}"
                     ) from exc
         finally:
-            elf.close()
+            for image in images:
+                image.close()
 
     def lower_pwntools(
         self,
@@ -410,8 +416,16 @@ class LibcROPProgram:
         *,
         chain_base: int,
         inline_alignment: int | None = None,
+        extra_images: Sequence[tuple[ExactELFAdapter, int | None]] = (),
     ) -> LoweredLibcROP:
-        """Link all calls with pwntools on verified i386/AMD64 targets."""
+        """Link all calls with pwntools on verified i386/AMD64 targets.
+
+        ``extra_images`` adds exact, digest-checked ELF artifacts to
+        pwntools' gadget search space.  This normally contains the challenge
+        executable: libc supplies the called functions while the main image
+        supplies register loaders or i386 stack-cleanup gadgets.  Use a
+        ``None`` base for a linked non-PIE image and an observed base for PIE.
+        """
 
         if not isinstance(layout, RuntimeLayout):
             raise TypeError("layout must be a RuntimeLayout")
@@ -420,6 +434,7 @@ class LibcROPProgram:
         if not 0 <= chain_base <= self.target.mask:
             raise ValueError("chain_base does not fit the target address width")
         alignment = self.target.word_size if inline_alignment is None else inline_alignment
+        normalized_images = tuple(extra_images)
         if (
             isinstance(alignment, bool)
             or not isinstance(alignment, int)
@@ -429,7 +444,7 @@ class LibcROPProgram:
             raise ValueError("inline_alignment must be a positive power of two")
 
         if not self.inline_path:
-            chain = self._pwntools_chain(layout, chain_base, None)
+            chain = self._pwntools_chain(layout, chain_base, None, normalized_images)
             return LoweredLibcROP(self, chain, chain, chain_base, None)
 
         # Gadget selection depends on the register set, not the pointer value,
@@ -441,7 +456,7 @@ class LibcROPProgram:
             pointer = chain_base + inline_offset
             if pointer > self.target.mask:
                 raise LibcROPError("inline path address exceeds the target address space")
-            chain = self._pwntools_chain(layout, chain_base, pointer)
+            chain = self._pwntools_chain(layout, chain_base, pointer, normalized_images)
             updated = _align_up(len(chain), alignment)
             if updated == inline_offset:
                 break
@@ -459,11 +474,13 @@ class LibcROPProgram:
         *,
         chain_base: int,
         inline_alignment: int | None = None,
+        extra_images: Sequence[tuple[ExactELFAdapter, int | None]] = (),
     ) -> bytes:
         return self.lower_pwntools(
             layout,
             chain_base=chain_base,
             inline_alignment=inline_alignment,
+            extra_images=extra_images,
         ).data
 
 

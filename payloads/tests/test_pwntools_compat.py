@@ -58,8 +58,15 @@ cleanup16: add $16,%esp; ret
 }
 
 
-def _compile_exact_rop_fixture(root: Path, bits: int) -> Path:
-    output = root / f"libc-rop-{bits}.so"
+def _compile_exact_rop_fixture(
+    root: Path,
+    bits: int,
+    *,
+    name: str = "libc-rop",
+    extra_source: str = "",
+    source: str | None = None,
+) -> Path:
+    output = root / f"{name}-{bits}.so"
     result = subprocess.run(
         [
             "cc",
@@ -75,7 +82,7 @@ def _compile_exact_rop_fixture(root: Path, bits: int) -> Path:
             "-o",
             str(output),
         ],
-        input=_FIXTURE_SOURCES[bits],
+        input=(_FIXTURE_SOURCES[bits] if source is None else source) + extra_source,
         capture_output=True,
         text=True,
         check=False,
@@ -142,6 +149,31 @@ class ExactELFAdapterTests(unittest.TestCase):
         for name in ("libs", "maps", "libc"):
             with self.subTest(name=name):
                 self.assertFalse(hasattr(adapter, name))
+
+    def test_combined_rop_search_space_requires_distinct_exact_target_images(self) -> None:
+        adapter = ExactELFAdapter.from_file(self.artifact)
+        supplemental_path = _compile_exact_rop_fixture(
+            self.root,
+            64,
+            name="supplemental",
+            extra_source="\n.globl supplemental_marker\nsupplemental_marker: nop; ret\n",
+        )
+        supplemental = ExactELFAdapter.from_file(supplemental_path)
+
+        images, rop = adapter.fresh_rop_group(extra_images=((supplemental, None),))
+        try:
+            self.assertEqual(len(images), 2)
+            self.assertIsNotNone(rop.find_gadget(["pop rdx", "ret"]))
+        finally:
+            for image in images:
+                image.close()
+
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "same exact ELF twice"):
+            adapter.fresh_rop_group(extra_images=((adapter, None),))
+
+        wrong_target = ExactELFAdapter.from_file(_compile_exact_rop_fixture(self.root, 32, name="wrong-target"))
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "does not match primary target"):
+            adapter.fresh_rop_group(extra_images=((wrong_target, None),))
 
 
 class PwntoolsPackingTests(unittest.TestCase):

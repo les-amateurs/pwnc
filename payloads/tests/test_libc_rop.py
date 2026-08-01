@@ -15,6 +15,7 @@ from payloads.libc_rop import (
     WritableArea,
 )
 from payloads.model import Address, Image, PayloadKind, RuntimeLayout
+from payloads.pwntools_compat import ExactELFAdapter
 from payloads.rop import (
     AddressExpression,
     LibcBoundAddress,
@@ -24,6 +25,37 @@ from payloads.rop import (
 )
 from payloads.target import resolve_target
 from payloads.tests.test_pwntools_compat import _compile_exact_rop_fixture
+
+_FUNCTION_ONLY_SOURCES = {
+    64: r"""
+.text
+.globl open, read, write, sendfile, exit
+.type open,@function
+open: ret
+.type read,@function
+read: ret
+.type write,@function
+write: ret
+.type sendfile,@function
+sendfile: ret
+.type exit,@function
+exit: ret
+""",
+    32: r"""
+.text
+.globl open, read, write, sendfile, exit
+.type open,@function
+open: ret
+.type read,@function
+read: ret
+.type write,@function
+write: ret
+.type sendfile,@function
+sendfile: ret
+.type exit,@function
+exit: ret
+""",
+}
 
 
 @unittest.skipUnless(shutil.which("cc"), "a C compiler/linker is required for exact libc ROP fixtures")
@@ -297,6 +329,49 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
                 buffer = read.arguments[1]
                 self.assertIsInstance(buffer, int)
                 self.assertIn(builder.target.pack(buffer), lowered.chain)
+
+    def test_pwntools_can_take_missing_gadgets_from_an_exact_challenge_image(self) -> None:
+        configurations = {
+            32: (0xF7000000, 0x804C000),
+            64: (0x700000000000, 0x404000),
+        }
+        for bits, (libc_base, chain_base) in configurations.items():
+            with self.subTest(bits=bits):
+                function_only = _compile_exact_rop_fixture(
+                    self.root,
+                    bits,
+                    name="function-only",
+                    source=_FUNCTION_ONLY_SOURCES[bits],
+                )
+                supplemental_path = _compile_exact_rop_fixture(
+                    self.root,
+                    bits,
+                    name="challenge-gadgets",
+                    extra_source="\n.globl challenge_marker\nchallenge_marker: nop; ret\n",
+                )
+                supplemental = ExactELFAdapter.from_file(supplemental_path)
+                builder = LibcROPBuilder.from_file(
+                    function_only,
+                    b"/flag",
+                    writable_area=0x406000 if bits == 64 else 0x804E000,
+                    writable_size=0x1000,
+                )
+                program = builder.compose(
+                    builder.open(),
+                    builder.read(3, 0x40),
+                    builder.write(1, 0x40),
+                    builder.exit(42),
+                )
+
+                lowered = program.lower_pwntools(
+                    RuntimeLayout(libc_base=libc_base),
+                    chain_base=chain_base,
+                    extra_images=((supplemental, None),),
+                )
+
+                self.assertTrue(lowered.chain)
+                gadget_symbol = "gadget_rdi" if bits == 64 else "cleanup12"
+                self.assertIn(builder.target.pack(supplemental.symbol(gadget_symbol)), lowered.chain)
 
     def test_materialization_requires_a_runtime_libc_base(self) -> None:
         builder = LibcROPBuilder.from_file(self.fixtures[64], b"/flag")
