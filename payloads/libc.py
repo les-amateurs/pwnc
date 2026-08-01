@@ -14,9 +14,10 @@ from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 
+from .elf import ELFInspectionError, inspect_elf
 from .errors import PayloadError
 from .model import Address, Image, RuntimeLayout
-from .target import Target, resolve_target
+from .target import Target
 
 
 class LibcError(PayloadError):
@@ -89,56 +90,31 @@ class LibcImage:
     ) -> LibcImage:
         """Load offsets and identity from the supplied ELF, never a version guess."""
 
-        try:
-            from pwnlib.elf.elf import ELF
-        except ImportError as exc:  # pragma: no cover - pwntools is a project dependency
-            raise LibcError("pwntools is required to inspect a libc ELF") from exc
-
         artifact = Path(path)
         if not artifact.is_file():
             raise LibcError(f"libc artifact does not exist: {artifact}")
         try:
-            elf = ELF(str(artifact), checksec=False)
-        except Exception as exc:
+            profile = inspect_elf(artifact)
+        except ELFInspectionError as exc:
             raise LibcError(f"unable to parse libc ELF {artifact}: {exc}") from exc
 
-        build_id_value = getattr(elf, "buildid", None)
-        build_id = bytes(build_id_value).hex() if build_id_value else None
-        identity = LibcIdentity.from_file(
-            artifact,
-            build_id=build_id,
+        identity = LibcIdentity(
+            profile.sha256,
+            build_id=profile.build_id,
             distro=distro,
             package_release=package_release,
             glibc_version=glibc_version,
+            source=str(artifact),
         )
         requested = set(symbols) if symbols is not None else None
-        offsets = {name: int(value) for name, value in elf.symbols.items() if requested is None or name in requested}
+        offsets = {
+            name: int(value) for name, value in profile.symbol_offsets.items() if requested is None or name in requested
+        }
         if requested is not None:
             missing = requested.difference(offsets)
             if missing:
                 raise LibcError(f"symbols absent from exact libc artifact: {', '.join(sorted(missing))}")
-
-        arch_alias = {
-            "i386": "x86",
-            "amd64": "x86_64",
-            "arm": "arm",
-            "thumb": "thumb",
-            "aarch64": "arm64",
-            "mips": "mips32",
-            "mips64": "mips64",
-            "riscv32": "riscv32",
-            "riscv64": "riscv64",
-            "powerpc": "powerpc32",
-            "powerpc64": "powerpc64",
-            "sparc": "sparc32",
-            "sparc64": "sparc64",
-            "s390": "s390x",
-        }
-        try:
-            target = resolve_target(arch_alias[elf.arch], bits=elf.bits, endian=elf.endian)
-        except (KeyError, ValueError) as exc:
-            raise LibcError(f"unsupported libc ELF target: {elf.arch}/{elf.bits}/{elf.endian}") from exc
-        return cls(identity=identity, target=target, symbols=offsets, path=str(artifact))
+        return cls(identity=identity, target=profile.target, symbols=offsets, path=str(artifact))
 
     def offset(self, symbol: str) -> int:
         try:

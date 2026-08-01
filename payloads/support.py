@@ -220,11 +220,17 @@ def _implemented_detail(target: Target, capability: Capability) -> str:
     if capability is Capability.STAGER:
         return "position-independent mmap/read/mprotect/cache-finalize/jump stager exists"
     if capability is Capability.RET2LIBC:
-        return "symbolic system(command) chain builder exists and requires offsets from one exact LibcImage"
+        return (
+            "symbolic system(command) chain builder exists, binds every libc-relative operand to one exact "
+            "LibcIdentity, and exposes ABI call-frame placement constraints"
+        )
     if capability is Capability.STATIC_ROP:
         if target.name in _DIRECT_CALL_UNSUPPORTED:
             return "symbolic static syscall chains are implemented; direct function calls are unsupported for this ABI"
-        return "symbolic static function-call and syscall chain builders exist for caller-supplied semantic gadgets"
+        return (
+            "symbolic static function-call and syscall chain builders exist for caller-supplied semantic gadgets; "
+            "direct calls expose ABI call-frame placement constraints"
+        )
     if capability is Capability.ARB_EXECUTOR:
         return (
             "target-endian arbitrary-memory adapters, explicit payload staging/triggering, "

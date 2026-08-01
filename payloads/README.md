@@ -85,6 +85,40 @@ is a function descriptor rather than a raw program counter, so
 `Target.function_pointer()` rejects it without a descriptor- and TOC-aware
 primitive.
 
+## Read-only ELF and mitigation inspection
+
+`inspect_elf(path)` parses an untrusted artifact without loading or executing
+it. The immutable `ELFProfile` binds its findings to the file SHA-256 and GNU
+build ID, resolves the exact target, and records PIE/non-PIE, static/dynamic
+linkage, static PIE versus shared-object role, GNU-stack NX evidence, RELRO,
+LOAD permissions, symbols, and unambiguous GOT/PLT offsets:
+
+```python
+from payloads import ExecutionPolicy, inspect_elf
+
+profile = inspect_elf("./challenge")
+mitigations = profile.to_mitigations(ExecutionPolicy.QEMU_ELF_PERMISSIONS)
+
+# Supply the page size observed in the actual process/emulator. This proves
+# writability for the image-relative slot after RELRO; missing runtime evidence
+# or conflicting layouts return False.
+puts_got_is_writable = profile.got_slot_writable(
+    "puts",
+    runtime_page_size=observed_runtime_page_size,
+)
+```
+
+Profile addresses are ELF virtual values: add the runtime load bias for PIE,
+static PIE, and shared objects; use a zero bias for an ordinary `ET_EXEC`.
+Missing `PT_GNU_STACK` leaves `profile.nx` unknown, and an `ET_DYN` with no
+reliable executable/shared-object discriminator leaves linkage unknown.
+`to_mitigations()` rejects either ambiguity unless the caller supplies facts
+from the actual runtime/toolchain. The `ExecutionPolicy` is always explicit:
+an ELF file cannot establish whether a particular QEMU version ignores guest
+execute permissions. Likewise, `PT_LOAD.p_align` is not proof of the runtime
+page size, so writability helpers require an observed `runtime_page_size` for
+any affirmative answer.
+
 ## Command shellcode
 
 `command_shellcode` emits position-independent raw code which performs
@@ -161,8 +195,9 @@ QEMU test only to wrap the exact raw bytes in a minimal static ELF.
 
 Never select offsets from the string `glibc 2.39` alone. Distribution patches,
 toolchain choices, and package rebuilds can change symbols and gadgets without
-changing the upstream version. `LibcImage.from_file` reads the exact ELF and
-records its SHA-256 plus its GNU build ID when present:
+changing the upstream version. `LibcImage.from_file` uses the same single-read,
+non-executing ELF inspection path for the exact symbol offsets, target,
+SHA-256, and GNU build ID:
 
 ```python
 from payloads import LibcImage, RuntimeLayout
@@ -182,8 +217,10 @@ The distro, package release, version, and source path are provenance metadata;
 they do not replace the artifact digest. Preserve the challenge's actual libc
 file and verify `LibcIdentity.matches()` if bytes may have changed. A
 `LibcImage` supplies exact symbol offsets and base arithmetic; the separate ROP
-and arbitrary-call builders consume it. The package does not discover the
-remote libc, find gadgets, or leak a base.
+and arbitrary-call builders consume it. `bind_libc_address(libc, offset)` ties
+libc-relative strings and gadgets to the same digest so a stock-glibc offset
+cannot be mixed accidentally with a distro-patched image. The package does not
+discover the remote libc, find gadgets, or leak a base.
 
 `Address` represents an absolute value or an offset in `MAIN`, `LIBC`,
 `LOADER`, `STACK`, or a named extra image. PIE/ASLR-relative values require a
@@ -203,24 +240,27 @@ slots, and clobbers. The chain selector can compose the supplied records, but
 it does not disassemble a binary or assert that a gadget exists.
 
 ```python
-from payloads import Address, Image, RuntimeLayout, resolve_target
+from payloads import RuntimeLayout, bind_libc_address, resolve_target
 from payloads.rop import SemanticGadget, build_ret2libc_system
 
 target = resolve_target("x86_64")
 # `libc` is a LibcImage loaded from the exact challenge artifact.
 pop_rdi = SemanticGadget(
     target=target,
-    address=Address(pop_rdi_offset, Image.LIBC, "pop rdi; ret"),
+    address=bind_libc_address(libc, pop_rdi_offset, "pop rdi; ret"),
     frame_words=2,
     register_slots={"rdi": 0},
     next_pc_slot=1,
 )
 chain = build_ret2libc_system(
     libc,
-    Address(bin_sh_offset, Image.LIBC, '"/bin/sh"'),
+    bind_libc_address(libc, bin_sh_offset, '"/bin/sh"'),
     gadgets=(pop_rdi,),
 )
-raw_chain = chain.materialize(RuntimeLayout(libc_base=leaked_libc_base))
+raw_chain = chain.materialize(
+    RuntimeLayout(libc_base=leaked_libc_base),
+    chain_base=known_overflow_chain_address,
+)
 ```
 
 `build_ret2libc_system` derives `system` only from the supplied exact
@@ -228,6 +268,14 @@ raw_chain = chain.materialize(RuntimeLayout(libc_base=leaked_libc_base))
 gadgets. i386 uses its real cdecl stack shape. Direct function calls reject
 PPC64 ELFv1 (function descriptors/TOC are not modeled) and SPARC32/64 (register
 windows and `o7 + 8` return frames are not modeled).
+
+Every function-call chain carries a `CallFrame` describing the function-entry
+SP offset, required ABI alignment/bias, and emitted mandatory caller area.
+`materialize(..., chain_base=...)`, `validate_call_frame()`, and
+`validate_entry_sp()` reject a concrete misaligned placement. MIPS o32,
+PPC32, PPC64 ELFv2, and s390x caller areas are emitted explicitly; PPC64 ELFv2
+also loads `r12` with the global-entry address. A call with `return_to=None`
+does not invent a safe return path.
 
 `build_static_call` and `build_static_syscall` use `MAIN`-relative offsets, so
 the same descriptions cover non-PIE (`main_base=0` when offsets are virtual
@@ -269,7 +317,8 @@ target word width and endian. Read-back verification requires a read callback,
 and `probe()` is disabled unless `invalid_read_safe=True` explicitly says a
 bad probe cannot kill or corrupt the target. `ArbitraryMemory.from_bytes_provider`
 and `as_bytes_provider()` provide structural adapters for existing
-`BytesProvider`-shaped objects.
+`BytesProvider`-shaped objects. The outward adapter is also a nominal
+`pwnc.types.BytesProvider`, so it can be passed directly to `Type.use()`.
 
 Arbitrary read/write is not itself control flow. `PayloadStager` writes a
 `Payload` at a caller-selected address and preflights NX/QEMU policy before the
@@ -332,16 +381,21 @@ derived from the memory callbacks. PPC64 ELFv1 calls require a callback marked
 function-descriptor-aware. `GotSystemWorkflow` is an alternative for dynamic
 binaries with no/partial RELRO: it writes the command, temporarily replaces a
 specified GOT slot with exact-artifact `system`, calls the specified PLT entry,
-and restores the original slot in `finally`. It rejects full RELRO/static
-linkage before memory I/O and cannot promise restoration if the process exits,
-the transport disconnects, or control never returns. None of these callback
+and restores the original slot in `finally`. `from_libc()` requires an explicit
+`got_slot_writable=` assertion for that exact slot; use
+`profile.got_slot_writable(symbol, runtime_page_size=...)` with a page size
+observed from that runtime when an `ELFProfile` is available. It
+rejects the strategy before memory I/O for full RELRO, static linkage, or an
+unproven slot. Restoration is attempted even after a short/failed overwrite,
+but cannot be promised if restoration itself fails, the process exits, the
+transport disconnects, or control never returns. None of these callback
 workflows has QEMU end-to-end coverage.
 
 ## Mitigations and QEMU execute policy
 
 `Mitigations` records PIE, NX, RELRO, dynamic/static linkage, and an explicit
-`ExecutionPolicy`. These are caller-supplied facts; the payload package does
-not inspect a process or QEMU version automatically.
+`ExecutionPolicy`. `ELFProfile.to_mitigations()` derives file-backed facts, but
+the package does not inspect a live process or infer a QEMU execution policy.
 
 - `ELF_PERMISSIONS` and `QEMU_ELF_PERMISSIONS` mean mapping execute bits are
   respected. Writable storage is not assumed executable. In particular, an
@@ -394,7 +448,8 @@ evidence that payloads ran on that host.
   not find gadgets, solve bad bytes, select a stack pivot, or validate a chain
   by executing it.
 - There is no automatic leak discovery, remote-libc identification service,
-  mitigation detection, or exploit-specific allocator/control-flow primitive.
+  live-process/QEMU policy detection, or exploit-specific allocator/control-flow
+  primitive.
 - Arbitrary-memory workflows do not turn read/write callbacks into a function
   call, instruction-cache flush, or jump. Those capabilities must be supplied
   explicitly, and GOT restoration is only best-effort while control returns.
