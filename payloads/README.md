@@ -62,11 +62,15 @@ little-endian 32-bit PowerPC emulator:
 
 Symbolic static syscall ROP is implemented for every catalog target, and
 symbolic static function calls are implemented except on PPC64 ELFv1 and
-SPARC. Ret2libc `system(command)` has the same direct-call exclusions. These
-ROP builders have unit coverage but no QEMU execution coverage. Target-generic
-arbitrary-memory adapters, explicit payload staging/triggering, and exact-libc
-call workflows are implemented for every catalog target and are unit-tested,
-not QEMU-tested.
+SPARC. The opt-in QEMU suite executes the static syscall chains on all 20
+runnable target variants and the direct-call chains on all 17 runnable variants
+that model direct calls. PPC32 little-endian remains assembly-tested because no
+matching qemu-user emulator is available. Ret2libc `system(command)` has the
+same direct-call exclusions; exact-artifact, live-base chains execute under
+QEMU on i386 and AMD64, while the other implemented variants have unit
+coverage. Target-generic arbitrary-memory adapters, explicit payload
+staging/triggering, and exact-libc call workflows are implemented for every
+catalog target and are unit-tested, not QEMU-tested.
 
 ## Resolving an exact target
 
@@ -302,7 +306,24 @@ addresses) and PIE once the main base is known. Generic static syscall chains
 are modeled for every catalog target, including PPC64 ELFv1, but require exact
 caller-supplied register-loading and syscall gadgets plus the correct Linux
 syscall number. Static direct calls retain the PPC64 ELFv1/SPARC exclusions.
-None of the ROP builders currently has end-to-end QEMU execution coverage.
+
+The opt-in QEMU fixtures materialize builder-produced chains into non-executable
+memory and transfer control through synthetic gadgets with the documented
+semantics. The static syscall fixtures execute on all 20 runnable catalog
+variants. Direct-call fixtures execute on all 17 runnable variants where calls
+are modeled; they check function-entry stack alignment and the MIPS o32, PPC32,
+PPC64 ELFv2, and s390x mandatory caller areas at runtime. PPC64 ELFv1 and SPARC
+therefore have syscall-only ROP execution evidence, and PPC32 little-endian is
+assembly-tested only.
+
+Separate i386 and AMD64 fixtures load the host's exact target libc through
+QEMU, disclose the actual `system` address and owning mapping base, parse that
+same artifact as a `LibcImage`, and execute a late-materialized
+`build_ret2libc_system` chain. The test verifies the libc SONAME, the
+independently disclosed base, placement in writable non-executable memory,
+command output, and the return path. This is live-base and exact-artifact
+evidence, not ASLR-variance evidence: the tested QEMU version may choose a
+repeatable guest libc base.
 
 ## Arbitrary-read/write adapters and execution
 
@@ -452,30 +473,39 @@ for the QEMU-verified matrix:
 PWNC_QEMU_TESTS=1 python3 -m unittest discover -s payloads/tests -v
 ```
 
-The QEMU tests place exactly the bytes returned by the command, ORW, and
-RW-to-RX stager builders in a minimal static ELF, run each QEMU-verified target,
-and check command output, binary file bytes, and execution of an exact
-second-stage exit payload. They use no foreign libc or sysroot. PPC32
-little-endian remains covered by source and relocation-free assembly tests but
-is intentionally absent from QEMU evidence. If any required tool/emulator is
-absent, the QEMU test class is skipped; a skipped test is not evidence that
-payloads ran on that host.
+The shellcode QEMU tests place exactly the bytes returned by the command, ORW,
+and RW-to-RX stager builders in a minimal static ELF, then check command output,
+binary file bytes, and execution of an exact second-stage exit payload. They use
+no foreign libc or sysroot. The static ROP tests patch the exact materialized
+chain into a fixture and pivot to its first word; syscall and direct-call exits
+are deliberately distinct. The ret2libc tests use `-L /` with sanitized loader
+environment variables so that the libc path parsed by the framework is the
+artifact actually loaded by the guest. They require suitable native compiler
+and multilib support in addition to the i386 and AMD64 emulators.
+
+PPC32 little-endian remains covered by source and relocation-free assembly
+tests but is intentionally absent from QEMU evidence. If a required
+tool/emulator is absent, the corresponding QEMU test class or target subtest is
+skipped; a skipped test is not evidence that payloads ran on that host. The
+ret2libc test establishes correct use of the disclosed live base; it does not
+claim that repeated QEMU runs produce different ASLR layouts.
 
 ## Limitations
 
 - Linux syscall numbers and ABIs are fixed to the exact catalog entries; other
   OSes, ARM OABI, MIPS n32, RISC-V big endian, and x32 are not represented.
 - ROP builders need exact caller-supplied gadget semantics and offsets. They do
-  not find gadgets, solve bad bytes, select a stack pivot, or validate a chain
-  by executing it.
+  not find gadgets, solve bad bytes, or select a stack pivot. The opt-in QEMU
+  fixtures validate chains against their supplied synthetic gadgets, not
+  arbitrary challenge gadgets or binaries.
 - There is no automatic leak discovery, remote-libc identification service,
   live-process/QEMU policy detection, or exploit-specific allocator/control-flow
   primitive.
 - Arbitrary-memory workflows do not turn read/write callbacks into a function
   call, instruction-cache flush, or jump. Those capabilities must be supplied
   explicitly, and GOT restoration is only best-effort while control returns.
-- QEMU shellcode tests do not establish native-hardware behavior and do not
-  test old-versus-new QEMU execute-permission policy.
+- QEMU payload tests do not establish native-hardware behavior and do not test
+  old-versus-new QEMU execute-permission policy.
 - Raw command/ORW payloads and the generic arbitrary-memory stager do not make
   memory executable by themselves. The mmap stager performs its own second
   stage RW-to-RX transition, but its first stage still needs an executable

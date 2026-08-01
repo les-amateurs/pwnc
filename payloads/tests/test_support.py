@@ -14,6 +14,7 @@ from payloads.support import (
 from payloads.target import SUPPORTED_TARGETS, resolve_target
 
 _PPC32_LE = resolve_target("powerpc32", endian="little").name
+_RET2LIBC_QEMU_TARGETS = {resolve_target("x86").name, resolve_target("x86_64").name}
 
 _DIRECT_CALL_UNSUPPORTED = {
     resolve_target("ppc64").name,
@@ -56,22 +57,26 @@ class SupportMatrixTests(unittest.TestCase):
         for target in SUPPORTED_TARGETS:
             with self.subTest(target=target.name):
                 coverage = capability_support(target, Capability.RET2LIBC)
-                expected = (
-                    SupportLevel.RECOGNIZED if target.name in _DIRECT_CALL_UNSUPPORTED else SupportLevel.IMPLEMENTED
-                )
+                if target.name in _DIRECT_CALL_UNSUPPORTED:
+                    expected = SupportLevel.RECOGNIZED
+                elif target.name in _RET2LIBC_QEMU_TARGETS:
+                    expected = SupportLevel.QEMU_VERIFIED
+                else:
+                    expected = SupportLevel.IMPLEMENTED
                 self.assertEqual(coverage.level, expected)
                 self.assertEqual(coverage.implemented, target.name not in _DIRECT_CALL_UNSUPPORTED)
-                self.assertFalse(coverage.qemu_verified)
+                self.assertEqual(coverage.qemu_verified, target.name in _RET2LIBC_QEMU_TARGETS)
 
-    def test_static_rop_has_all_target_syscall_builders_but_no_qemu_execution_test(self) -> None:
+    def test_static_rop_qemu_coverage_matches_runtime_matrix(self) -> None:
         for target in SUPPORTED_TARGETS:
             with self.subTest(target=target.name):
                 coverage = capability_support(target, Capability.STATIC_ROP)
-                self.assertEqual(coverage.level, SupportLevel.IMPLEMENTED)
+                expected = SupportLevel.IMPLEMENTED if target.name == _PPC32_LE else SupportLevel.QEMU_VERIFIED
+                self.assertEqual(coverage.level, expected)
                 self.assertTrue(coverage.implemented)
-                self.assertFalse(coverage.qemu_verified)
+                self.assertEqual(coverage.qemu_verified, target.name != _PPC32_LE)
                 if target.name in _DIRECT_CALL_UNSUPPORTED:
-                    self.assertIn("direct function calls are unsupported", coverage.detail)
+                    self.assertIn("direct function calls remain unsupported", coverage.detail)
 
     def test_queries_accept_aliases_canonical_names_and_targets(self) -> None:
         target = resolve_target("mipseb")

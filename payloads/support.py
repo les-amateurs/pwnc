@@ -114,6 +114,8 @@ _ALL_TARGET_NAMES = frozenset(target.name for target in SUPPORTED_TARGETS)
 # for which the available qemu-user suite has no matching emulator.
 _SHELLCODE_IMPLEMENTED = _ALL_TARGET_NAMES
 _SHELLCODE_QEMU_VERIFIED = _ALL_TARGET_NAMES - frozenset({"powerpc32-le-powerpc-sysv"})
+_STATIC_ROP_QEMU_VERIFIED = _SHELLCODE_QEMU_VERIFIED
+_RET2LIBC_QEMU_VERIFIED = frozenset({"x86-le-i386-sysv", "x86_64-le-amd64-sysv"})
 _DIRECT_CALL_UNSUPPORTED = frozenset(
     {
         "powerpc64-be-powerpc64-elfv1",
@@ -140,8 +142,8 @@ _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.COMMAND: _SHELLCODE_QEMU_VERIFIED,
         Capability.ORW: _SHELLCODE_QEMU_VERIFIED,
         Capability.STAGER: _SHELLCODE_QEMU_VERIFIED,
-        Capability.RET2LIBC: frozenset(),
-        Capability.STATIC_ROP: frozenset(),
+        Capability.RET2LIBC: _RET2LIBC_QEMU_VERIFIED,
+        Capability.STATIC_ROP: _STATIC_ROP_QEMU_VERIFIED,
         Capability.ARB_EXECUTOR: frozenset(),
     }
 )
@@ -192,8 +194,11 @@ _QEMU_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
         Capability.STAGER: (
             "payloads/tests/test_shellcode_qemu.py::CommandQemuTests.test_rw_to_rx_mmap_stager_runs_exact_second_stage"
         ),
-        Capability.RET2LIBC: "no QEMU execution test in current tree",
-        Capability.STATIC_ROP: "no QEMU execution test in current tree",
+        Capability.RET2LIBC: (
+            "payloads/tests/test_rop_qemu.py::"
+            "Ret2libcQemuTests.test_exact_loaded_libc_system_chain_executes_from_live_base"
+        ),
+        Capability.STATIC_ROP: "payloads/tests/test_rop_qemu.py::StaticRopQemuTests",
         Capability.ARB_EXECUTOR: "no QEMU execution test in current tree",
     }
 )
@@ -262,10 +267,25 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
     if implemented:
         evidence.extend(_IMPLEMENTATION_EVIDENCE[capability])
     if qemu_verified:
+        if capability is Capability.RET2LIBC:
+            detail = (
+                "builder exists and a live-base chain against the exact loaded libc artifact is covered by the "
+                "opt-in QEMU test"
+            )
+        elif capability is Capability.STATIC_ROP:
+            if target.name in _DIRECT_CALL_UNSUPPORTED:
+                detail = (
+                    "materialized static syscall ROP executes in the opt-in QEMU test; "
+                    "direct function calls remain unsupported for this ABI"
+                )
+            else:
+                detail = "materialized static syscall and direct-call ROP both execute in the opt-in QEMU test"
+        else:
+            detail = "builder exists and raw payload execution is covered by the opt-in QEMU test"
         evidence.append(_QEMU_EVIDENCE[capability])
         return CapabilitySupport(
             SupportLevel.QEMU_VERIFIED,
-            "builder exists and raw payload execution is covered by the opt-in QEMU test",
+            detail,
             tuple(evidence),
         )
     if implemented:
