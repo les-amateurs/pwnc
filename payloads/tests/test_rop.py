@@ -19,13 +19,157 @@ from payloads.rop import (
     build_static_syscall,
     build_syscall,
 )
-from payloads.target import ABI, Architecture, Endian, resolve_target
+from payloads.target import ABI, SUPPORTED_TARGETS, Architecture, Endian, resolve_target
+
+_DIRECT_CALL_UNSUPPORTED = {
+    resolve_target("ppc64").name,
+    resolve_target("sparc32").name,
+    resolve_target("sparc64").name,
+}
 
 
 def words_from_bytes(target, data: bytes) -> tuple[int, ...]:
     return tuple(
         target.unpack(data[offset : offset + target.word_size]) for offset in range(0, len(data), target.word_size)
     )
+
+
+def _matrix_call_gadgets(target) -> tuple[SemanticGadget, ...]:
+    """Return one synthetic restore gadget for matrix-level builder coverage."""
+
+    if target.arch is Architecture.X86:
+        return ()
+
+    registers = [target.convention.function_arguments[0]]
+    if target.convention.link_register is not None:
+        registers.append(target.convention.link_register)
+
+    control_register = {
+        Architecture.ARM64: "x16",
+        Architecture.MIPS32: "t9",
+        Architecture.MIPS64: "t9",
+        Architecture.RISCV32: "t0",
+        Architecture.RISCV64: "t0",
+        Architecture.POWERPC32: "ctr",
+        Architecture.POWERPC64: "r12",
+        Architecture.S390X: "r1",
+    }.get(target.arch)
+
+    if control_register is not None:
+        registers.append(control_register)
+        next_pc_slot = len(registers) - 1
+    else:
+        next_pc_slot = len(registers)
+
+    return (
+        SemanticGadget(
+            target,
+            Address(0x100, Image.MAIN, "matrix restore gadget"),
+            len(registers) + (1 if control_register is None else 0),
+            {register: slot for slot, register in enumerate(registers)},
+            next_pc_slot,
+            "matrix restore and transfer",
+            next_pc_register=control_register,
+        ),
+    )
+
+
+def _materialize_aligned(chain, layout: RuntimeLayout) -> bytes:
+    if chain.call_frame is None:
+        raise AssertionError("call builder did not expose a CallFrame")
+    candidate = 0x60000000
+    frame = chain.call_frame
+    chain_base = candidate + ((frame.required_chain_base_remainder - candidate) % frame.entry_sp_alignment)
+    return chain.materialize(layout, chain_base=chain_base)
+
+
+class RopTargetMatrixTests(unittest.TestCase):
+    def test_static_syscall_materializes_for_every_catalog_target(self) -> None:
+        layout = RuntimeLayout(main_base=0x400000)
+        for target in SUPPORTED_TARGETS:
+            with self.subTest(target=target.name):
+                number_register = target.convention.syscall_number
+                argument_register = target.convention.syscall_arguments[0]
+                gadget = SemanticGadget(
+                    target,
+                    Address(0x100, Image.MAIN, "matrix syscall restore"),
+                    3,
+                    {number_register: 0, argument_register: 1},
+                    2,
+                    "matrix syscall restore and transfer",
+                )
+                chain = build_static_syscall(target, 0x500, 93, (42,), gadgets=(gadget,))
+                resolved = chain.resolved_words(layout)
+                data = chain.materialize(layout)
+
+                self.assertEqual(chain.target, target)
+                self.assertEqual(chain.kind, PayloadKind.ROP)
+                self.assertIn(93, resolved)
+                self.assertIn(42, resolved)
+                self.assertIn(target.entry_address(layout.main_base + 0x500), resolved)
+                self.assertEqual(words_from_bytes(target, data), resolved)
+
+    def test_static_call_materializes_for_every_direct_call_target(self) -> None:
+        layout = RuntimeLayout(main_base=0x400000)
+        exercised = set()
+        for target in SUPPORTED_TARGETS:
+            if target.name in _DIRECT_CALL_UNSUPPORTED:
+                continue
+            with self.subTest(target=target.name):
+                chain = build_static_call(
+                    target,
+                    0x500,
+                    (0x1234,),
+                    gadgets=_matrix_call_gadgets(target),
+                    return_to=Address(0x900, Image.MAIN, "matrix return"),
+                )
+                resolved = chain.resolved_words(layout)
+                data = _materialize_aligned(chain, layout)
+
+                exercised.add(target.name)
+                self.assertEqual(chain.target, target)
+                self.assertEqual(chain.kind, PayloadKind.ROP)
+                self.assertIn(0x1234, resolved)
+                self.assertIn(target.function_pointer(layout.main_base + 0x500), resolved)
+                self.assertEqual(words_from_bytes(target, data), resolved)
+
+        self.assertEqual(exercised, {target.name for target in SUPPORTED_TARGETS} - _DIRECT_CALL_UNSUPPORTED)
+
+    def test_exact_identity_ret2libc_matrix_is_complete(self) -> None:
+        main_base = 0x400000
+        libc_base = 0x70000000
+        layout = RuntimeLayout(main_base=main_base, libc_base=libc_base)
+        exercised = set()
+        rejected = set()
+        for target in SUPPORTED_TARGETS:
+            with self.subTest(target=target.name):
+                libc = LibcImage(LibcIdentity("ab" * 32), target, {"system": 0x5000})
+                command = bind_libc_address(libc, 0x8000, "matrix command")
+                if target.name in _DIRECT_CALL_UNSUPPORTED:
+                    with self.assertRaises(UnsupportedROPError):
+                        build_ret2libc_system(libc, command)
+                    rejected.add(target.name)
+                    continue
+
+                chain = build_ret2libc_system(
+                    libc,
+                    command,
+                    gadgets=_matrix_call_gadgets(target),
+                    return_to=Address(0x900, Image.MAIN, "matrix return"),
+                )
+                resolved = chain.resolved_words(layout)
+                data = _materialize_aligned(chain, layout)
+
+                exercised.add(target.name)
+                self.assertEqual(chain.target, target)
+                self.assertEqual(chain.kind, PayloadKind.RET2LIBC)
+                self.assertIn(libc_base + 0x8000, resolved)
+                self.assertIn(target.function_pointer(libc_base + 0x5000), resolved)
+                self.assertIn(libc.identity.sha256[:12], chain.description)
+                self.assertEqual(words_from_bytes(target, data), resolved)
+
+        self.assertEqual(exercised, {target.name for target in SUPPORTED_TARGETS} - _DIRECT_CALL_UNSUPPORTED)
+        self.assertEqual(rejected, _DIRECT_CALL_UNSUPPORTED)
 
 
 class DeferredAddressTests(unittest.TestCase):

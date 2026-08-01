@@ -14,6 +14,7 @@ from payloads.support import (
 from payloads.target import SUPPORTED_TARGETS, resolve_target
 
 _PPC32_LE = resolve_target("powerpc32", endian="little").name
+_PPC64_ELFV1 = resolve_target("ppc64").name
 _RET2LIBC_QEMU_TARGETS = {resolve_target("x86").name, resolve_target("x86_64").name}
 
 _DIRECT_CALL_UNSUPPORTED = {
@@ -52,6 +53,12 @@ class SupportMatrixTests(unittest.TestCase):
                 self.assertTrue(coverage.implemented)
                 self.assertFalse(coverage.qemu_verified)
                 self.assertEqual(coverage.level, SupportLevel.IMPLEMENTED)
+                got_evidence = any("GotSystemWorkflow" in item for item in coverage.evidence)
+                if target.name == _PPC64_ELFV1:
+                    self.assertFalse(got_evidence)
+                    self.assertIn("GOT-to-system replacement is unsupported", coverage.detail)
+                else:
+                    self.assertTrue(got_evidence)
 
     def test_ret2libc_coverage_matches_direct_call_abi_support(self) -> None:
         for target in SUPPORTED_TARGETS:
@@ -75,8 +82,14 @@ class SupportMatrixTests(unittest.TestCase):
                 self.assertEqual(coverage.level, expected)
                 self.assertTrue(coverage.implemented)
                 self.assertEqual(coverage.qemu_verified, target.name != _PPC32_LE)
+                direct_call_evidence = any(
+                    "build_static_call" in item or "test_static_call_materializes" in item for item in coverage.evidence
+                )
                 if target.name in _DIRECT_CALL_UNSUPPORTED:
                     self.assertIn("direct function calls remain unsupported", coverage.detail)
+                    self.assertFalse(direct_call_evidence)
+                else:
+                    self.assertTrue(direct_call_evidence)
 
     def test_queries_accept_aliases_canonical_names_and_targets(self) -> None:
         target = resolve_target("mipseb")

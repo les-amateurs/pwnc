@@ -265,15 +265,24 @@ def _link_raw_payload(data: bytes, target, output: Path) -> None:
         raise AssertionError(linked.stderr)
 
 
-_TOOLS_PRESENT = all(shutil.which(tool) for tool in ("llvm-mc", "ld.lld"))
-_QEMU_PRESENT = all(shutil.which(binary) for binary in set(_QEMU.values()))
+_QEMU_OPT_IN = os.environ.get("PWNC_QEMU_TESTS") == "1"
+_REQUIRED_QEMU_TOOLS = ("llvm-mc", "ld.lld", *sorted(set(_QEMU.values())))
+_MISSING_QEMU_TOOLS = tuple(tool for tool in _REQUIRED_QEMU_TOOLS if shutil.which(tool) is None)
 
 
 @unittest.skipUnless(
-    os.environ.get("PWNC_QEMU_TESTS") == "1" and _TOOLS_PRESENT and _QEMU_PRESENT,
-    "set PWNC_QEMU_TESTS=1 with LLVM/LLD and QEMU user emulators installed",
+    _QEMU_OPT_IN,
+    "set PWNC_QEMU_TESTS=1 to run the complete LLVM/LLD/QEMU matrix",
 )
 class CommandQemuTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if _MISSING_QEMU_TOOLS:
+            raise AssertionError(
+                "PWNC_QEMU_TESTS=1 requires the complete shellcode matrix; missing: " + ", ".join(_MISSING_QEMU_TOOLS)
+            )
+
     def test_raw_command_shellcode_executes_on_every_qemu_target(self) -> None:
         assembler = LLVMAssembler()
         for architecture, endian in QEMU_TARGETS:

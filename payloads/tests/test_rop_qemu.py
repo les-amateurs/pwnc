@@ -90,8 +90,9 @@ _EXTRA_CALL_CASES = tuple(
 _STATIC_SYSCALL_CASES = _PRIMARY_ROP_CASES + _EXTRA_SYSCALL_CASES
 _STATIC_CALL_CASES = _PRIMARY_ROP_CASES + _EXTRA_CALL_CASES
 
-_STATIC_TOOLS_PRESENT = all(shutil.which(tool) for tool in ("llvm-mc", "ld.lld"))
-_STATIC_QEMU_PRESENT = all(shutil.which(case.qemu) for case in _STATIC_SYSCALL_CASES)
+_QEMU_OPT_IN = os.environ.get("PWNC_QEMU_TESTS") == "1"
+_STATIC_REQUIRED_TOOLS = ("llvm-mc", "ld.lld", *sorted({case.qemu for case in _STATIC_SYSCALL_CASES}))
+_STATIC_MISSING_TOOLS = tuple(tool for tool in _STATIC_REQUIRED_TOOLS if shutil.which(tool) is None)
 
 
 def _target(case: _RopCase) -> Target:
@@ -488,6 +489,27 @@ _CALLER_MARKER = 0x13579BDF
 _EXTRA_ASSEMBLER = LLVMAssembler()
 
 
+@dataclass(frozen=True, slots=True)
+class _CallAbiExpectation:
+    """Test-owned ABI facts, independent of ``Target`` and ``CallFrame``."""
+
+    entry_sp_alignment: int
+    caller_area_size: int
+    entry_sp_words: int = 4
+    entry_sp_alignment_bias: int = 0
+
+
+_EXTRA_CALL_ABI_EXPECTATIONS = {
+    ABI.MIPS_O32: _CallAbiExpectation(8, 16),
+    ABI.MIPS_N64: _CallAbiExpectation(16, 0),
+    ABI.RISCV_ILP32: _CallAbiExpectation(16, 0),
+    ABI.RISCV_LP64: _CallAbiExpectation(16, 0),
+    ABI.POWERPC_SYSV: _CallAbiExpectation(16, 16),
+    ABI.POWERPC64_ELFV2: _CallAbiExpectation(16, 32),
+    ABI.S390X_SYSV: _CallAbiExpectation(8, 160),
+}
+
+
 def _extra_code_address(target: Target, directory: Path) -> int:
     """Return the raw code VA used by the minimal exact-byte envelope."""
 
@@ -497,17 +519,25 @@ def _extra_code_address(target: Target, directory: Path) -> int:
 
 
 def _linked_raw_code_address(target: Target, executable: Path) -> int:
-    if target.arch is Architecture.SPARC32:
-        return 0x200B4
-    if target.arch is Architecture.SPARC64:
-        return 0x200120
-    if target.abi is ABI.POWERPC64_ELFV1:
-        return 0x10000100
-
     from elftools.elf.elffile import ELFFile
 
     with executable.open("rb") as stream:
-        return int(ELFFile(stream).header["e_entry"])
+        elf = ELFFile(stream)
+        entry = int(elf.header["e_entry"])
+        if target.abi is not ABI.POWERPC64_ELFV1:
+            return entry
+
+        for segment in elf.iter_segments():
+            start = int(segment["p_vaddr"])
+            file_size = int(segment["p_filesz"])
+            if segment["p_type"] == "PT_LOAD" and start <= entry and entry + target.word_size <= start + file_size:
+                descriptor_offset = int(segment["p_offset"]) + entry - start
+                stream.seek(descriptor_offset)
+                descriptor_code = stream.read(target.word_size)
+                if len(descriptor_code) != target.word_size:
+                    raise AssertionError("truncated PPC64 ELFv1 entry descriptor")
+                return int.from_bytes(descriptor_code, target.endian.value)
+        raise AssertionError("PPC64 ELFv1 entry descriptor is not file-backed by a PT_LOAD segment")
 
 
 def _powerpc_load(target: Target, register: int, value: int) -> list[str]:
@@ -812,11 +842,11 @@ def _extra_call_source(
     code: int,
     chain_address: int,
     chain_size: int,
+    alignment: int,
     caller_area_size: int,
 ) -> tuple[str, int]:
     arch = target.arch
     word = target.word_size
-    alignment = target.convention.stack_alignment
     chain_offset = chain_address - code
     lines: list[str] = []
     if target.abi is ABI.POWERPC64_ELFV2:
@@ -1018,6 +1048,7 @@ def _extra_call_source(
 
 def _build_extra_call_fixture(case: _RopCase, directory: Path):
     target = _target(case)
+    expectation = _EXTRA_CALL_ABI_EXPECTATIONS[target.abi]
     code = _extra_code_address(target, directory)
     chain = build_static_call(
         target,
@@ -1030,10 +1061,27 @@ def _build_extra_call_fixture(case: _RopCase, directory: Path):
     )
     if chain.call_frame is None:  # pragma: no cover - builder invariant
         raise AssertionError("static call has no CallFrame")
+    expected_entry_sp_offset = expectation.entry_sp_words * target.word_size
+    actual_contract = (
+        chain.call_frame.entry_sp_offset,
+        chain.call_frame.entry_sp_alignment,
+        chain.call_frame.entry_sp_alignment_bias,
+        chain.call_frame.caller_area_size,
+    )
+    expected_contract = (
+        expected_entry_sp_offset,
+        expectation.entry_sp_alignment,
+        expectation.entry_sp_alignment_bias,
+        expectation.caller_area_size,
+    )
+    if actual_contract != expected_contract:
+        raise AssertionError(f"builder call frame {actual_contract!r} does not match ABI oracle {expected_contract!r}")
     candidate = code + 0x500
-    frame = chain.call_frame
-    chain_address = candidate + ((frame.required_chain_base_remainder - candidate) % frame.entry_sp_alignment)
-    entry_sp = chain.function_entry_sp(chain_address)
+    required_remainder = (
+        -expected_entry_sp_offset - expectation.entry_sp_alignment_bias
+    ) % expectation.entry_sp_alignment
+    chain_address = candidate + ((required_remainder - candidate) % expectation.entry_sp_alignment)
+    entry_sp = chain_address + expected_entry_sp_offset
     layout = RuntimeLayout(main_base=0)
     data = chain.materialize(layout, chain_base=chain_address, entry_sp=entry_sp)
     source, chain_offset = _extra_call_source(
@@ -1041,7 +1089,8 @@ def _build_extra_call_fixture(case: _RopCase, directory: Path):
         code,
         chain_address,
         len(data),
-        frame.caller_area_size,
+        expectation.entry_sp_alignment,
+        expectation.caller_area_size,
     )
     raw = _assemble_and_patch_chain(source, target, chain_offset, data)
     executable = directory / "call"
@@ -1065,6 +1114,7 @@ class RopQemuMatrixTests(unittest.TestCase):
         call_targets = {_target(case).name for case in _STATIC_CALL_CASES}
         self.assertEqual(call_targets, runtime_targets - direct_call_exclusions)
         self.assertEqual(len(call_targets), len(_STATIC_CALL_CASES))
+        self.assertEqual(set(_EXTRA_CALL_ABI_EXPECTATIONS), {_target(case).abi for case in _EXTRA_CALL_CASES})
 
         self.assertEqual(
             {_target(case).name for case in _RET2LIBC_CASES},
@@ -1073,10 +1123,19 @@ class RopQemuMatrixTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("PWNC_QEMU_TESTS") == "1" and _STATIC_TOOLS_PRESENT and _STATIC_QEMU_PRESENT,
-    "set PWNC_QEMU_TESTS=1 with LLVM/LLD and the complete QEMU user-emulator matrix installed",
+    _QEMU_OPT_IN,
+    "set PWNC_QEMU_TESTS=1 to run the complete static-ROP QEMU matrix",
 )
 class StaticRopQemuTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if _STATIC_MISSING_TOOLS:
+            raise AssertionError(
+                "PWNC_QEMU_TESTS=1 requires the complete static-ROP matrix; missing: "
+                + ", ".join(_STATIC_MISSING_TOOLS)
+            )
+
     def test_static_syscall_and_call_chains_execute_on_primary_targets(self) -> None:
         for case in _PRIMARY_ROP_CASES:
             target = _target(case)
@@ -1122,6 +1181,7 @@ class StaticRopQemuTests(unittest.TestCase):
                 )
                 self.assertTrue(chain_mapping.readable)
                 self.assertFalse(chain_mapping.writable)
+                self.assertTrue(chain_mapping.executable)
 
                 result = subprocess.run([case.qemu, str(executable)], capture_output=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, 43, result.stderr.decode(errors="replace"))
@@ -1135,6 +1195,13 @@ class StaticRopQemuTests(unittest.TestCase):
                 target, chain, executable, chain_address, entry_sp = _build_extra_call_fixture(case, Path(directory))
                 self.assertEqual(chain.validate_call_frame(chain_address, entry_sp=entry_sp), entry_sp)
                 assert chain.call_frame is not None
+                profile = inspect_elf(executable)
+                chain_mapping = next(
+                    item for item in profile.load_ranges if item.contains(chain_address, chain.byte_length)
+                )
+                self.assertTrue(chain_mapping.readable)
+                self.assertFalse(chain_mapping.writable)
+                self.assertTrue(chain_mapping.executable)
                 caller_words = chain.call_frame.caller_area_size // target.word_size
                 if caller_words:
                     resolved = chain.resolved_words(RuntimeLayout(main_base=0))
@@ -1225,7 +1292,8 @@ _RET2LIBC_CASES = (
     _RopCase("x86", None, "qemu-i386"),
     _RopCase("x86_64", None, "qemu-x86_64"),
 )
-_RET2LIBC_TOOLS_PRESENT = shutil.which("cc") is not None and all(shutil.which(case.qemu) for case in _RET2LIBC_CASES)
+_RET2LIBC_REQUIRED_TOOLS = ("cc", *sorted({case.qemu for case in _RET2LIBC_CASES}))
+_RET2LIBC_MISSING_TOOLS = tuple(tool for tool in _RET2LIBC_REQUIRED_TOOLS if shutil.which(tool) is None)
 
 
 def _compile_ret2libc_fixture(case: _RopCase, directory: Path) -> Path:
@@ -1253,14 +1321,6 @@ def _compile_ret2libc_fixture(case: _RopCase, directory: Path) -> Path:
     ]
     compiled = subprocess.run(command, capture_output=True, text=True, check=False)
     if compiled.returncode:
-        dependency_markers = (
-            "cannot find",
-            "No such file or directory",
-            "bits/libc-header-start.h",
-            "skipping incompatible",
-        )
-        if any(marker in compiled.stderr for marker in dependency_markers):
-            raise unittest.SkipTest(f"{target.bits}-bit compiler/runtime support is unavailable: {compiled.stderr}")
         raise AssertionError(f"ret2libc fixture compilation failed:\n{compiled.stdout}\n{compiled.stderr}")
     return executable
 
@@ -1278,10 +1338,21 @@ def _read_process_line(process: subprocess.Popen[bytes], timeout: int = 10) -> b
 
 
 @unittest.skipUnless(
-    os.environ.get("PWNC_QEMU_TESTS") == "1" and sys.platform.startswith("linux") and _RET2LIBC_TOOLS_PRESENT,
-    "set PWNC_QEMU_TESTS=1 on Linux with cc and x86 QEMU user emulators installed",
+    _QEMU_OPT_IN,
+    "set PWNC_QEMU_TESTS=1 to run the exact-libc x86 QEMU matrix",
 )
 class Ret2libcQemuTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if not sys.platform.startswith("linux"):
+            raise AssertionError("PWNC_QEMU_TESTS=1 ret2libc execution requires a Linux host")
+        if _RET2LIBC_MISSING_TOOLS:
+            raise AssertionError(
+                "PWNC_QEMU_TESTS=1 requires the complete ret2libc matrix; missing: "
+                + ", ".join(_RET2LIBC_MISSING_TOOLS)
+            )
+
     def test_exact_loaded_libc_system_chain_executes_from_live_base(self) -> None:
         for case in _RET2LIBC_CASES:
             target = _target(case)

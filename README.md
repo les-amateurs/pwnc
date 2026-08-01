@@ -4,6 +4,18 @@
 
 Formatter used is `ruff` and configured in `pyproject.toml`.
 
+## payload framework
+
+The installable `payloads` package provides architecture-, bit-width-,
+endianness-, and ABI-aware Linux exploit payload construction. It includes raw
+command/ORW/RW-to-RX shellcode, symbolic ret2libc and static ROP, exact ELF/libc
+identity and mitigation inspection, arbitrary-read/write staging and execution
+workflows, and a machine-readable support matrix across 21 target variants.
+
+See the [payload framework documentation](https://github.com/les-amateurs/pwnc/blob/main/payloads/README.md)
+for the supported-target matrix, public API examples, execution-policy model,
+QEMU evidence, and limitations.
+
 ## commands
 
 ### kernel

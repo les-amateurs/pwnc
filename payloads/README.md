@@ -64,11 +64,13 @@ Symbolic static syscall ROP is implemented for every catalog target, and
 symbolic static function calls are implemented except on PPC64 ELFv1 and
 SPARC. The opt-in QEMU suite executes the static syscall chains on all 20
 runnable target variants and the direct-call chains on all 17 runnable variants
-that model direct calls. PPC32 little-endian remains assembly-tested because no
-matching qemu-user emulator is available. Ret2libc `system(command)` has the
-same direct-call exclusions; exact-artifact, live-base chains execute under
-QEMU on i386 and AMD64, while the other implemented variants have unit
-coverage. Target-generic arbitrary-memory adapters, explicit payload
+that model direct calls. Because no matching qemu-user emulator is available,
+PPC32 little-endian shellcode remains assembly-tested and its ROP builders
+remain unit-tested; neither has QEMU execution evidence. Ret2libc
+`system(command)` has the same direct-call exclusions; exact-artifact,
+live-base chains execute under QEMU on i386 and AMD64, while every other
+implemented variant is covered by the exact-identity unit matrix.
+Target-generic arbitrary-memory adapters, explicit payload
 staging/triggering, and exact-libc call workflows are implemented for every
 catalog target and are unit-tested, not QEMU-tested.
 
@@ -307,14 +309,17 @@ are modeled for every catalog target, including PPC64 ELFv1, but require exact
 caller-supplied register-loading and syscall gadgets plus the correct Linux
 syscall number. Static direct calls retain the PPC64 ELFv1/SPARC exclusions.
 
-The opt-in QEMU fixtures materialize builder-produced chains into non-executable
-memory and transfer control through synthetic gadgets with the documented
-semantics. The static syscall fixtures execute on all 20 runnable catalog
-variants. Direct-call fixtures execute on all 17 runnable variants where calls
-are modeled; they check function-entry stack alignment and the MIPS o32, PPC32,
-PPC64 ELFv2, and s390x mandatory caller areas at runtime. PPC64 ELFv1 and SPARC
-therefore have syscall-only ROP execution evidence, and PPC32 little-endian is
-assembly-tested only.
+The opt-in QEMU fixtures materialize builder-produced chains and transfer
+control through synthetic gadgets with the documented semantics. Primary x86,
+ARM, and AArch64 fixtures place the chain in writable non-executable `.data`;
+the remaining minimal raw envelopes embed it as non-writable bytes in their
+executable load segment. The static syscall fixtures execute on all 20 runnable
+catalog variants. Direct-call fixtures execute on all 17 runnable variants
+where calls are modeled; they check function-entry stack alignment and the
+MIPS o32, PPC32, PPC64 ELFv2, and s390x mandatory caller areas against an
+independent test-owned ABI table at runtime. PPC64 ELFv1 and SPARC therefore
+have syscall-only ROP execution evidence, and PPC32 little-endian is
+unit-tested only.
 
 Separate i386 and AMD64 fixtures load the host's exact target libc through
 QEMU, disclose the actual `system` address and owning mapping base, parse that
@@ -421,8 +426,11 @@ derived from the memory callbacks. PPC64 ELFv1 calls require a callback marked
 function-descriptor-aware. `GotSystemWorkflow` is an alternative for dynamic
 binaries with no/partial RELRO: it writes the command, temporarily replaces a
 specified GOT slot with exact-artifact `system`, calls the specified PLT entry,
-and restores the original slot in `finally`. `from_libc()` requires an explicit
-`got_slot_writable=` assertion for that exact slot; use
+and restores the original slot in `finally`. It is unavailable on PPC64 ELFv1,
+where a GOT function pointer needs descriptor/TOC material rather than a raw
+`system` address; use a descriptor-aware explicit call workflow instead.
+`from_libc()` requires an explicit `got_slot_writable=` assertion for that
+exact slot; use
 `profile.got_slot_writable(symbol, runtime_page_size=...)` with a page size
 observed from that runtime when an `ELFProfile` is available. It
 rejects the strategy before memory I/O for full RELRO, static linkage, or an
@@ -484,11 +492,12 @@ artifact actually loaded by the guest. They require suitable native compiler
 and multilib support in addition to the i386 and AMD64 emulators.
 
 PPC32 little-endian remains covered by source and relocation-free assembly
-tests but is intentionally absent from QEMU evidence. If a required
-tool/emulator is absent, the corresponding QEMU test class or target subtest is
-skipped; a skipped test is not evidence that payloads ran on that host. The
-ret2libc test establishes correct use of the disclosed live base; it does not
-claim that repeated QEMU runs produce different ASLR layouts.
+tests but is intentionally absent from QEMU evidence. With the opt-in variable
+unset, execution classes are skipped. Once `PWNC_QEMU_TESTS=1` is set, a
+missing compiler, linker, multilib runtime, or claimed emulator fails the run
+instead of silently turning it into evidence-free success. The ret2libc test
+establishes correct use of the disclosed live base; it does not claim that
+repeated QEMU runs produce different ASLR layouts.
 
 ## Limitations
 

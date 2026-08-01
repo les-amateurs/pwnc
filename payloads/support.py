@@ -168,10 +168,15 @@ _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyTyp
                 "CommandAssemblyTests.test_exit_and_rw_to_rx_stager_assemble_for_all_implemented_targets"
             ),
         ),
-        Capability.RET2LIBC: ("payloads.rop.build_ret2libc_system",),
+        Capability.RET2LIBC: (
+            "payloads.rop.build_ret2libc_system",
+            "payloads/tests/test_rop.py::RopTargetMatrixTests.test_exact_identity_ret2libc_matrix_is_complete",
+        ),
         Capability.STATIC_ROP: (
             "payloads.rop.build_static_call",
             "payloads.rop.build_static_syscall",
+            "payloads/tests/test_rop.py::RopTargetMatrixTests.test_static_call_materializes_for_every_direct_call_target",
+            "payloads/tests/test_rop.py::RopTargetMatrixTests.test_static_syscall_materializes_for_every_catalog_target",
         ),
         Capability.ARB_EXECUTOR: (
             "payloads.arbio.ArbitraryMemory",
@@ -235,6 +240,12 @@ def _implemented_detail(target: Target, capability: Capability) -> str:
             "direct calls expose ABI call-frame placement constraints"
         )
     if capability is Capability.ARB_EXECUTOR:
+        if target.abi is ABI.POWERPC64_ELFV1:
+            return (
+                "target-endian arbitrary-memory adapters, explicit payload staging/triggering, and "
+                "descriptor-aware exact-libc call workflows exist; raw-address GOT-to-system replacement is "
+                "unsupported for ELFv1"
+            )
         return (
             "target-endian arbitrary-memory adapters, explicit payload staging/triggering, "
             "and exact-libc call workflows exist"
@@ -265,7 +276,25 @@ def _capability_support(target: Target, capability: Capability) -> CapabilitySup
 
     evidence = ["payloads.target.SUPPORTED_TARGETS"]
     if implemented:
-        evidence.extend(_IMPLEMENTATION_EVIDENCE[capability])
+        implementation_evidence = _IMPLEMENTATION_EVIDENCE[capability]
+        if capability is Capability.STATIC_ROP and target.name in _DIRECT_CALL_UNSUPPORTED:
+            implementation_evidence = tuple(
+                item
+                for item in implementation_evidence
+                if item
+                not in {
+                    "payloads.rop.build_static_call",
+                    (
+                        "payloads/tests/test_rop.py::"
+                        "RopTargetMatrixTests.test_static_call_materializes_for_every_direct_call_target"
+                    ),
+                }
+            )
+        if capability is Capability.ARB_EXECUTOR and target.abi is ABI.POWERPC64_ELFV1:
+            implementation_evidence = tuple(
+                item for item in implementation_evidence if item != "payloads.arbio.GotSystemWorkflow"
+            )
+        evidence.extend(implementation_evidence)
     if qemu_verified:
         if capability is Capability.RET2LIBC:
             detail = (
