@@ -220,6 +220,14 @@ def _native_environment() -> dict[str, str]:
     return environment
 
 
+def _host_aslr_enabled() -> bool:
+    setting = Path("/proc/sys/kernel/randomize_va_space")
+    try:
+        return int(setting.read_text().strip()) > 0
+    except (OSError, ValueError):
+        return False
+
+
 class NativeX86MatrixTests(unittest.TestCase):
     def test_native_matrix_is_exactly_linux_i386_and_amd64(self) -> None:
         self.assertEqual(
@@ -458,11 +466,12 @@ class NativeRet2libcTests(unittest.TestCase):
                                 process.kill()
                             process.communicate()
 
-                self.assertGreater(
-                    len(observed_bases),
-                    1,
-                    "three native processes should expose at least two distinct ASLR libc bases",
-                )
+                if _host_aslr_enabled():
+                    self.assertGreater(
+                        len(observed_bases),
+                        1,
+                        "three native processes should expose at least two distinct ASLR libc bases",
+                    )
 
 
 if __name__ == "__main__":

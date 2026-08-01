@@ -81,7 +81,8 @@ RW-to-RX stager, static syscall ROP, static direct-call ROP, and exact-loaded-
 libc ret2libc paths directly in both 64-bit AMD64 and kernel i386 compatibility
 mode. These runs do not start QEMU. The native ret2libc fixture also validates
 the loaded libc device/inode mappings, independently derives its live base,
-and observes address randomization across fresh processes.
+and, when host ASLR is enabled, observes address variation across fresh
+processes.
 
 ## Resolving an exact target
 
