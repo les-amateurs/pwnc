@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import struct
 import tarfile
 import tempfile
@@ -15,10 +16,11 @@ from payloads.tests.runtime_support import (
     SysrootError,
     UnsupportedSysrootError,
     load_manifest,
+    provision_sysroot,
     resolve_sysroot,
     validate_provisioned_sysroot,
 )
-from payloads.tests.runtime_support.sysroots import _safe_extract_tar
+from payloads.tests.runtime_support.sysroots import _safe_extract_tar, _write_completion_marker
 
 
 class GlibcSysrootManifestTests(unittest.TestCase):
@@ -162,6 +164,80 @@ class GlibcSysrootManifestTests(unittest.TestCase):
 
 
 class GlibcSysrootArtifactValidationTests(unittest.TestCase):
+    def test_qemu_argv_disables_loader_cache_before_selecting_library_path(self) -> None:
+        spec = resolve_sysroot("x86_64", lane="glibc-2.23")
+        provisioned = ProvisionedSysroot(
+            spec,
+            Path("/cache/root"),
+            Path("/cache/root"),
+            Path("/cache/root/lib/libc.so.6"),
+            Path("/cache/root/lib64/ld-linux-x86-64.so.2"),
+        )
+        with mock.patch("payloads.tests.runtime_support.sysroots.shutil.which", return_value="/qemu-x86_64"):
+            argv = provisioned.qemu_argv("guest", "argument")
+        self.assertEqual(
+            argv[:6],
+            (
+                "/qemu-x86_64",
+                "/cache/root/lib64/ld-linux-x86-64.so.2",
+                "--inhibit-cache",
+                "--library-path",
+                "/cache/root/lib",
+                str(Path("guest").resolve()),
+            ),
+        )
+        self.assertEqual(argv[6:], ("argument",))
+
+    def test_completion_marker_rejects_same_abi_same_version_file_mutations(self) -> None:
+        class RebuildRequested(Exception):
+            pass
+
+        spec = resolve_sysroot("x86_64", lane="glibc-2.23")
+        build_id = bytes.fromhex("0123456789abcdef0123456789abcdef01234567")
+        image = _minimal_elf64_with_build_id(62, 0, build_id) + spec.version_marker.encode()
+        for mutated_label in ("libc", "loader"):
+            with (
+                self.subTest(mutated_label=mutated_label),
+                tempfile.TemporaryDirectory(prefix="pwnc-sysroot-unit-") as directory,
+            ):
+                cache = Path(directory)
+                final = cache / "roots" / f"{spec.id}-{spec.fingerprint}"
+                libc = final / spec.libc
+                loader = final / spec.loader
+                libc.parent.mkdir(parents=True)
+                loader.parent.mkdir(parents=True, exist_ok=True)
+                libc.write_bytes(image)
+                loader.write_bytes(image)
+                provisioned = ProvisionedSysroot(spec, final, final, libc, loader)
+                validate_provisioned_sysroot(provisioned)
+                _write_completion_marker(final, spec, provisioned)
+                marker = json.loads((final / ".complete.json").read_text(encoding="utf-8"))
+                self.assertEqual(marker["schema_version"], 1)
+                self.assertEqual(marker["artifacts"], [artifact.sha256 for artifact in spec.artifacts])
+                self.assertEqual(
+                    {record["build_id"] for record in marker["files"].values()},
+                    {build_id.hex()},
+                )
+
+                with mock.patch("payloads.tests.runtime_support.sysroots._materialize_artifact") as materialize:
+                    cached = provision_sysroot(spec, cache)
+                materialize.assert_not_called()
+                self.assertEqual(cached, provisioned)
+
+                mutated = getattr(provisioned, mutated_label)
+                mutated.write_bytes(mutated.read_bytes() + b"different same-version ELF")
+                validate_provisioned_sysroot(provisioned)
+                with (
+                    mock.patch(
+                        "payloads.tests.runtime_support.sysroots._materialize_artifact",
+                        side_effect=RebuildRequested,
+                    ) as materialize,
+                    self.assertRaises(RebuildRequested),
+                ):
+                    provision_sysroot(spec, cache)
+                materialize.assert_called_once()
+                self.assertFalse(final.exists())
+
     def test_exact_elf_identity_and_version_marker_are_required(self) -> None:
         spec = resolve_sysroot("x86_64")
         with tempfile.TemporaryDirectory(prefix="pwnc-sysroot-unit-") as directory:
@@ -272,6 +348,23 @@ def _minimal_elf(elf_class: int, endian: str, machine: int, flags: int) -> bytes
     struct.pack_into(f"{order}H", header, 18, machine)
     struct.pack_into(f"{order}I", header, 36 if elf_class == 32 else 48, flags)
     return bytes(header)
+
+
+def _minimal_elf64_with_build_id(machine: int, flags: int, build_id: bytes) -> bytes:
+    header = bytearray(_minimal_elf(64, "little", machine, flags))
+    program_header_offset = len(header)
+    program_header_size = 56
+    note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\0" + build_id
+    note += bytes(-len(note) % 4)
+    note_offset = program_header_offset + program_header_size
+    struct.pack_into("<Q", header, 32, program_header_offset)
+    struct.pack_into("<H", header, 54, program_header_size)
+    struct.pack_into("<H", header, 56, 1)
+    program_header = bytearray(program_header_size)
+    struct.pack_into("<I", program_header, 0, 4)
+    struct.pack_into("<Q", program_header, 8, note_offset)
+    struct.pack_into("<Q", program_header, 32, len(note))
+    return bytes(header + program_header + note)
 
 
 if __name__ == "__main__":

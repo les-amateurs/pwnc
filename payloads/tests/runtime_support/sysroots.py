@@ -186,10 +186,11 @@ class ProvisionedSysroot:
     ) -> tuple[str, ...]:
         """Invoke the pinned loader and library directory under qemu-user.
 
-        Calling the loader explicitly is intentional.  ``qemu -L`` selects an
-        interpreter prefix but does not make a package-only sysroot a chroot;
-        a guest loader may otherwise consume the host ``ld.so.cache`` and host
-        libraries when the architecture is also native to the machine.
+        ``--inhibit-cache`` prevents the guest loader from consulting the host
+        ``ld.so.cache`` and ``--library-path`` gives the provisioned libraries
+        precedence.  Loader fallback paths are still not a chroot.  The live
+        fixture separately uses ``samefile`` on the loader-reported libc path
+        to prove that the exact provisioned libc was loaded.
         """
 
         qemu = shutil.which(self.qemu)
@@ -198,6 +199,7 @@ class ProvisionedSysroot:
         return (
             qemu,
             str(self.loader),
+            "--inhibit-cache",
             "--library-path",
             str(self.libc.parent),
             str(Path(executable).resolve()),
@@ -272,10 +274,9 @@ def provision_sysroot(
     final = roots_dir / f"{spec.id}-{spec.fingerprint}"
     lock_path = locks_dir / f"root-{spec.id}-{spec.fingerprint}.lock"
     with _exclusive_lock(lock_path):
-        if _complete_marker_matches(final, spec):
-            provisioned = _paths_from_root(spec, final)
-            validate_provisioned_sysroot(provisioned)
-            return provisioned
+        cached = _validated_cached_sysroot(final, spec)
+        if cached is not None:
+            return cached
         if final.exists():
             _remove_generated_tree(final, roots_dir)
 
@@ -287,11 +288,7 @@ def provision_sysroot(
             _relocate_bootlin_sdk(spec, final)
             provisioned = _paths_from_root(spec, final)
             validate_provisioned_sysroot(provisioned)
-            marker = {"id": spec.id, "fingerprint": spec.fingerprint, "artifacts": [a.sha256 for a in spec.artifacts]}
-            (final / ".complete.json").write_text(
-                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
-                encoding="utf-8",
-            )
+            _write_completion_marker(final, spec, provisioned)
             return provisioned
         except Exception:
             if staging.exists():
@@ -762,15 +759,117 @@ def _validate_elf(path: Path, expected: ElfIdentity, label: str) -> None:
         )
 
 
-def _complete_marker_matches(final: Path, spec: SysrootSpec) -> bool:
+def _validated_cached_sysroot(final: Path, spec: SysrootSpec) -> ProvisionedSysroot | None:
     marker = final / ".complete.json"
     if not marker.is_file():
-        return False
+        return None
     try:
         value = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
-    return value.get("id") == spec.id and value.get("fingerprint") == spec.fingerprint
+        return None
+    if not isinstance(value, dict):
+        return None
+    expected_artifacts = [artifact.sha256 for artifact in spec.artifacts]
+    if (
+        value.get("schema_version") != 1
+        or value.get("id") != spec.id
+        or value.get("fingerprint") != spec.fingerprint
+        or value.get("artifacts") != expected_artifacts
+    ):
+        return None
+    try:
+        provisioned = _paths_from_root(spec, final)
+        validate_provisioned_sysroot(provisioned)
+        actual_files = _provisioned_file_integrity(final, provisioned)
+    except (OSError, SysrootError):
+        return None
+    return provisioned if value.get("files") == actual_files else None
+
+
+def _write_completion_marker(final: Path, spec: SysrootSpec, provisioned: ProvisionedSysroot) -> None:
+    marker = {
+        "schema_version": 1,
+        "id": spec.id,
+        "fingerprint": spec.fingerprint,
+        "artifacts": [artifact.sha256 for artifact in spec.artifacts],
+        "files": _provisioned_file_integrity(final, provisioned),
+    }
+    (final / ".complete.json").write_text(
+        json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _provisioned_file_integrity(final: Path, provisioned: ProvisionedSysroot) -> dict[str, dict[str, str | None]]:
+    root = final.resolve()
+    records: dict[str, dict[str, str | None]] = {}
+    for label, path in (("libc", provisioned.libc), ("loader", provisioned.loader)):
+        resolved = path.resolve(strict=True)
+        if not _is_relative_to(resolved, root):
+            raise SysrootError(f"{provisioned.spec.id}: cached {label} escapes its extraction root")
+        data = resolved.read_bytes()
+        records[label] = {
+            "path": resolved.relative_to(root).as_posix(),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "build_id": _elf_build_id(data),
+        }
+    return records
+
+
+def _elf_build_id(data: bytes) -> str | None:
+    """Read a unique GNU build ID from ELF PT_NOTE records, if present."""
+
+    if len(data) < 52 or data[:4] != b"\x7fELF":
+        return None
+    elf_class = data[4]
+    byte_order = {1: "<", 2: ">"}.get(data[5])
+    if byte_order is None:
+        return None
+    try:
+        if elf_class == 1:
+            program_offset = struct.unpack_from(f"{byte_order}I", data, 28)[0]
+            entry_size = struct.unpack_from(f"{byte_order}H", data, 42)[0]
+            entry_count = struct.unpack_from(f"{byte_order}H", data, 44)[0]
+            minimum_size = 20
+            offset_field, size_field, word_format = 4, 16, "I"
+        elif elf_class == 2 and len(data) >= 64:
+            program_offset = struct.unpack_from(f"{byte_order}Q", data, 32)[0]
+            entry_size = struct.unpack_from(f"{byte_order}H", data, 54)[0]
+            entry_count = struct.unpack_from(f"{byte_order}H", data, 56)[0]
+            minimum_size = 40
+            offset_field, size_field, word_format = 8, 32, "Q"
+        else:
+            return None
+        if entry_size < minimum_size or program_offset + entry_size * entry_count > len(data):
+            return None
+
+        candidates: set[str] = set()
+        for index in range(entry_count):
+            entry = program_offset + index * entry_size
+            if struct.unpack_from(f"{byte_order}I", data, entry)[0] != 4:  # PT_NOTE
+                continue
+            note_offset = struct.unpack_from(f"{byte_order}{word_format}", data, entry + offset_field)[0]
+            note_size = struct.unpack_from(f"{byte_order}{word_format}", data, entry + size_field)[0]
+            note_end = note_offset + note_size
+            if note_end > len(data):
+                return None
+            cursor = note_offset
+            while cursor + 12 <= note_end:
+                name_size, description_size, note_type = struct.unpack_from(f"{byte_order}III", data, cursor)
+                cursor += 12
+                name_end = cursor + name_size
+                description_start = (name_end + 3) & ~3
+                description_end = description_start + description_size
+                next_note = (description_end + 3) & ~3
+                if name_end > note_end or description_end > note_end or next_note > note_end:
+                    return None
+                name = data[cursor:name_end].rstrip(b"\0")
+                if note_type == 3 and name == b"GNU":  # NT_GNU_BUILD_ID
+                    candidates.add(data[description_start:description_end].hex())
+                cursor = next_note
+        return next(iter(candidates)) if len(candidates) == 1 else None
+    except (OverflowError, struct.error):
+        return None
 
 
 def _remove_generated_tree(path: Path, expected_parent: Path) -> None:
