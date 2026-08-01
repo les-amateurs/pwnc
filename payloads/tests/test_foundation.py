@@ -61,6 +61,22 @@ class TargetTests(unittest.TestCase):
             target.pack(1 << 32)
         self.assertEqual(target.pack(-1, truncate=True), b"\xff" * 4)
 
+    def test_thumb_entry_sets_state_bit(self) -> None:
+        target = resolve_target("thumb")
+        payload = Payload(b"\x00\xbf", target, PayloadKind.SHELLCODE, "thumb nop")
+        self.assertEqual(payload.entry(0x1000), 0x1001)
+
+    def test_mips_o32_only_has_four_syscall_argument_registers(self) -> None:
+        target = resolve_target("mips32")
+        self.assertEqual(target.convention.syscall_arguments, ("a0", "a1", "a2", "a3"))
+
+    def test_ppc64_elfv1_raw_entry_is_not_a_function_descriptor(self) -> None:
+        target = resolve_target("ppc64")
+        payload = Payload(b"\x60\x00\x00\x00", target, PayloadKind.SHELLCODE, "ppc nop")
+        self.assertEqual(payload.entry(0x10000), 0x10000)
+        with self.assertRaises(UnsupportedTargetError):
+            target.function_pointer(0x10000)
+
 
 class RuntimeModelTests(unittest.TestCase):
     def test_relative_addresses_require_and_use_correct_base(self) -> None:

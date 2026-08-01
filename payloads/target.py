@@ -54,6 +54,12 @@ class ABI(str, Enum):
     S390X_SYSV = "s390x-sysv"
 
 
+class FunctionPointerModel(str, Enum):
+    RAW_CODE_ADDRESS = "raw-code-address"
+    THUMB_STATE_BIT = "thumb-state-bit"
+    PPC64_ELFV1_DESCRIPTOR = "ppc64-elfv1-descriptor"
+
+
 @dataclass(frozen=True, slots=True)
 class CallingConvention:
     """Registers and alignment needed by function-call and syscall builders."""
@@ -85,6 +91,7 @@ class Target:
     pwntools_arch: str
     zig_target: str
     os: str = "linux"
+    function_pointer_model: FunctionPointerModel = FunctionPointerModel.RAW_CODE_ADDRESS
 
     @property
     def word_size(self) -> int:
@@ -125,6 +132,25 @@ class Target:
 
     def pack_words(self, words: Iterable[int], *, truncate: bool = False) -> bytes:
         return b"".join(self.pack(word, truncate=truncate) for word in words)
+
+    def entry_address(self, address: int) -> int:
+        """Return an ISA-correct raw code entry address."""
+
+        return address | 1 if self.function_pointer_model is FunctionPointerModel.THUMB_STATE_BIT else address
+
+    def function_pointer(self, address: int) -> int:
+        """Return an ABI-correct callable function pointer.
+
+        Thumb uses bit zero to select instruction state.  PPC64 ELFv1 function
+        symbols are descriptors rather than direct PCs and therefore cannot be
+        converted without reading the descriptor and restoring its TOC value.
+        """
+
+        if self.function_pointer_model is FunctionPointerModel.THUMB_STATE_BIT:
+            return address | 1
+        if self.function_pointer_model is FunctionPointerModel.PPC64_ELFV1_DESCRIPTOR:
+            raise UnsupportedTargetError("PPC64 ELFv1 calls require a function descriptor and TOC-aware primitive")
+        return address
 
 
 def _cc(
@@ -170,7 +196,7 @@ _AARCH64 = _cc(
     tuple(f"x{i}" for i in range(8)), "x0", "sp", "pc", "x30", "x8", tuple(f"x{i}" for i in range(6)), "svc 0", 16
 )
 _MIPS32 = _cc(
-    ("a0", "a1", "a2", "a3"), "v0", "sp", "pc", "ra", "v0", ("a0", "a1", "a2", "a3", "t0", "t1", "t2"), "syscall", 8
+    ("a0", "a1", "a2", "a3"), "v0", "sp", "pc", "ra", "v0", ("a0", "a1", "a2", "a3"), "syscall", 8
 )
 _MIPS64 = _cc(
     tuple(f"a{i}" for i in range(8)), "v0", "sp", "pc", "ra", "v0", tuple(f"a{i}" for i in range(6)), "syscall", 16
@@ -204,8 +230,18 @@ def _target(
     convention: CallingConvention,
     pwntools_arch: str,
     zig_target: str,
+    function_pointer_model: FunctionPointerModel = FunctionPointerModel.RAW_CODE_ADDRESS,
 ) -> Target:
-    return Target(arch, bits, endian, abi, convention, pwntools_arch, zig_target)
+    return Target(
+        arch,
+        bits,
+        endian,
+        abi,
+        convention,
+        pwntools_arch,
+        zig_target,
+        function_pointer_model=function_pointer_model,
+    )
 
 
 SUPPORTED_TARGETS: tuple[Target, ...] = (
@@ -213,8 +249,26 @@ SUPPORTED_TARGETS: tuple[Target, ...] = (
     _target(Architecture.X86_64, 64, Endian.LITTLE, ABI.AMD64_SYSV, _AMD64, "amd64", "x86_64-linux-none"),
     _target(Architecture.ARM, 32, Endian.LITTLE, ABI.ARM_EABI, _ARM, "arm", "arm-linux-none"),
     _target(Architecture.ARM, 32, Endian.BIG, ABI.ARM_EABI, _ARM, "arm", "armeb-linux-none"),
-    _target(Architecture.THUMB, 32, Endian.LITTLE, ABI.ARM_EABI, _ARM, "thumb", "thumb-linux-none"),
-    _target(Architecture.THUMB, 32, Endian.BIG, ABI.ARM_EABI, _ARM, "thumb", "thumbeb-linux-none"),
+    _target(
+        Architecture.THUMB,
+        32,
+        Endian.LITTLE,
+        ABI.ARM_EABI,
+        _ARM,
+        "thumb",
+        "thumb-linux-none",
+        FunctionPointerModel.THUMB_STATE_BIT,
+    ),
+    _target(
+        Architecture.THUMB,
+        32,
+        Endian.BIG,
+        ABI.ARM_EABI,
+        _ARM,
+        "thumb",
+        "thumbeb-linux-none",
+        FunctionPointerModel.THUMB_STATE_BIT,
+    ),
     _target(Architecture.ARM64, 64, Endian.LITTLE, ABI.AARCH64_AAPCS, _AARCH64, "aarch64", "aarch64-linux-none"),
     _target(Architecture.ARM64, 64, Endian.BIG, ABI.AARCH64_AAPCS, _AARCH64, "aarch64", "aarch64_be-linux-none"),
     _target(Architecture.MIPS32, 32, Endian.LITTLE, ABI.MIPS_O32, _MIPS32, "mips", "mipsel-linux-none"),
@@ -225,7 +279,16 @@ SUPPORTED_TARGETS: tuple[Target, ...] = (
     _target(Architecture.RISCV64, 64, Endian.LITTLE, ABI.RISCV_LP64, _RISCV64, "riscv64", "riscv64-linux-none"),
     _target(Architecture.POWERPC32, 32, Endian.BIG, ABI.POWERPC_SYSV, _PPC32, "powerpc", "powerpc-linux-none"),
     _target(Architecture.POWERPC32, 32, Endian.LITTLE, ABI.POWERPC_SYSV, _PPC32, "powerpc", "powerpcle-linux-none"),
-    _target(Architecture.POWERPC64, 64, Endian.BIG, ABI.POWERPC64_ELFV1, _PPC64, "powerpc64", "powerpc64-linux-none"),
+    _target(
+        Architecture.POWERPC64,
+        64,
+        Endian.BIG,
+        ABI.POWERPC64_ELFV1,
+        _PPC64,
+        "powerpc64",
+        "powerpc64-linux-none",
+        FunctionPointerModel.PPC64_ELFV1_DESCRIPTOR,
+    ),
     _target(
         Architecture.POWERPC64,
         64,
@@ -376,6 +439,7 @@ __all__ = [
     "Architecture",
     "CallingConvention",
     "Endian",
+    "FunctionPointerModel",
     "SUPPORTED_TARGETS",
     "Target",
     "resolve_target",

@@ -1,5 +1,6 @@
 """Cross-architecture exploit payload construction primitives."""
 
+from .assembler import LLVMAssembler, llvm_triple
 from .errors import (
     AddressResolutionError,
     AssemblyError,
@@ -22,7 +23,17 @@ from .model import (
     Relro,
     RuntimeLayout,
 )
-from .target import ABI, Architecture, CallingConvention, Endian, SUPPORTED_TARGETS, Target, resolve_target
+from .shellcode import command_shellcode, command_source
+from .target import (
+    ABI,
+    Architecture,
+    CallingConvention,
+    Endian,
+    FunctionPointerModel,
+    SUPPORTED_TARGETS,
+    Target,
+    resolve_target,
+)
 
 __all__ = [
     "ABI",
@@ -34,11 +45,13 @@ __all__ = [
     "ConstraintError",
     "Endian",
     "ExecutionPolicy",
+    "FunctionPointerModel",
     "Image",
     "LibcError",
     "LibcIdentity",
     "LibcImage",
     "Linkage",
+    "LLVMAssembler",
     "MemoryAccessError",
     "MemoryRequirement",
     "Mitigations",
@@ -51,5 +64,8 @@ __all__ = [
     "SUPPORTED_TARGETS",
     "Target",
     "UnsupportedTargetError",
+    "command_shellcode",
+    "command_source",
+    "llvm_triple",
     "resolve_target",
 ]

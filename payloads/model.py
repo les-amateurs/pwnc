@@ -63,7 +63,7 @@ class Payload:
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     def entry(self, load_address: int) -> int:
-        return load_address + self.entry_offset
+        return self.target.entry_address(load_address + self.entry_offset)
 
 
 class Image(str, Enum):
