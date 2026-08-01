@@ -331,6 +331,18 @@ def _assert_compiled_target(test: unittest.TestCase, profile_target: Target, int
         test.assertEqual(_target_key(profile_target), _target_key(intended))
 
 
+def _assert_exact_interpreter(
+    test: unittest.TestCase,
+    provisioned: ProvisionedSysroot,
+    profile: ELFProfile,
+) -> None:
+    test.assertIsNotNone(profile.interpreter)
+    assert profile.interpreter is not None
+    guest_interpreter = provisioned.sysroot / profile.interpreter.removeprefix("/")
+    test.assertTrue(guest_interpreter.is_file(), guest_interpreter)
+    test.assertTrue(os.path.samefile(guest_interpreter, provisioned.loader))
+
+
 def _assert_runtime_libc(
     test: unittest.TestCase,
     provisioned: ProvisionedSysroot,
@@ -425,7 +437,7 @@ class GlibcQemuFSOPTests(unittest.TestCase):
                     self.assertFalse(profile.pie)
                     self.assertIs(profile.linkage, Linkage.DYNAMIC)
                     self.assertTrue(profile.nx, profile.nx_evidence)
-                    self.assertEqual(profile.interpreter, f"/{spec.loader}")
+                    _assert_exact_interpreter(self, provisioned, profile)
 
                     if spec.lane == "glibc-2.23":
                         routes = (("fflush", FSOPFamily.LEGACY, FSOPActivation.FFLUSH, None),)
@@ -574,7 +586,7 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                 self.assertFalse(profile.pie)
                 self.assertIs(profile.linkage, Linkage.DYNAMIC)
                 self.assertTrue(profile.nx, profile.nx_evidence)
-                self.assertEqual(profile.interpreter, f"/{spec.loader}")
+                _assert_exact_interpreter(self, provisioned, profile)
                 main_adapter = ExactELFAdapter.from_file(executable, expected_target=target)
                 expected = bytes(range(256)) + b"\0PWNC libc ROP\n"
                 input_file = root / "orw-input"
