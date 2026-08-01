@@ -17,6 +17,7 @@ _PPC32_LE = resolve_target("powerpc32", endian="little").name
 _PPC64_ELFV1 = resolve_target("ppc64").name
 _RET2LIBC_QEMU_TARGETS = {resolve_target("x86").name, resolve_target("x86_64").name}
 _NATIVE_X86_TARGETS = _RET2LIBC_QEMU_TARGETS
+_RISCV_TARGETS = {resolve_target("riscv32").name, resolve_target("riscv64").name}
 _NATIVE_CAPABILITIES = {
     Capability.COMMAND,
     Capability.ORW,
@@ -24,6 +25,7 @@ _NATIVE_CAPABILITIES = {
     Capability.STAGER,
     Capability.RET2LIBC,
     Capability.STATIC_ROP,
+    Capability.FSOP,
 }
 _QEMU_SEMIHOSTING_TARGETS = {
     resolve_target("arm", endian="little").name,
@@ -118,6 +120,33 @@ class SupportMatrixTests(unittest.TestCase):
                 else:
                     self.assertTrue(direct_call_evidence)
 
+    def test_fsop_is_structural_everywhere_with_exact_native_x86_claims(self) -> None:
+        self.assertEqual(len(SUPPORTED_TARGETS), 21)
+        for target in SUPPORTED_TARGETS:
+            with self.subTest(target=target.name):
+                coverage = capability_support(target, Capability.FSOP)
+                self.assertEqual(coverage.level, SupportLevel.IMPLEMENTED)
+                self.assertTrue(coverage.implemented)
+                self.assertFalse(coverage.qemu_verified)
+                self.assertEqual(coverage.native_verified, target.name in _NATIVE_X86_TARGETS)
+                self.assertIn("exact-libc-bound", coverage.detail)
+                self.assertIn("glibc-version-dependent", coverage.detail)
+                self.assertIn("structural byte-layout", coverage.detail)
+                self.assertIn("all 21 catalog targets", coverage.detail)
+                self.assertTrue(any("payloads.fsop.FSOP" in item for item in coverage.evidence))
+                self.assertTrue(any("test_fsop.py" in item for item in coverage.evidence))
+                self.assertFalse(any("test_fsop_qemu.py" in item for item in coverage.evidence))
+                self.assertEqual(
+                    any("NativeFSOPTests" in item for item in coverage.evidence),
+                    target.name in _NATIVE_X86_TARGETS,
+                )
+                if target.name in _RISCV_TARGETS:
+                    self.assertIn("legacy fake-vtable routes", coverage.detail)
+                    self.assertIn("validation bypass", coverage.detail)
+                if target.name == _PPC32_LE:
+                    self.assertIn("no upstream glibc target", coverage.detail)
+                    self.assertIn("downstream or custom libc artifact", coverage.detail)
+
     def test_qemu_semihosting_coverage_is_exactly_the_automatic_user_mode_matrix(self) -> None:
         for target in SUPPORTED_TARGETS:
             with self.subTest(target=target.name):
@@ -156,7 +185,7 @@ class SupportMatrixTests(unittest.TestCase):
 
     def test_export_is_versioned_and_json_serializable(self) -> None:
         exported = support_matrix_data()
-        self.assertEqual(exported["schema_version"], 3)
+        self.assertEqual(exported["schema_version"], 4)
         self.assertEqual(exported["capabilities"], [capability.value for capability in Capability])
         self.assertEqual(len(exported["targets"]), len(SUPPORTED_TARGETS))
         encoded = json.dumps(exported, sort_keys=True)

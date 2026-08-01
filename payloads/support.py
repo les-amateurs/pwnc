@@ -18,9 +18,9 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
-from .target import ABI, SUPPORTED_TARGETS, Endian, Target, resolve_target
+from .target import ABI, SUPPORTED_TARGETS, Architecture, Endian, Target, resolve_target
 
-SUPPORT_SCHEMA_VERSION = 3
+SUPPORT_SCHEMA_VERSION = 4
 
 
 class Capability(str, Enum):
@@ -32,6 +32,7 @@ class Capability(str, Enum):
     STAGER = "stager"
     RET2LIBC = "ret2libc"
     STATIC_ROP = "static-rop"
+    FSOP = "fsop"
     ARB_EXECUTOR = "arb-executor"
     QEMU_SEMIHOSTING = "qemu-semihosting"
 
@@ -153,6 +154,7 @@ _IMPLEMENTED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.STAGER: _SHELLCODE_IMPLEMENTED,
         Capability.RET2LIBC: _DIRECT_CALL_IMPLEMENTED,
         Capability.STATIC_ROP: _ALL_TARGET_NAMES,
+        Capability.FSOP: _ALL_TARGET_NAMES,
         Capability.ARB_EXECUTOR: _ALL_TARGET_NAMES,
         Capability.QEMU_SEMIHOSTING: _QEMU_SEMIHOSTING_IMPLEMENTED,
     }
@@ -166,6 +168,7 @@ _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.STAGER: _SHELLCODE_QEMU_VERIFIED,
         Capability.RET2LIBC: _RET2LIBC_QEMU_VERIFIED,
         Capability.STATIC_ROP: _STATIC_ROP_QEMU_VERIFIED,
+        Capability.FSOP: frozenset(),
         Capability.ARB_EXECUTOR: frozenset(),
         Capability.QEMU_SEMIHOSTING: _QEMU_SEMIHOSTING_IMPLEMENTED,
     }
@@ -179,6 +182,7 @@ _NATIVE_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.STAGER: _NATIVE_X86_VERIFIED,
         Capability.RET2LIBC: _NATIVE_X86_VERIFIED,
         Capability.STATIC_ROP: _NATIVE_X86_VERIFIED,
+        Capability.FSOP: _NATIVE_X86_VERIFIED,
         Capability.ARB_EXECUTOR: frozenset(),
         Capability.QEMU_SEMIHOSTING: frozenset(),
     }
@@ -225,6 +229,22 @@ _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyTyp
             "payloads/tests/test_rop.py::RopTargetMatrixTests.test_static_call_materializes_for_every_direct_call_target",
             "payloads/tests/test_rop.py::RopTargetMatrixTests.test_static_syscall_materializes_for_every_catalog_target",
         ),
+        Capability.FSOP: (
+            "payloads.fsop.FSOP",
+            "payloads.fsop.FSOPPayload.overlay",
+            (
+                "payloads/tests/test_fsop.py::"
+                "FSOPLayoutMatrixTests.test_legacy_file_and_vtable_layouts_cover_all_catalog_targets"
+            ),
+            (
+                "payloads/tests/test_fsop.py::"
+                "FSOPLayoutMatrixTests.test_wide_layouts_and_callback_relocations_cover_all_catalog_targets"
+            ),
+            (
+                "payloads/tests/test_fsop.py::"
+                "FSOPOverlayTests.test_endian_safe_arg0_commands_are_accepted_for_every_target"
+            ),
+        ),
         Capability.ARB_EXECUTOR: (
             "payloads.arbio.ArbitraryMemory",
             "payloads.arbio.PayloadStager",
@@ -259,6 +279,7 @@ _QEMU_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
             "Ret2libcQemuTests.test_exact_loaded_libc_system_chain_executes_from_live_base"
         ),
         Capability.STATIC_ROP: "payloads/tests/test_rop_qemu.py::StaticRopQemuTests",
+        Capability.FSOP: "no end-to-end FSOP activation test in current tree",
         Capability.ARB_EXECUTOR: "no QEMU execution test in current tree",
         Capability.QEMU_SEMIHOSTING: (
             "payloads/tests/test_semihost_qemu.py::"
@@ -293,6 +314,10 @@ _NATIVE_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
             "payloads/tests/test_native_x86.py::"
             "NativeStaticRopTests.test_static_syscall_and_direct_call_chains_execute_in_both_native_x86_modes"
         ),
+        Capability.FSOP: (
+            "payloads/tests/test_native_x86.py::"
+            "NativeFSOPTests.test_wide_fflush_and_seek_routes_dispatch_on_both_native_x86_modes"
+        ),
     }
 )
 
@@ -304,6 +329,7 @@ _UNIMPLEMENTED_DETAIL: Mapping[Capability, str] = MappingProxyType(
         Capability.STAGER: "target is recognized, but mmap/read/mprotect shellcode lowering is not implemented",
         Capability.RET2LIBC: "target is recognized, but its ABI is not supported by the ret2libc call builder",
         Capability.STATIC_ROP: "target is recognized, but no static-binary ROP builder is implemented",
+        Capability.FSOP: "target is recognized, but no glibc FILE-stream payload serializer is implemented",
         Capability.ARB_EXECUTOR: "target is recognized, but no arbitrary-read/write executor is implemented",
         Capability.QEMU_SEMIHOSTING: (
             "target is recognized, but qemu-user does not automatically intercept its semihosting trap"
@@ -333,6 +359,22 @@ def _implemented_detail(target: Target, capability: Capability) -> str:
             "symbolic static function-call and syscall chain builders exist for caller-supplied semantic gadgets; "
             "direct calls expose ABI call-frame placement constraints"
         )
+    if capability is Capability.FSOP:
+        detail = (
+            "exact-libc-bound, glibc-version-dependent legacy and wide FILE-stream payload serialization exists; "
+            "structural byte-layout, relocation, dispatch-route, and overlay tests cover all 21 catalog targets"
+        )
+        if target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
+            detail += (
+                "; upstream RISC-V glibc postdates primary-vtable validation, so legacy fake-vtable routes require "
+                "an explicit real validation bypass"
+            )
+        if target.name == "powerpc32-le-powerpc-sysv":
+            detail += (
+                "; PPC32 little-endian has no upstream glibc target, so use requires an exact downstream or "
+                "custom libc artifact"
+            )
+        return detail
     if capability is Capability.ARB_EXECUTOR:
         if target.abi is ABI.POWERPC64_ELFV1:
             return (

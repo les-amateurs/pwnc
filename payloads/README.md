@@ -420,6 +420,101 @@ command output, and the return path. This is live-base and exact-artifact
 evidence, not ASLR-variance evidence: the tested QEMU version may choose a
 repeatable guest libc base.
 
+## FILE-stream payloads (FSOP)
+
+`FSOP` constructs exact-libc FILE layouts across four explicit axes: the
+`stdout`, `stderr`, `stdin`, or owned `heap` stream; `legacy` or `wide`
+dispatch; the activation; and the intended jump slot. It serializes the
+FILE/wide-data/vtable state needed by the selected route. It does not model a
+controlled allocation, controlled free, heap corruption, or the primitive
+which installs or activates that state.
+
+The named routes are:
+
+- **Legacy fake primary vtable:** `EXIT` and `FFLUSH_ALL` (`fflush(NULL)`)
+  traverse `_IO_list_all` and dispatch `OVERFLOW`; direct `FFLUSH` dispatches
+  `SYNC`; `SEEK` dispatches `SEEKOFF` or `SEEKPOS`. A heap/list-triggered
+  legacy payload is labelled **House of Orange**, referring only to its FILE
+  list-dispatch stage—not to Orange's allocator-corruption setup. `EXPLICIT`
+  accepts any intended primary jump slot only with `dispatch_attested=True`.
+- **House of Apple 2:** a validated (possibly biased) `_IO_wfile_jumps`
+  primary dispatch enters `_IO_wfile_overflow`, which reaches the fake wide
+  table's `DOALLOCATE` entry through `_IO_wdoallocbuf`. `EXIT`, `FFLUSH_ALL`,
+  direct `FFLUSH`, and `SEEK` select and validate their different primary
+  dispatch offsets. A negative bias (the direct-`FFLUSH` and `SEEK` forms)
+  must be covered by caller-supplied exact `IOVtableBounds`; the builder does
+  not guess the artifact's hidden `__io_vtables` boundaries. Bind debugger or
+  debug-symbol offsets with `IOVtableBounds.from_libc_offsets()`.
+- **House of Cat:** a validated `_IO_wfile_jumps` primary dispatch enters
+  `_IO_wfile_seekoff`; its wide-get-mode switch dispatches the fake wide
+  table's `OVERFLOW` (`WOVERFLOW`) slot. The `SEEK` route is
+  source-proven for glibc `fseek`'s nonzero mode and supports `SEEKOFF` only;
+  automatic wide `SEEKPOS` is rejected. `EXIT`, `FFLUSH_ALL`, and direct
+  `FFLUSH` have an ABI-sensitive prototype mismatch and therefore need a
+  `DispatchAttestation` naming the call-site evidence and a nonzero
+  `seekoff_mode`. Direct `FFLUSH` also has a negative primary-vtable bias and
+  therefore needs exact `IOVtableBounds`.
+- **Wide explicit slot:** `EXPLICIT` places the callback in any requested wide
+  jump slot, but requires `dispatch_attested=True`; the caller owns proof that
+  its control-flow path executes that exact `WJUMP` entry.
+
+For example, this builds an exit-triggered House of Apple 2 payload for a heap
+FILE and then safely replaces the callback's argument-zero bytes:
+
+```python
+from payloads import FSOP, FSOPActivation, FSOPFamily, IOJumpSlot, LibcImage, RuntimeLayout
+
+libc = LibcImage.from_file("./libc.so.6", glibc_version="2.39")
+apple = FSOP(
+    libc,
+    stream="heap",
+    family=FSOPFamily.WIDE,
+    address=known_fake_file_address,
+    storage=known_auxiliary_storage,
+).build(
+    FSOPActivation.EXIT,
+    "system",
+    slot=IOJumpSlot.DOALLOCATE,
+)
+arg0 = b" sh\0" if libc.target.endian.value == "little" else b"sh\0\0"
+apple = apple.overlay_arg0(arg0)
+writes = apple.writes(RuntimeLayout(libc_base=leaked_libc_base))
+```
+
+The FILE pointer is callback argument zero. `overlay_arg0()` and the general
+`overlay()` re-run every byte-level execution predicate and reject changes
+that break flags, pointer relations, bounds, or protected relocations with
+`FSOPOverlayError`; they are composition operations, not unchecked byte
+patches. On a sparse standard stream, overlays are restricted to fields the
+builder already owns, so a longer arg0 cannot silently overwrite a live lock
+or other preserved state. Heap FILEs and auxiliary objects are complete owned placements.
+`stdout`, `stderr`, and `stdin` are exact-symbol sparse patches so live locks,
+chain pointers, and unrelated state are not accidentally zeroed: use
+`writes()` for minimal spans, or give `materialize()` the original FILE bytes
+when a complete image is required.
+
+Wide layouts require an exact glibc version because `_IO_wide_data` changed at
+glibc 2.30 and `_flags2` became three bytes at 2.41. Legacy fake primary
+vtables are accepted directly only before glibc 2.24; newer artifacts require
+`allow_vtable_bypass=True`, which is an explicit caller claim that a real
+vtable-validation bypass exists. Symbol callbacks and FILE/vtable addresses
+stay bound to the supplied `LibcImage` digest until runtime bases are applied.
+On PPC64 ELFv1, the callback must be explicitly attested as an `.opd` function
+descriptor with `callback_is_descriptor=True`; raw Thumb callback addresses
+must already carry the ISA-state bit (exact symbols preserve their recorded
+`st_value`).
+
+FILE, wide-data, and jump-table bytes are layout-tested for every repository
+architecture and endian variant. This is structural serialization coverage,
+not a blanket live-exploit claim. Exact-artifact House of Apple 2 direct
+`fflush` and House of Cat `fseek` dispatches run against the host glibc in both
+native i386 and AMD64 tests; no QEMU FSOP, legacy fake-vtable, or list-trigger
+execution evidence is claimed. Upstream glibc does not provide PPC32
+little-endian, so that target describes supplied downstream/custom artifacts
+only. The builder likewise does not claim that a selected glibc build, call
+site, lock state, or `_IO_list_all` insertion is reachable without the runtime
+preconditions reported by `FSOPPayload`.
+
 ## Arbitrary-read/write adapters and execution
 
 `payloads.arbio` turns challenge-specific memory callbacks into strict,
@@ -582,6 +677,11 @@ This native opt-in requires both 64-bit and 32-bit compiler, loader, and libc
 support in addition to LLVM and LLD. Once enabled, a missing prerequisite or a
 kernel that cannot execute i386 ELF files fails the run rather than skipping
 one half of the matrix.
+
+The native FSOP fixture feeds builder-produced heap FILE, wide-data, and jump
+table bytes to the exact loaded host libc. In both i386 and AMD64 modes it
+checks House of Apple 2 through direct `fflush(fp)` and House of Cat through
+`fseek(fp, ...)`; each route must reach a non-returning fixture callback.
 
 The shellcode QEMU tests place exactly the bytes returned by the command, ORW,
 and RW-to-RX stager builders in a minimal static ELF, then check command output,
