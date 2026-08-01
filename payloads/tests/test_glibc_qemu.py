@@ -341,7 +341,7 @@ def _assert_exact_interpreter(
 ) -> None:
     test.assertIsNotNone(profile.interpreter)
     assert profile.interpreter is not None
-    guest_interpreter = provisioned.sysroot / profile.interpreter.removeprefix("/")
+    guest_interpreter = provisioned.resolve_guest_path(profile.interpreter)
     test.assertTrue(guest_interpreter.is_file(), guest_interpreter)
     test.assertTrue(os.path.samefile(guest_interpreter, provisioned.loader))
 

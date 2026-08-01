@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import struct
 import tarfile
 import tempfile
@@ -164,6 +165,24 @@ class GlibcSysrootManifestTests(unittest.TestCase):
 
 
 class GlibcSysrootArtifactValidationTests(unittest.TestCase):
+    def test_guest_absolute_interpreter_symlink_resolves_inside_sysroot(self) -> None:
+        spec = resolve_sysroot("x86_64", lane="glibc-2.23")
+        with tempfile.TemporaryDirectory(prefix="pwnc-sysroot-guest-link-") as directory:
+            root = Path(directory)
+            loader = root / "lib/x86_64-linux-gnu/ld-2.23.so"
+            loader.parent.mkdir(parents=True)
+            loader.write_bytes(b"loader")
+            alias = root / "lib64/ld-linux-x86-64.so.2"
+            alias.parent.mkdir()
+            alias.symlink_to("/lib/x86_64-linux-gnu/ld-2.23.so")
+            provisioned = ProvisionedSysroot(spec, root, root, root / spec.libc, loader)
+
+            resolved = provisioned.resolve_guest_path("/lib64/ld-linux-x86-64.so.2")
+            self.assertEqual(resolved, loader)
+            self.assertTrue(os.path.samefile(resolved, loader))
+            with self.assertRaisesRegex(SysrootError, "unsafe guest path"):
+                provisioned.resolve_guest_path("../../host")
+
     def test_qemu_argv_disables_loader_cache_before_selecting_library_path(self) -> None:
         spec = resolve_sysroot("x86_64", lane="glibc-2.23")
         provisioned = ProvisionedSysroot(

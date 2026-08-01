@@ -179,6 +179,20 @@ class ProvisionedSysroot:
     def qemu(self) -> str:
         return self.spec.qemu
 
+    def resolve_guest_path(self, guest_path: str | os.PathLike[str]) -> Path:
+        """Resolve guest-absolute symlinks beneath this sysroot.
+
+        Host :class:`Path` resolution is wrong for links such as
+        ``/lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/ld-2.23.so``:
+        the absolute target belongs to the guest root, not the host root.
+        """
+
+        value = PurePosixPath(os.fspath(guest_path))
+        parts = value.parts[1:] if value.is_absolute() else value.parts
+        if not parts or ".." in parts:
+            raise SysrootError(f"{self.spec.id}: unsafe guest path {os.fspath(guest_path)!r}")
+        return _resolve_guest_path(self.sysroot, PurePosixPath(*parts).as_posix())
+
     def qemu_argv(
         self,
         executable: str | os.PathLike[str],
