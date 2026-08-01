@@ -37,27 +37,36 @@ the callback-driven `PayloadStager` belongs to `arb-executor`.
 ## Current coverage
 
 The current command, ORW, exit, and RW-to-RX mmap-stager shellcode builders are
-implemented and QEMU-tested for these exact Linux variants:
+implemented for every exact Linux target in the catalog. Raw execution is
+QEMU-verified for every variant except little-endian PPC32, whose lowering is
+assembly-tested because the supported qemu-user suite has no matching
+little-endian 32-bit PowerPC emulator:
 
-| Architecture | Bits | Endian | ABI |
-| --- | ---: | --- | --- |
-| x86 | 32 | little | i386 SysV |
-| x86-64 | 64 | little | AMD64 SysV |
-| ARM and Thumb | 32 | little and big | ARM EABI |
-| ARM64 | 64 | little and big | AAPCS64 |
-| MIPS32 | 32 | little and big | o32 |
-| MIPS64 | 64 | little and big | n64 |
-| RISC-V 32 | 32 | little | ILP32 |
-| RISC-V 64 | 64 | little | LP64 |
+| Architecture | Bits | Endian | ABI | Shellcode evidence |
+| --- | ---: | --- | --- | --- |
+| x86 | 32 | little | i386 SysV | QEMU-verified |
+| x86-64 | 64 | little | AMD64 SysV | QEMU-verified |
+| ARM and Thumb | 32 | little and big | ARM EABI | QEMU-verified |
+| ARM64 | 64 | little and big | AAPCS64 | QEMU-verified |
+| MIPS32 | 32 | little and big | o32 | QEMU-verified |
+| MIPS64 | 64 | little and big | n64 | QEMU-verified |
+| RISC-V 32 | 32 | little | ILP32 | QEMU-verified |
+| RISC-V 64 | 64 | little | LP64 | QEMU-verified |
+| PowerPC32 | 32 | big | PowerPC SysV | QEMU-verified |
+| PowerPC32 | 32 | little | PowerPC SysV | implemented; assembly-tested |
+| PowerPC64 | 64 | big | ELFv1 | QEMU-verified |
+| PowerPC64 | 64 | little | ELFv2 | QEMU-verified |
+| SPARC32 | 32 | big | SPARC SysV | QEMU-verified |
+| SPARC64 | 64 | big | SPARC64 SysV | QEMU-verified |
+| s390x | 64 | big | s390x SysV | QEMU-verified |
 
-PowerPC 32/64 (little and big endian), SPARC 32/64, and s390x are recognized
-targets but do not have command, ORW, exit, or stager lowering. Symbolic static
-syscall ROP is implemented for every catalog target, and symbolic static
-function calls are implemented except on PPC64 ELFv1 and SPARC. Ret2libc
-`system(command)` has the same direct-call exclusions. These ROP builders have
-unit coverage but no QEMU execution coverage. Target-generic arbitrary-memory
-adapters, explicit payload staging/triggering, and exact-libc call workflows
-are implemented for every catalog target and are unit-tested, not QEMU-tested.
+Symbolic static syscall ROP is implemented for every catalog target, and
+symbolic static function calls are implemented except on PPC64 ELFv1 and
+SPARC. Ret2libc `system(command)` has the same direct-call exclusions. These
+ROP builders have unit coverage but no QEMU execution coverage. Target-generic
+arbitrary-memory adapters, explicit payload staging/triggering, and exact-libc
+call workflows are implemented for every catalog target and are unit-tested,
+not QEMU-tested.
 
 ## Resolving an exact target
 
@@ -142,9 +151,11 @@ stack image is capped at 1792 bytes and aligned for the target ABI. Inspect
 `payload.memory` rather than assuming its requirements: the code bytes need an
 executable mapping, and the generated command uses writable stack space.
 `payload.metadata["requires_instruction_cache_sync_after_runtime_write"]` is
-true on non-x86 targets; a runtime arbitrary-write path must perform the
-platform-appropriate instruction-cache synchronization before jumping when
-the environment requires it.
+true for ARM/Thumb, ARM64, MIPS, RISC-V, PowerPC, and SPARC. A runtime
+arbitrary-write path must perform the platform-appropriate instruction-cache
+synchronization before jumping when the environment requires it. It is false
+for x86/x86-64 and s390x; s390x has coherent instruction/data caches and does
+not require an external cache-flush hook.
 
 `orw_shellcode(path, target, max_bytes=0x400, output_fd=1)` emits one
 position-independent open/read/write pass. It opens the NUL-free path
@@ -174,10 +185,12 @@ first_stage = mmap_stager(len(second_stage.data), target, input_fd=0)
 
 `page_size` is explicit because the runtime page size is not an ISA constant.
 EOF or a read error before the exact byte count takes the failure exit. ARM,
-AArch64, MIPS, and RISC-V stagers perform their architecture-specific cache
-maintenance; x86 relies on its coherent instruction cache. This solves the
-second-stage W^X transition only: the first-stage bytes still need an initial
-executable region or another valid control-flow path.
+AArch64, MIPS, RISC-V, PowerPC, and SPARC stagers perform their
+architecture-specific cache maintenance. x86 relies on its coherent
+instruction cache; s390x likewise needs no cache flush and emits a serializing
+`bcr` before branching. This solves the second-stage W^X transition only: the
+first-stage bytes still need an initial executable region or another valid
+control-flow path.
 
 ### LLVM requirement
 
@@ -188,8 +201,14 @@ rejected rather than copied into the payload. LLVM/LLD target support varies by
 installation, so matrix recognition alone does not prove that a particular
 local LLVM build can assemble a target.
 
-`ld.lld` is not required for normal payload construction. It is used by the
-QEMU test only to wrap the exact raw bytes in a minimal static ELF.
+`ld.lld` is not required for normal payload construction. The QEMU tests use
+it where it can faithfully wrap the exact raw bytes in a minimal static ELF,
+and construct a minimal test envelope directly where it cannot. In particular,
+a big-endian PPC64 ELFv1 process enters through a function descriptor rather
+than a raw code address. Its test envelope sets the ELFv1 ABI flag, points
+`e_entry` at a descriptor, and makes that descriptor name the raw payload code.
+Some LLD versions reject ELFv1 or emit an ELFv2 executable instead; such an
+executable would not validate the catalog's PPC64 ELFv1 target.
 
 ## Libc identity and runtime addresses
 
@@ -413,9 +432,9 @@ chosen strategy; they do not bypass PIE, NX, RELRO, or ASLR by themselves.
 
 Treat legacy-QEMU executability as an observed property of the exact challenge
 runtime, not as an architecture property. Newer QEMU configurations commonly
-respect guest execute permissions. Even when memory is executable, non-x86
-self-modifying/runtime-written code may still require instruction-cache
-synchronization.
+respect guest execute permissions. Even when memory is executable, a payload
+whose metadata requests instruction-cache synchronization still needs the
+target-specific finalization step after self-modifying or runtime-written code.
 
 ## Tests
 
@@ -427,18 +446,20 @@ python3 -m unittest discover -s payloads/tests -v
 
 Assembly tests skip when `llvm-mc` is unavailable. End-to-end execution is
 opt-in because it needs LLVM, LLD, and the complete set of QEMU user emulators
-for the primary matrix:
+for the QEMU-verified matrix:
 
 ```sh
 PWNC_QEMU_TESTS=1 python3 -m unittest discover -s payloads/tests -v
 ```
 
-The QEMU tests link a minimal static ELF around exactly the bytes returned by
-the command, ORW, and RW-to-RX stager builders, run each listed target, and
-check command output, binary file bytes, and execution of an exact second-stage
-exit payload. They use no foreign libc or sysroot. If any required
-tool/emulator is absent, the QEMU test class is skipped; a skipped test is not
-evidence that payloads ran on that host.
+The QEMU tests place exactly the bytes returned by the command, ORW, and
+RW-to-RX stager builders in a minimal static ELF, run each QEMU-verified target,
+and check command output, binary file bytes, and execution of an exact
+second-stage exit payload. They use no foreign libc or sysroot. PPC32
+little-endian remains covered by source and relocation-free assembly tests but
+is intentionally absent from QEMU evidence. If any required tool/emulator is
+absent, the QEMU test class is skipped; a skipped test is not evidence that
+payloads ran on that host.
 
 ## Limitations
 

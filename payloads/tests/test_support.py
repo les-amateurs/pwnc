@@ -13,22 +13,7 @@ from payloads.support import (
 )
 from payloads.target import SUPPORTED_TARGETS, resolve_target
 
-_PRIMARY_SHELLCODE_TARGETS = {
-    resolve_target("x86").name,
-    resolve_target("x86_64").name,
-    resolve_target("arm", endian="little").name,
-    resolve_target("arm", endian="big").name,
-    resolve_target("thumb", endian="little").name,
-    resolve_target("thumb", endian="big").name,
-    resolve_target("arm64", endian="little").name,
-    resolve_target("arm64", endian="big").name,
-    resolve_target("mips32", endian="little").name,
-    resolve_target("mips32", endian="big").name,
-    resolve_target("mips64", endian="little").name,
-    resolve_target("mips64", endian="big").name,
-    resolve_target("riscv32").name,
-    resolve_target("riscv64").name,
-}
+_PPC32_LE = resolve_target("powerpc32", endian="little").name
 
 _DIRECT_CALL_UNSUPPORTED = {
     resolve_target("ppc64").name,
@@ -51,14 +36,12 @@ class SupportMatrixTests(unittest.TestCase):
             for capability in (Capability.COMMAND, Capability.ORW, Capability.STAGER):
                 with self.subTest(target=target.name, capability=capability.value):
                     coverage = capability_support(target, capability)
-                    expected = (
-                        SupportLevel.QEMU_VERIFIED
-                        if target.name in _PRIMARY_SHELLCODE_TARGETS
-                        else SupportLevel.RECOGNIZED
-                    )
+                    expected = SupportLevel.IMPLEMENTED if target.name == _PPC32_LE else SupportLevel.QEMU_VERIFIED
                     self.assertEqual(coverage.level, expected)
-                    self.assertEqual(coverage.implemented, target.name in _PRIMARY_SHELLCODE_TARGETS)
-                    self.assertEqual(coverage.qemu_verified, target.name in _PRIMARY_SHELLCODE_TARGETS)
+                    self.assertTrue(coverage.implemented)
+                    self.assertEqual(coverage.qemu_verified, target.name != _PPC32_LE)
+                    if target.name == _PPC32_LE:
+                        self.assertTrue(any("CommandAssemblyTests" in item for item in coverage.evidence))
 
     def test_arb_executor_is_target_generic_but_not_qemu_executed(self) -> None:
         for target in SUPPORTED_TARGETS:

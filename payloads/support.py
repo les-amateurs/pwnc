@@ -108,29 +108,12 @@ class TargetSupport:
         }
 
 
-# These are the exact variants exercised by CommandQemuTests for command, ORW,
-# and mmap-stager shellcode.  PowerPC, SPARC, and s390x are recognized targets,
-# but all three lowering entry points reject them.
-_PRIMARY_SHELLCODE_QEMU_VERIFIED = frozenset(
-    {
-        "x86-le-i386-sysv",
-        "x86_64-le-amd64-sysv",
-        "arm-le-arm-eabi",
-        "arm-be-arm-eabi",
-        "thumb-le-arm-eabi",
-        "thumb-be-arm-eabi",
-        "arm64-le-aarch64-aapcs64",
-        "arm64-be-aarch64-aapcs64",
-        "mips32-le-mips-o32",
-        "mips32-be-mips-o32",
-        "mips64-le-mips-n64",
-        "mips64-be-mips-n64",
-        "riscv32-le-riscv-ilp32",
-        "riscv64-le-riscv-lp64",
-    }
-)
-
 _ALL_TARGET_NAMES = frozenset(target.name for target in SUPPORTED_TARGETS)
+# Command, ORW, and mmap-stager shellcode lowering exists for every catalog
+# target.  CommandQemuTests executes each variant except PPC32 little-endian,
+# for which the available qemu-user suite has no matching emulator.
+_SHELLCODE_IMPLEMENTED = _ALL_TARGET_NAMES
+_SHELLCODE_QEMU_VERIFIED = _ALL_TARGET_NAMES - frozenset({"powerpc32-le-powerpc-sysv"})
 _DIRECT_CALL_UNSUPPORTED = frozenset(
     {
         "powerpc64-be-powerpc64-elfv1",
@@ -143,9 +126,9 @@ _DIRECT_CALL_IMPLEMENTED = _ALL_TARGET_NAMES - _DIRECT_CALL_UNSUPPORTED
 
 _IMPLEMENTED: Mapping[Capability, frozenset[str]] = MappingProxyType(
     {
-        Capability.COMMAND: _PRIMARY_SHELLCODE_QEMU_VERIFIED,
-        Capability.ORW: _PRIMARY_SHELLCODE_QEMU_VERIFIED,
-        Capability.STAGER: _PRIMARY_SHELLCODE_QEMU_VERIFIED,
+        Capability.COMMAND: _SHELLCODE_IMPLEMENTED,
+        Capability.ORW: _SHELLCODE_IMPLEMENTED,
+        Capability.STAGER: _SHELLCODE_IMPLEMENTED,
         Capability.RET2LIBC: _DIRECT_CALL_IMPLEMENTED,
         Capability.STATIC_ROP: _ALL_TARGET_NAMES,
         Capability.ARB_EXECUTOR: _ALL_TARGET_NAMES,
@@ -154,9 +137,9 @@ _IMPLEMENTED: Mapping[Capability, frozenset[str]] = MappingProxyType(
 
 _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
     {
-        Capability.COMMAND: _PRIMARY_SHELLCODE_QEMU_VERIFIED,
-        Capability.ORW: _PRIMARY_SHELLCODE_QEMU_VERIFIED,
-        Capability.STAGER: _PRIMARY_SHELLCODE_QEMU_VERIFIED,
+        Capability.COMMAND: _SHELLCODE_QEMU_VERIFIED,
+        Capability.ORW: _SHELLCODE_QEMU_VERIFIED,
+        Capability.STAGER: _SHELLCODE_QEMU_VERIFIED,
         Capability.RET2LIBC: frozenset(),
         Capability.STATIC_ROP: frozenset(),
         Capability.ARB_EXECUTOR: frozenset(),
@@ -165,9 +148,24 @@ _QEMU_VERIFIED: Mapping[Capability, frozenset[str]] = MappingProxyType(
 
 _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyType(
     {
-        Capability.COMMAND: ("payloads.shellcode.command_shellcode",),
-        Capability.ORW: ("payloads.shellcode.orw_shellcode",),
-        Capability.STAGER: ("payloads.shellcode.mmap_stager",),
+        Capability.COMMAND: (
+            "payloads.shellcode.command_shellcode",
+            (
+                "payloads/tests/test_shellcode.py::"
+                "CommandAssemblyTests.test_all_implemented_targets_assemble_to_relocation_free_bytes"
+            ),
+        ),
+        Capability.ORW: (
+            "payloads.shellcode.orw_shellcode",
+            "payloads/tests/test_shellcode.py::CommandAssemblyTests.test_orw_assembles_for_all_implemented_targets",
+        ),
+        Capability.STAGER: (
+            "payloads.shellcode.mmap_stager",
+            (
+                "payloads/tests/test_shellcode.py::"
+                "CommandAssemblyTests.test_exit_and_rw_to_rx_stager_assemble_for_all_implemented_targets"
+            ),
+        ),
         Capability.RET2LIBC: ("payloads.rop.build_ret2libc_system",),
         Capability.STATIC_ROP: (
             "payloads.rop.build_static_call",
@@ -186,7 +184,7 @@ _QEMU_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
     {
         Capability.COMMAND: (
             "payloads/tests/test_shellcode_qemu.py::"
-            "CommandQemuTests.test_raw_command_shellcode_executes_on_every_primary_target"
+            "CommandQemuTests.test_raw_command_shellcode_executes_on_every_qemu_target"
         ),
         Capability.ORW: (
             "payloads/tests/test_shellcode_qemu.py::CommandQemuTests.test_raw_orw_shellcode_preserves_binary_file_bytes"
