@@ -120,9 +120,10 @@ int main(int argc, char **argv) {
     wfile_jumps = dlsym(handle, "_IO_wfile_jumps");
     if (wfile_jumps == NULL || dladdr(wfile_jumps, &owner) == 0)
         return 92;
-    if (printf("%s\t%p\t%s\t%p\t%p\t%p\n",
+    if (printf("%s\t%p\t%s\t%p\t%p\t%p\t%p\n",
                owner.dli_fname, owner.dli_fbase, gnu_get_libc_version(),
-               (void *) pwnc_file, (void *) pwnc_aux, (void *) pwnc_callback) < 0
+               wfile_jumps, (void *) pwnc_file, (void *) pwnc_aux,
+               (void *) pwnc_callback) < 0
         || fflush(stdout) != 0)
         return 93;
     if (read_exact(STDIN_FILENO, sizes, sizeof(sizes)) != 0)
@@ -491,13 +492,14 @@ class NativeFSOPTests(unittest.TestCase):
                         )
                         try:
                             fields = _read_process_line(process).split(b"\t")
-                            self.assertEqual(len(fields), 6, fields)
+                            self.assertEqual(len(fields), 7, fields)
                             libc_path = Path(os.fsdecode(fields[0])).resolve(strict=True)
                             libc_base = int(fields[1], 16)
                             glibc_version = fields[2].decode("ascii")
-                            file_address = int(fields[3], 16)
-                            auxiliary_address = int(fields[4], 16)
-                            callback_address = int(fields[5], 16)
+                            wfile_jumps = int(fields[3], 16)
+                            file_address = int(fields[4], 16)
+                            auxiliary_address = int(fields[5], 16)
+                            callback_address = int(fields[6], 16)
 
                             self.assertEqual(file_address, profile.symbol_offsets["pwnc_file"])
                             self.assertEqual(auxiliary_address, profile.symbol_offsets["pwnc_aux"])
@@ -512,6 +514,7 @@ class NativeFSOPTests(unittest.TestCase):
                                 glibc_version=glibc_version,
                             )
                             self.assertEqual(libc.target, target)
+                            self.assertEqual(libc_base + libc.offset("_IO_wfile_jumps"), wfile_jumps)
                             bounds = IOVtableBounds.from_libc_offsets(
                                 libc,
                                 libc.offset("_IO_file_jumps"),
