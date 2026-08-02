@@ -33,10 +33,10 @@ from payloads import (
     LibcBoundAddress,
     LibcImage,
     Linkage,
-    LLVMAssembler,
     PayloadKind,
     RuntimeLayout,
     SemanticGadget,
+    ZigAssembler,
     command_shellcode,
     exit_shellcode,
     inspect_elf,
@@ -57,7 +57,7 @@ from payloads.tests.test_shellcode_qemu import _link_raw_payload
 
 _NATIVE_OPT_IN = os.environ.get("PWNC_NATIVE_TESTS") == "1"
 _NATIVE_TARGETS = (resolve_target("x86"), resolve_target("x86_64"))
-_REQUIRED_TOOLS = ("cc", "llvm-mc", "ld.lld")
+_REQUIRED_TOOLS = ("cc", "zig", "llvm-mc", "ld.lld")
 _MISSING_TOOLS = tuple(tool for tool in _REQUIRED_TOOLS if shutil.which(tool) is None)
 _PROBE_SOURCE = r"""
 #define _GNU_SOURCE
@@ -330,7 +330,7 @@ class NativeShellcodeTests(unittest.TestCase):
         _require_native_prerequisites()
 
     def test_raw_command_shellcode_executes_in_both_native_x86_modes(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         for target in _NATIVE_TARGETS:
             marker = f"PWNC_NATIVE_{target.bits}"
             with (
@@ -338,6 +338,7 @@ class NativeShellcodeTests(unittest.TestCase):
                 tempfile.TemporaryDirectory(prefix="pwnc-native-shell-") as directory,
             ):
                 payload = command_shellcode(f"printf {marker}", target, assembler=assembler)
+                self.assertEqual(assembler.last_backend, "zig", assembler.last_fallback_diagnostics)
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(payload.data, target, executable)
                 _assert_exact_entry_bytes(self, executable, payload.data)
@@ -348,13 +349,14 @@ class NativeShellcodeTests(unittest.TestCase):
                 self.assertEqual(result.stdout, marker.encode())
 
     def test_raw_orw_shellcode_preserves_binary_file_bytes_in_both_native_x86_modes(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         expected = bytes(range(256)) + b"\0PWNC native ORW\n"
         for target in _NATIVE_TARGETS:
             with self.subTest(target=target.name), tempfile.TemporaryDirectory(prefix="pwnc-native-orw-") as directory:
                 source_file = Path(directory, "orw-input")
                 source_file.write_bytes(expected)
                 payload = orw_shellcode(str(source_file), target, max_bytes=len(expected) + 32, assembler=assembler)
+                self.assertEqual(assembler.last_backend, "zig", assembler.last_fallback_diagnostics)
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(payload.data, target, executable)
                 _assert_exact_entry_bytes(self, executable, payload.data)
@@ -365,7 +367,7 @@ class NativeShellcodeTests(unittest.TestCase):
                 self.assertEqual(result.stdout, expected)
 
     def test_raw_sendfile_orw_shellcode_runs_without_a_read_buffer_in_both_native_x86_modes(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         expected = bytes(range(256)) + b"\0PWNC native sendfile ORW\n"
         for target in _NATIVE_TARGETS:
             with (
@@ -380,6 +382,7 @@ class NativeShellcodeTests(unittest.TestCase):
                     count=len(expected) + 32,
                     assembler=assembler,
                 )
+                self.assertEqual(assembler.last_backend, "zig", assembler.last_fallback_diagnostics)
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(payload.data, target, executable)
                 _assert_exact_entry_bytes(self, executable, payload.data)
@@ -391,14 +394,16 @@ class NativeShellcodeTests(unittest.TestCase):
                 self.assertFalse(payload.metadata["uses_read_buffer"])
 
     def test_rw_to_rx_mmap_stager_runs_exact_child_in_both_native_x86_modes(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         for target in _NATIVE_TARGETS:
             with (
                 self.subTest(target=target.name),
                 tempfile.TemporaryDirectory(prefix="pwnc-native-stage-") as directory,
             ):
                 child = exit_shellcode(42, target, assembler=assembler)
+                self.assertEqual(assembler.last_backend, "zig", assembler.last_fallback_diagnostics)
                 stager = mmap_stager(len(child.data), target, assembler=assembler)
+                self.assertEqual(assembler.last_backend, "zig", assembler.last_fallback_diagnostics)
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(stager.data, target, executable)
                 _assert_exact_entry_bytes(self, executable, stager.data)

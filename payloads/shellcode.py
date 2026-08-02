@@ -319,7 +319,8 @@ def _x86_execve(target: Target, stack: _ExecveStack) -> list[str]:
 
 def _arm_execve(target: Target, stack: _ExecveStack) -> list[str]:
     suffix = ".w" if target.arch is Architecture.THUMB else ""
-    lines = [f"sub{suffix} sp, sp, #{stack.frame_size}"]
+    lines = _arm_load("r12", stack.frame_size)
+    lines.append(f"sub{suffix} sp, sp, r12")
     for offset, value in _word_chunks(target, stack.data):
         lines.extend(
             (
@@ -641,7 +642,8 @@ def _x86_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
 
 def _arm_orw(target: Target, stack: _OrwStack, output_fd: int) -> list[str]:
     suffix = ".w" if target.arch is Architecture.THUMB else ""
-    lines = [f"sub{suffix} sp, sp, #{stack.frame_size}"]
+    lines = _arm_load("r12", stack.frame_size)
+    lines.append(f"sub{suffix} sp, sp, r12")
     for offset, value in _word_chunks(target, stack.data):
         lines.extend(
             (
@@ -1034,7 +1036,8 @@ def _arm_sendfile_orw(
     syscalls: _SendfileSyscalls,
 ) -> list[str]:
     suffix = ".w" if target.arch is Architecture.THUMB else ""
-    lines = [f"sub{suffix} sp, sp, #{stack.frame_size}"]
+    lines = _arm_load("r12", stack.frame_size)
+    lines.append(f"sub{suffix} sp, sp, r12")
     for offset, value in _word_chunks(target, stack.data):
         lines.extend(
             (

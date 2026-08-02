@@ -20,7 +20,7 @@ from payloads import (
     ABI,
     SUPPORTED_TARGETS,
     Architecture,
-    LLVMAssembler,
+    ZigAssembler,
     command_shellcode,
     exit_shellcode,
     llvm_triple,
@@ -62,6 +62,10 @@ QEMU_TARGETS = PRIMARY_TARGETS + (
     ("sparc64", None),
     ("s390x", None),
 )
+
+
+def _expected_assembler_backend(target) -> str:
+    return "fallback" if target.abi is ABI.POWERPC64_ELFV1 else "zig"
 
 
 class QemuMatrixTests(unittest.TestCase):
@@ -267,13 +271,13 @@ def _link_raw_payload(data: bytes, target, output: Path) -> None:
 
 
 _QEMU_OPT_IN = os.environ.get("PWNC_QEMU_TESTS") == "1"
-_REQUIRED_QEMU_TOOLS = ("llvm-mc", "ld.lld", *sorted(set(_QEMU.values())))
+_REQUIRED_QEMU_TOOLS = ("zig", "llvm-mc", "ld.lld", *sorted(set(_QEMU.values())))
 _MISSING_QEMU_TOOLS = tuple(tool for tool in _REQUIRED_QEMU_TOOLS if shutil.which(tool) is None)
 
 
 @unittest.skipUnless(
     _QEMU_OPT_IN,
-    "set PWNC_QEMU_TESTS=1 to run the complete LLVM/LLD/QEMU matrix",
+    "set PWNC_QEMU_TESTS=1 to run the complete Zig/LLVM/LLD/QEMU matrix",
 )
 class CommandQemuTests(unittest.TestCase):
     @classmethod
@@ -285,12 +289,17 @@ class CommandQemuTests(unittest.TestCase):
             )
 
     def test_raw_command_shellcode_executes_on_every_qemu_target(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         for architecture, endian in QEMU_TARGETS:
             target = resolve_target(architecture, endian=endian)
             marker = f"PWNC_{architecture}_{endian or 'default'}".replace("-", "_")
             with self.subTest(target=target.name), tempfile.TemporaryDirectory(prefix="pwnc-qemu-") as directory:
                 payload = command_shellcode(f"printf {marker}", target, assembler=assembler)
+                self.assertEqual(
+                    assembler.last_backend,
+                    _expected_assembler_backend(target),
+                    assembler.last_fallback_diagnostics,
+                )
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(payload.data, target, executable)
                 qemu = _QEMU[(target.arch, endian)]
@@ -304,7 +313,7 @@ class CommandQemuTests(unittest.TestCase):
                 self.assertEqual(result.stdout, marker.encode())
 
     def test_raw_orw_shellcode_preserves_binary_file_bytes(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         expected = b"pwnc ORW\0binary bytes\n"
         for architecture, endian in QEMU_TARGETS:
             target = resolve_target(architecture, endian=endian)
@@ -312,6 +321,11 @@ class CommandQemuTests(unittest.TestCase):
                 source_file = Path(directory, "orw-input")
                 source_file.write_bytes(expected)
                 payload = orw_shellcode(str(source_file), target, max_bytes=256, assembler=assembler)
+                self.assertEqual(
+                    assembler.last_backend,
+                    _expected_assembler_backend(target),
+                    assembler.last_fallback_diagnostics,
+                )
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(payload.data, target, executable)
                 qemu = _QEMU[(target.arch, endian)]
@@ -325,7 +339,7 @@ class CommandQemuTests(unittest.TestCase):
                 self.assertEqual(result.stdout, expected)
 
     def test_raw_sendfile_orw_shellcode_preserves_binary_file_bytes(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         expected = bytes(range(256)) + b"\0pwnc sendfile ORW\n"
         for architecture, endian in QEMU_TARGETS:
             target = resolve_target(architecture, endian=endian)
@@ -337,6 +351,11 @@ class CommandQemuTests(unittest.TestCase):
                     target,
                     count=len(expected) + 32,
                     assembler=assembler,
+                )
+                self.assertEqual(
+                    assembler.last_backend,
+                    _expected_assembler_backend(target),
+                    assembler.last_fallback_diagnostics,
                 )
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(payload.data, target, executable)
@@ -357,12 +376,22 @@ class CommandQemuTests(unittest.TestCase):
                 self.assertNotRegex(trace, r"\b(?:read|write)\(")
 
     def test_rw_to_rx_mmap_stager_runs_exact_second_stage(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         for architecture, endian in QEMU_TARGETS:
             target = resolve_target(architecture, endian=endian)
             with self.subTest(target=target.name), tempfile.TemporaryDirectory(prefix="pwnc-qemu-") as directory:
                 child = exit_shellcode(42, target, assembler=assembler)
+                self.assertEqual(
+                    assembler.last_backend,
+                    _expected_assembler_backend(target),
+                    assembler.last_fallback_diagnostics,
+                )
                 stager = mmap_stager(len(child.data), target, assembler=assembler)
+                self.assertEqual(
+                    assembler.last_backend,
+                    _expected_assembler_backend(target),
+                    assembler.last_fallback_diagnostics,
+                )
                 executable = Path(directory, "payload.elf")
                 _link_raw_payload(stager.data, target, executable)
                 qemu = _QEMU[(target.arch, endian)]

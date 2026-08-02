@@ -118,12 +118,14 @@ class LLVMAssembler:
 
 
 class ZigAssembler:
-    """Prefer ``zig cc`` assembly and retain LLVM as a checked fallback.
+    """Prefer ``zig cc`` assembly and retain LLVM as a fallback.
 
     Zig's integrated toolchain covers nearly the complete target catalog from
     one host installation.  The generated object is parsed exactly like an
-    LLVM object, including rejection of relocations against ``.text``.  When
-    both backends support a source they must emit identical bytes.
+    LLVM object, including rejection of relocations against ``.text``.  An
+    optional strict comparison can require byte-identical LLVM output, but is
+    disabled by default because valid pseudo-instruction lowering can differ
+    between assemblers.
     """
 
     def __init__(
@@ -131,11 +133,13 @@ class ZigAssembler:
         executable: str | None = None,
         *,
         fallback: Assembler | None = None,
-        verify_with_fallback: bool = True,
+        verify_with_fallback: bool = False,
     ) -> None:
         self.executable = executable or shutil.which("zig") or "zig"
         self.fallback = fallback or LLVMAssembler()
         self.verify_with_fallback = verify_with_fallback
+        self.last_backend: str | None = None
+        self.last_fallback_diagnostics: str | None = None
 
     @property
     def available(self) -> bool:
@@ -143,13 +147,18 @@ class ZigAssembler:
 
     def _fallback(self, source: str, target: Target, zig_diagnostics: str) -> bytes:
         try:
-            return self.fallback.assemble(source, target)
+            data = self.fallback.assemble(source, target)
         except AssemblyError as fallback_error:
             raise AssemblyError(
                 f"zig cc failed for {target.name}: {zig_diagnostics}; fallback failed: {fallback_error}"
             ) from fallback_error
+        self.last_backend = "fallback"
+        self.last_fallback_diagnostics = zig_diagnostics
+        return data
 
     def assemble(self, source: str, target: Target) -> bytes:
+        self.last_backend = None
+        self.last_fallback_diagnostics = None
         if not self.available:
             return self._fallback(source, target, "zig was not found")
         with tempfile.TemporaryDirectory(prefix="pwnc-payload-zig-") as directory:
@@ -184,8 +193,9 @@ class ZigAssembler:
             if observed != reference:
                 raise AssemblyError(
                     f"Zig and LLVM emitted different shellcode for {target.name} "
-                    f"({len(observed)} != {len(reference)} bytes)"
+                    f"(Zig {len(observed)} bytes, LLVM {len(reference)} bytes)"
                 )
+        self.last_backend = "zig"
         return observed
 
 

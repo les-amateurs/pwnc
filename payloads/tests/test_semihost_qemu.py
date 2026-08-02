@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from payloads import SUPPORTED_TARGETS, LLVMAssembler, qemu_semihosting_command_shellcode, resolve_target
+from payloads import SUPPORTED_TARGETS, ZigAssembler, qemu_semihosting_command_shellcode, resolve_target
 from payloads.tests.test_shellcode_qemu import _link_raw_payload
 
 AUTOMATIC_QEMU_USER_SEMIHOSTING_TARGETS = (
@@ -31,6 +31,7 @@ AUTOMATIC_QEMU_USER_SEMIHOSTING_TARGETS = (
 
 _QEMU_OPT_IN = os.environ.get("PWNC_QEMU_TESTS") == "1"
 _REQUIRED_TOOLS = (
+    "zig",
     "llvm-mc",
     "ld.lld",
     *sorted({qemu for _, _, qemu in AUTOMATIC_QEMU_USER_SEMIHOSTING_TARGETS}),
@@ -95,7 +96,7 @@ class QemuSemihostingExecutionTests(unittest.TestCase):
             )
 
     def test_host_command_escape_executes_on_every_automatic_qemu_user_target(self) -> None:
-        assembler = LLVMAssembler()
+        assembler = ZigAssembler()
         expected = b"PWNC_QEMU_SEMIHOST_ESCAPE"
         for architecture, endian, qemu in AUTOMATIC_QEMU_USER_SEMIHOSTING_TARGETS:
             target = resolve_target(architecture, endian=endian)
@@ -107,6 +108,7 @@ class QemuSemihostingExecutionTests(unittest.TestCase):
                 marker = root / "host-marker"
                 command = f"printf PWNC_QEMU_SEMIHOST_ESCAPE > {shlex.quote(str(marker))}"
                 payload = qemu_semihosting_command_shellcode(command, target, assembler=assembler)
+                self.assertEqual(assembler.last_backend, "zig", assembler.last_fallback_diagnostics)
                 executable = root / "payload.elf"
                 _link_raw_payload(payload.data, target, executable)
 
