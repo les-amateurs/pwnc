@@ -143,6 +143,14 @@ def _wide_builder(
 
 
 class FSOPLayoutMatrixTests(unittest.TestCase):
+    def test_riscv32_file_control_fields_follow_the_64_bit_off_t_abi(self) -> None:
+        layout = _wide_builder(resolve_target("riscv32")).layout
+
+        self.assertEqual(layout.file_offsets["old_offset"], 0x40)
+        self.assertEqual(layout.file_offsets["vtable_offset"], 0x4A)
+        self.assertEqual(layout.file_offsets["lock"], 0x4C)
+        self.assertEqual(layout.file_offsets["offset"], 0x50)
+
     def test_legacy_file_and_vtable_layouts_cover_all_catalog_targets(self) -> None:
         libc_base = 0x70000000
         for target in SUPPORTED_TARGETS:

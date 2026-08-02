@@ -304,6 +304,13 @@ class IOLayout:
             file_size, file_plus_size = 0x94, 0x98
             wide_offsets, wide_size = _wide_layout_32(glibc_version)
         else:
+            # RISC-V ILP32 gives ``__off_t`` eight bytes in the public
+            # ``_IO_FILE`` ABI.  The surrounding four fields consequently
+            # differ from older 32-bit ABIs even though the following
+            # 8-aligned ``__off64_t _offset`` rejoins the common layout at
+            # 0x50.  In particular, using the common 0x48 lock offset leaves
+            # glibc loading a NULL lock pointer from 0x4c.
+            riscv32 = target.arch is Architecture.RISCV32
             file_offsets = {
                 "flags": 0x00,
                 "read_ptr": 0x04,
@@ -319,8 +326,8 @@ class IOLayout:
                 "flags2": 0x3C,
                 "short_backupbuf": 0x3F,
                 "old_offset": 0x40,
-                "vtable_offset": 0x46,
-                "lock": 0x48,
+                "vtable_offset": 0x4A if riscv32 else 0x46,
+                "lock": 0x4C if riscv32 else 0x48,
                 "offset": 0x50,
                 "codecvt": 0x58,
                 "wide_data": 0x5C,
