@@ -575,6 +575,193 @@ and `as_bytes_provider()` provide structural adapters for existing
 `BytesProvider`-shaped objects. The outward adapter is also a nominal
 `pwnc.types.BytesProvider`, so it can be passed directly to `Type.use()`.
 
+### Composable process discovery
+
+`ExactProcessDiscovery` turns those absolute reads into bounded transitions
+between process-layout facts. It requires the exact challenge, libc, and
+loader files for the transitions which inspect those images; it does not try
+to identify an unknown libc from a version string or an address alone.
+Resolution records are accepted directly by the next transition, so a normal
+workflow stays explicit and composable:
+
+```python
+from payloads import (
+    ArbitraryMemory,
+    ExactELFAdapter,
+    ExactProcessDiscovery,
+    IOPrimitiveTraits,
+    MemorySpan,
+    PointerLeak,
+    RuntimeLayout,
+)
+
+main = ExactELFAdapter.from_file("./challenge")
+libc = ExactELFAdapter.from_file("./libc.so.6")
+loader = ExactELFAdapter.from_file("./ld-linux-x86-64.so.2")
+memory = ArbitraryMemory(
+    main.target,
+    read_at=arbread,
+    write_at=arbwrite,
+    traits=IOPrimitiveTraits(
+        invalid_read_safe=True,  # only if bad addresses safely fail
+        verify_writes=True,
+    ),
+)
+discover = ExactProcessDiscovery(
+    memory,
+    main=main,
+    libc=libc,
+    loader=loader,
+    runtime_page_size=observed_page_size,
+)
+
+heap_window = MemorySpan(heap_mapping_start, heap_mapping_size, "heap")
+stack_window = MemorySpan(stack_mapping_start, stack_mapping_size, "stack")
+
+# Scan heap words for pointers into this exact libc.
+libc_image = discover.heap_to_libc(
+    PointerLeak(leaked_heap_pointer, address=heap_leak_slot),
+    heap_base=heap_mapping_start,
+    heap_span=heap_window,
+)
+
+# Scan writable libc mappings for a pointer classified by the supplied heap
+# mapping. Multiple corroborating slots into one mapping are one result.
+heap = discover.libc_to_heap(libc_image, heap_span=heap_window)
+
+# Dereference this libc's environ variable and validate the stack mapping.
+stack = discover.libc_to_stack(
+    libc_image,
+    stack_base=stack_mapping_start,
+    stack_span=stack_window,
+)
+
+# Keep every exact main-image call continuation, or demand one unambiguous
+# nearest-symbol classification. Automatic PIE-base inference requires safe
+# invalid reads; otherwise pass main_base below.
+return_sites = discover.environ_to_main_returns(stack)
+return_site = discover.environ_to_main_return(stack, symbol="main")
+
+# Find this exact loader through resolved libc GOT slots (with a bounded
+# writable-libc fallback), then traverse one stable SVR4 link_map list.
+loader_image = discover.libc_to_loader(libc_image)
+loaded = discover.loader_to_link_map(
+    loader_image,
+    known_images=(main, libc, loader),
+)
+for obj in loaded.objects:
+    print(hex(obj.base), obj.name, obj.adapter)
+
+# `chain` is an already-built target-matched ROPChain. Planning reads and
+# captures the complete destination first; apply performs compare-before-write.
+layout = RuntimeLayout(
+    main_base=return_site.main_base,
+    libc_base=libc_image.base,
+    loader_base=loader_image.base,
+    stack_base=stack_mapping_start,
+)
+plan = discover.plan_rop_insertion(return_site, chain, layout=layout)
+plan.apply(memory)  # no mutation occurs if any captured byte is stale
+```
+
+The broad scans deliberately reject guesses. A singular transition raises
+`DiscoveryNotFoundError` when nothing matches and `DiscoveryAmbiguityError`
+when distinct candidates survive; the latter retains its structured
+`candidates`. `environ_to_main_returns()` is the plural inspection API and
+therefore returns every candidate, while `environ_to_main_return()` enforces
+one result after its optional `symbol=` filter. Heap classification is not
+guessed from address shape: `libc_to_heap()` requires a `heap_base`/`heap_span`
+or a caller-supplied allocator `validator(memory, pointer)`. Multiple pointers
+which corroborate one exact image base or one supplied heap span are collapsed,
+but pointers to distinct images or heap classifications remain ambiguous.
+
+All automatic scans are bounded by `MemorySpan`, `scan_size`, `scan_before`,
+`scan_after`, `image_search_pages`, `max_entries`, or `max_name_size`, and obey
+the primitive's declared width, alignment, and chunking. Reading a caller-
+supplied mapped span does not itself require speculative reads. Walking
+backward from an unsymbolized image pointer to infer a libc/loader load bias,
+or inferring a PIE main bias from stack pointers, does probe candidate pages;
+those operations require `invalid_read_safe=True`. Do not set that trait for a
+one-shot primitive where an unmapped read kills the process. Supply the exact
+base instead, or use a `PointerLeak(symbol=..., addend=...)` where that
+transition accepts a leak record.
+
+Every hardcoded route is an assertion and is revalidated rather than trusted
+silently:
+
+- `heap_base`, `libc_base`, `stack_base`, `main_base`, and `loader_base` supply
+  known mapping starts or ELF load biases. Pair heap/stack bases with explicit
+  `heap_span`/`stack_span` when the real mapping size is known; the base-only
+  convenience windows are intentionally finite. A constructor `layout=` is
+  the default for main-return classification and ROP materialization; pass
+  bases to the individual discovery transition when it needs them.
+- `libc_pointer`, `heap_pointer`, and `loader_pointer` bypass their respective
+  pointer scan. Their `*_pointer_address` counterparts name an absolute slot
+  to dereference. Supplying both makes the observed slot value prove the
+  hardcoded pointer before resolution continues.
+- `environ_address` overrides the absolute address of the libc `environ`
+  variable; `environ_symbol` selects another exact-libc symbol. `return_slot`
+  restricts classification to one absolute stack word. `symbol=` filters the
+  singular result by its nearest exact-main symbol.
+- `plan_rop_insertion()` accepts `stack_base`, `main_base`, `return_slot`, and
+  `post_return_sp` as consistency assertions, plus a complete `layout` for
+  symbolic chain materialization. An override which disagrees with the
+  classified return site is an error.
+- `r_debug_address` overrides the exact loader's `_r_debug` address and
+  `link_map_address` asserts the list head. A nonzero `r_debug.r_map` must agree
+  with that head. `known_images` is optional and only attaches an adapter after
+  basename selection and exact runtime validation; it is not DSO discovery by
+  pathname.
+
+An ELF `base` here means additive load bias, matching `link_map.l_addr` and
+`RuntimeLayout`. It is not necessarily the address containing `\x7fELF`: for
+an ordinary `ET_EXEC` mapped at `0x400000`, the usual load bias is `0`, whereas
+pwntools' rebased `ELF.address` denotes the runtime address of the lowest
+`PT_LOAD`. The discovery implementation performs that conversion internally
+when it asks pwntools for GOT slots. Exact adapters SHA-256-bind and recheck
+the local file. Runtime image validation compares the ELF header, complete
+program-header table, and `PT_LOAD` geometry against that artifact and checks
+that a candidate pointer lies in its mapped ranges; an embedded page-aligned
+`\x7fELF` string is not sufficient evidence.
+
+Return classification recognizes call continuations on the catalog ABIs, but
+automatic flat saved-return replacement is deliberately limited to i386 and
+AMD64 SysV. It does not model saved-link-register frames, stack pivots, CET or
+shadow stacks, AArch64 PAC, or architecture-specific unwinding. The plan
+captures every overwritten byte before mutation, checks them all again before
+its first write, and optionally uses the underlying exact read-back
+verification. Applying it supplies a memory write only; it does not arrange
+for the selected function to return.
+
+Loader enumeration is scoped to glibc's SVR4 `r_debug` and five-word
+`link_map` prefix. It accepts versions 1 and 2 without reading optional newer
+tails, requires `RT_CONSISTENT`, validates backlinks, detects cycles, caps
+names and nodes, and checks `r_state` plus the list head again after traversal.
+It walks one namespace and is not a musl, static-binary, audit-namespace, or
+arbitrary-loader abstraction. `l_name` bytes are untrusted process data:
+`.name` is only a surrogate-safe display string, and the implementation never
+opens that path. Callers must not treat it as an authenticated local filename.
+
+Pwntools `MemLeak` can be retained on either side of the adapter boundary:
+
+```python
+# Keep an existing MemLeak cache and add an independently obtained write.
+memory = ArbitraryMemory.from_pwntools_memleak(
+    memleak,
+    target,
+    write_at=arbwrite,
+    traits=IOPrimitiveTraits(invalid_read_safe=False),
+)
+
+# Or expose strict reads through pwntools' cached b/w/d/q/n helpers.
+memleak = memory.as_pwntools_memleak(leak_size=target.word_size)
+```
+
+The bridge preserves pwntools caching and convenience access, while
+`ArbitraryMemory` still enforces exact lengths, target endian/width, and its
+declared transport constraints. A separate `write_at` remains necessary;
+`MemLeak` is not converted into an arbitrary-write primitive.
+
 Arbitrary read/write is not itself control flow. `PayloadStager` writes a
 `Payload` at a caller-selected address and preflights NX/QEMU policy before the
 first write. Executing it additionally requires an explicit target-matched
@@ -925,9 +1112,10 @@ instead of silently becoming evidence-free success.
   not find gadgets, solve bad bytes, or select a stack pivot. The opt-in QEMU
   fixtures validate chains against their supplied synthetic gadgets, not
   arbitrary challenge gadgets or binaries.
-- There is no automatic leak discovery, remote-libc identification service,
-  live-process/QEMU policy detection, or exploit-specific allocator/control-flow
-  primitive.
+- Process discovery composes strict reads against caller-supplied exact ELF
+  artifacts, bounded mappings, and classification evidence. It is not a
+  remote-libc identification service, an unbounded mapping finder, a live
+  QEMU-policy detector, or an exploit-specific allocator primitive.
 - Arbitrary-memory workflows do not turn read/write callbacks into a function
   call, instruction-cache flush, or jump. Those capabilities must be supplied
   explicitly, and GOT restoration is only best-effort while control returns.
