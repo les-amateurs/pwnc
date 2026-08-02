@@ -394,7 +394,10 @@ call ABI exposes independently composable `LibcROPStage` objects which lower
 through caller-supplied `SemanticGadget` records; no unsupported stack
 transition is guessed. `ExactELFAdapter` rechecks the artifact digest before
 creating a fresh pwntools object and never accesses process-backed helpers such
-as `ELF.libs`, `ELF.maps`, or `ELF.libc`.
+as `ELF.libs`, `ELF.maps`, or `ELF.libc`. Pwntools reads a private, read-only
+snapshot; linked ROP lowering rehashes it after pathname-based gadget scanning.
+Callers using `fresh_elf()` directly should close the returned object when
+finished (a finalizer also removes abandoned snapshots).
 
 Every function-call chain carries a `CallFrame` describing the function-entry
 SP offset, required ABI alignment/bias, and emitted mandatory caller area.
@@ -724,7 +727,8 @@ silently:
   readable extent: pair it with `heap_span`/`stack_span` before scanning. A
   constructor `layout=` is the default for main-return classification and ROP
   materialization; pass bases to the individual discovery transition when it
-  needs them.
+  needs them. Non-`None` base/span facts inherited from a `HeapResolution` or
+  `StackResolution` cannot be replaced by conflicting overrides.
 - `libc_pointer`, `heap_pointer`, and `loader_pointer` bypass their respective
   pointer scan. Their `*_pointer_address` counterparts name an absolute slot
   to dereference. Supplying both makes the observed slot value prove the
@@ -977,9 +981,9 @@ PWNC_NATIVE_TESTS=1 python3 -m unittest discover -s payloads/tests -v
 ```
 
 This native opt-in requires both 64-bit and 32-bit compiler, loader, and libc
-support in addition to LLVM and LLD. Once enabled, a missing prerequisite or a
-kernel that cannot execute i386 ELF files fails the run rather than skipping
-one half of the matrix.
+support in addition to Zig, LLVM, and LLD. Once enabled, a missing prerequisite
+or a kernel that cannot execute i386 ELF files fails the run rather than
+skipping one half of the matrix.
 
 ### Pinned LiveCTF challenge corpus
 
@@ -1011,9 +1015,11 @@ then executes a pwntools-selected exact-libc `exit(73)` ROP chain through the
 classified return slot. This is deliberately not a production or remote
 transport assumption; payload generation sees only caller-supplied
 `read_at`/`write_at` callbacks, and no production workflow opens
-`/proc/self/mem`. The exact loader contains another page-aligned `\x7fELF` at
-`+0x2c000`; the test
-proves that the strict header/program-header matcher rejects that false base.
+`/proc/self/mem`. This local debugging fixture also parses `/proc/self/maps` to
+seed the exact heap span and libc-base assertions; it validates composability
+and downstream transitions, not blind heap-to-libc discovery. The exact loader
+contains another page-aligned `\x7fELF` at `+0x2c000`; the test proves that the
+strict header/program-header matcher rejects that false base.
 
 `ptrace-me-maybe` adapts the stopped child's real `PTRACE_PEEK*` and
 `PTRACE_POKE*` operations. It derives the exact libc from the leaked RIP,

@@ -6,7 +6,7 @@ import unittest
 from payloads.assembler import LLVMAssembler, ZigAssembler
 from payloads.errors import AssemblyError
 from payloads.shellcode import exit_source
-from payloads.target import SUPPORTED_TARGETS, resolve_target
+from payloads.target import ABI, SUPPORTED_TARGETS, resolve_target
 
 
 class _FixedAssembler:
@@ -37,13 +37,19 @@ class ZigAssemblerTests(unittest.TestCase):
         for target in SUPPORTED_TARGETS:
             with self.subTest(target=target.name):
                 source = exit_source(37, target)
-                self.assertEqual(assembler.assemble(source, target), reference.assemble(source, target))
+                observed = assembler.assemble(source, target)
+                self.assertEqual(observed, reference.assemble(source, target))
+                expected_backend = "fallback" if target.abi is ABI.POWERPC64_ELFV1 else "zig"
+                self.assertEqual(assembler.last_backend, expected_backend, assembler.last_fallback_diagnostics)
 
     @unittest.skipUnless(shutil.which("zig") and shutil.which("llvm-mc"), "Zig and LLVM are required")
     def test_zig_failure_falls_back_for_ppc64_elfv1(self) -> None:
         target = resolve_target("ppc64")
         source = exit_source(7, target)
-        self.assertEqual(ZigAssembler().assemble(source, target), LLVMAssembler().assemble(source, target))
+        assembler = ZigAssembler()
+        self.assertEqual(assembler.assemble(source, target), LLVMAssembler().assemble(source, target))
+        self.assertEqual(assembler.last_backend, "fallback")
+        self.assertIsNotNone(assembler.last_fallback_diagnostics)
 
     @unittest.skipUnless(shutil.which("zig") and shutil.which("llvm-mc"), "Zig and LLVM are required")
     def test_valid_riscv_pseudoinstruction_variation_is_not_rejected_by_default(self) -> None:
