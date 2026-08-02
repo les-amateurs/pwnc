@@ -476,6 +476,12 @@ class ExactProcessDiscovery:
     ) -> int:
         if explicit_base is not None:
             base = self._check_address(explicit_base, f"{image_name}_base")
+            # Reject the overwhelmingly common non-image pointer before doing
+            # any transport reads.  This keeps large heap/libc scans usable on
+            # menu-driven primitives while the one surviving base is still
+            # authenticated against the exact runtime ELF below.
+            if not self._pointer_in_image(leak.value, adapter, base):
+                raise DiscoveryError(f"leak {leak.value:#x} is outside exact {image_name} runtime ranges")
         elif leak.symbol is not None:
             base = leak.value - adapter.symbol(leak.symbol) - leak.addend
             if base < 0:
@@ -488,11 +494,19 @@ class ExactProcessDiscovery:
                 )
             page = leak.value & -self.runtime_page_size
             matches: list[int] = []
+            header = next(
+                (item for item in adapter.profile.load_ranges if item.file_offset == 0 and item.file_size >= 4),
+                None,
+            )
+            if header is None:
+                raise DiscoveryError(f"exact {image_name} has no runtime ELF header mapping")
             for index in range(_integer(search_pages, "image_search_pages", positive=True)):
                 candidate = page - index * self.runtime_page_size
                 if candidate < 0:
                     break
                 try:
+                    if self.memory.read(candidate + header.start, 4) != b"\x7fELF":
+                        continue
                     self._validate_runtime_image(adapter, candidate)
                 except (DiscoveryError, MemoryAccessError):
                     continue
@@ -855,9 +869,7 @@ class ExactProcessDiscovery:
             if not self.main.profile.pie:
                 resolved_main_base = 0
             elif not self.memory.traits.invalid_read_safe:
-                raise ConstraintError(
-                    "inferring PIE main base requires invalid_read_safe or an explicit main_base"
-                )
+                raise ConstraintError("inferring PIE main base requires invalid_read_safe or an explicit main_base")
         if resolved_main_base is not None:
             self._validate_runtime_image(self.main, resolved_main_base)
 
@@ -884,9 +896,7 @@ class ExactProcessDiscovery:
         for item in slots:
             normalized = self._normalize_code_pointer(self.target, item.value)
             bases = (
-                (resolved_main_base,)
-                if resolved_main_base is not None
-                else self._main_bases_from_pointer(normalized)
+                (resolved_main_base,) if resolved_main_base is not None else self._main_bases_from_pointer(normalized)
             )
             for candidate_base in bases:
                 executable = any(
@@ -965,9 +975,7 @@ class ExactProcessDiscovery:
             ),
         )
         return next(
-            item
-            for item in candidates
-            if item.slot_address == chosen.address and item.return_address == chosen.value
+            item for item in candidates if item.slot_address == chosen.address and item.return_address == chosen.value
         )
 
     def plan_rop_insertion(
@@ -1103,9 +1111,7 @@ class ExactProcessDiscovery:
         preferred_names = ("_rtld_global", "_rtld_global_ro", "__libc_stack_end", "_dl_argv")
         named = {name: slot for name, slot in got_entries if name in self.loader.symbols}
         preferred = [
-            (named[name], name, f"resolved libc GOT slot for {name}")
-            for name in preferred_names
-            if name in named
+            (named[name], name, f"resolved libc GOT slot for {name}") for name in preferred_names if name in named
         ]
         preferred.extend(
             (slot, name, f"resolved libc GOT slot for {name}")
