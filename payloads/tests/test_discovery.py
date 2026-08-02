@@ -67,6 +67,22 @@ def exact_adapter(
     patches: dict[int, bytes] | None = None,
 ) -> ExactELFAdapter:
     data = bytearray(size)
+    byteorder = target.endian.value
+    header_size = 64 if target.bits == 64 else 52
+    phentsize = 56 if target.bits == 64 else 32
+    machine = {
+        "x86": 3,
+        "x86_64": 62,
+        "arm": 40,
+        "thumb": 40,
+        "arm64": 183,
+        "mips32": 8,
+        "mips64": 8,
+    }[target.arch.value]
+
+    def put(offset: int, value: int, width: int) -> None:
+        data[offset : offset + width] = value.to_bytes(width, byteorder)
+
     data[:16] = (
         b"\x7fELF"
         + (b"\x02" if target.bits == 64 else b"\x01")
@@ -74,6 +90,37 @@ def exact_adapter(
         + b"\x01"
         + b"\0" * 9
     )
+    put(16, 3 if elf_type == "ET_DYN" else 2, 2)
+    put(18, machine, 2)
+    put(20, 1, 4)
+    if target.bits == 64:
+        put(32, header_size, 8)
+        put(52, header_size, 2)
+        put(54, phentsize, 2)
+        put(56, 1, 2)
+        phdr = header_size
+        put(phdr, 1, 4)
+        put(phdr + 4, 7 if writable and executable else 6 if writable else 5 if executable else 4, 4)
+        put(phdr + 8, 0, 8)
+        put(phdr + 16, start, 8)
+        put(phdr + 24, start, 8)
+        put(phdr + 32, size, 8)
+        put(phdr + 40, size, 8)
+        put(phdr + 48, 0x1000, 8)
+    else:
+        put(28, header_size, 4)
+        put(40, header_size, 2)
+        put(42, phentsize, 2)
+        put(44, 1, 2)
+        phdr = header_size
+        put(phdr, 1, 4)
+        put(phdr + 4, 0, 4)
+        put(phdr + 8, start, 4)
+        put(phdr + 12, start, 4)
+        put(phdr + 16, size, 4)
+        put(phdr + 20, size, 4)
+        put(phdr + 24, 7 if writable and executable else 6 if writable else 5 if executable else 4, 4)
+        put(phdr + 28, 0x1000, 4)
     for offset, value in (patches or {}).items():
         data[offset : offset + len(value)] = value
     path = root / name
@@ -182,6 +229,26 @@ class DiscoveryTests(unittest.TestCase):
                 heap_span=MemorySpan(heap, 0x20),
                 image_search_pages=2,
             )
+
+    def test_embedded_page_aligned_elf_magic_cannot_misbase_image(self) -> None:
+        target = resolve_target("x86_64")
+        backend = SparseMemory()
+        libc = exact_adapter(self.root, target, "libc-magic.so.6", size=0x3000)
+        libc_base = 0x700000
+        false_header = libc_base + 0x1000
+        map_adapter(backend, libc, libc_base)
+        backend.map(false_header, b"\x7fELF" + b"not-a-runtime-header")
+        heap = 0x500000
+        backend.map(heap, target.pack(false_header + 0x100))
+        resolver = ExactProcessDiscovery(self.memory(target, backend, invalid_safe=True), libc=libc)
+
+        result = resolver.heap_to_libc(
+            heap,
+            heap_span=MemorySpan(heap, target.word_size),
+            image_search_pages=2,
+        )
+
+        self.assertEqual(result.base, libc_base)
 
     def test_explicit_image_base_is_verified_against_runtime_bytes(self) -> None:
         target = resolve_target("x86")

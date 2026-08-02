@@ -374,6 +374,76 @@ class ExactProcessDiscovery:
         actual = self.memory.read(runtime_address, header_size)
         if actual != expected:
             raise DiscoveryError(f"runtime ELF identity mismatch at {runtime_address:#x}")
+        expected_class = 2 if adapter.target.bits == 64 else 1
+        expected_data = 1 if adapter.target.endian.value == "little" else 2
+        if actual[4] != expected_class or actual[5] != expected_data or actual[6] != 1:
+            raise DiscoveryError("runtime ELF class, byte order, or identification version is invalid")
+        byteorder = adapter.target.endian.value
+
+        def field(offset: int, size: int) -> int:
+            return int.from_bytes(actual[offset : offset + size], byteorder)
+
+        elf_type = field(16, 2)
+        machine = field(18, 2)
+        version = field(20, 4)
+        if elf_type not in {2, 3} or machine == 0 or version != 1:
+            raise DiscoveryError("runtime ELF type, machine, or header version is invalid")
+        if adapter.target.bits == 64:
+            phoff = field(32, 8)
+            ehsize = field(52, 2)
+            phentsize = field(54, 2)
+            phnum = field(56, 2)
+            canonical_phentsize = 56
+        else:
+            phoff = field(28, 4)
+            ehsize = field(40, 2)
+            phentsize = field(42, 2)
+            phnum = field(44, 2)
+            canonical_phentsize = 32
+        if ehsize != header_size or phentsize != canonical_phentsize or not 0 < phnum < 0xFFFF:
+            raise DiscoveryError("runtime ELF header/program-header dimensions are invalid")
+        table_size = phentsize * phnum
+        artifact = Path(adapter.path).read_bytes()
+        if phoff > len(artifact) or table_size > len(artifact) - phoff:
+            raise PwntoolsCompatibilityError("exact ELF program-header table is outside the artifact")
+        expected_table = artifact[phoff : phoff + table_size]
+        actual_table = self.memory.read(runtime_address + phoff, table_size)
+        if actual_table != expected_table:
+            raise DiscoveryError("runtime ELF program-header table differs from the exact artifact")
+
+        observed_loads: list[tuple[int, int, int, int, int, int]] = []
+        for index in range(phnum):
+            entry = actual_table[index * phentsize : (index + 1) * phentsize]
+            if int.from_bytes(entry[:4], byteorder) != 1:  # PT_LOAD
+                continue
+            if adapter.target.bits == 64:
+                flags = int.from_bytes(entry[4:8], byteorder)
+                offset = int.from_bytes(entry[8:16], byteorder)
+                vaddr = int.from_bytes(entry[16:24], byteorder)
+                filesz = int.from_bytes(entry[32:40], byteorder)
+                memsz = int.from_bytes(entry[40:48], byteorder)
+                alignment = int.from_bytes(entry[48:56], byteorder)
+            else:
+                offset = int.from_bytes(entry[4:8], byteorder)
+                vaddr = int.from_bytes(entry[8:12], byteorder)
+                filesz = int.from_bytes(entry[16:20], byteorder)
+                memsz = int.from_bytes(entry[20:24], byteorder)
+                flags = int.from_bytes(entry[24:28], byteorder)
+                alignment = int.from_bytes(entry[28:32], byteorder)
+            observed_loads.append((offset, vaddr, filesz, memsz, flags, alignment))
+        expected_loads = [
+            (
+                item.file_offset,
+                item.start,
+                item.file_size,
+                item.size,
+                (4 if item.readable else 0) | (2 if item.writable else 0) | (1 if item.executable else 0),
+                item.alignment,
+            )
+            for item in adapter.profile.load_ranges
+        ]
+        if observed_loads != expected_loads:
+            raise DiscoveryError("runtime ELF PT_LOAD records differ from the exact ELF profile")
 
     def _exact_runtime_bytes(
         self,
