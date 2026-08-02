@@ -9,6 +9,7 @@ turn an unversioned binary into version-bound evidence.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -29,6 +30,8 @@ _VERSION = re.compile(r"\A[0-9]+\.[0-9]+\.[0-9]+\Z")
 _BANNER_VERSION = re.compile(r"(?:QEMU emulator|qemu-[A-Za-z0-9_.+-]+) version ([0-9]+\.[0-9]+\.[0-9]+)(?:\s|\Z)")
 _ENVIRONMENT_NAME = re.compile(r"\APWNC_QEMU_[A-Z0-9_]+\Z")
 _EXEC_PERMISSION_FIX = "cdf7130851318004e6512dbfdb73156fe59c7a59"
+_PROVENANCE_SCHEMA_VERSION = 1
+_CONFIGURE_OPTIONS = ("--disable-docs", "--disable-werror")
 
 
 class QemuVersionMatrixError(ValueError):
@@ -156,6 +159,28 @@ class QemuBinaryAttestation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class QemuBinaryResolution:
+    """An executable path plus whether it came from our provisioned root."""
+
+    path: Path
+    origin: str
+
+    def __post_init__(self) -> None:
+        if self.origin not in {"provisioned", "external"}:
+            raise QemuVersionMatrixError(f"invalid QEMU binary origin {self.origin!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class QemuProvisionedAttestation:
+    """A runtime attestation whose adjacent build provenance also validates."""
+
+    binary: QemuBinaryAttestation
+    build_mode: str
+    build_identity: str
+    provenance_path: Path
+
+
 def _release(record: object) -> QemuRelease:
     if not isinstance(record, dict):
         raise QemuVersionMatrixError("every release entry must be a TOML table")
@@ -249,22 +274,41 @@ def resolve_qemu_binary(
 ) -> Path:
     """Resolve an explicit binary override or a provisioned matrix root."""
 
+    return resolve_qemu_binary_with_origin(
+        manifest,
+        release,
+        root=root,
+        environment=environment,
+    ).path
+
+
+def resolve_qemu_binary_with_origin(
+    manifest: QemuVersionManifest,
+    release: QemuRelease,
+    *,
+    root: str | Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> QemuBinaryResolution:
+    """Resolve a binary and distinguish provisioned roots from overrides."""
+
     values = MappingProxyType(dict(os.environ if environment is None else environment))
     override = values.get(release.binary_environment)
     if override:
         candidate = Path(override)
+        origin = "external"
     else:
         selected_root = root or values.get("PWNC_QEMU_VERSION_ROOT")
         if selected_root is None:
             raise QemuVersionMatrixError(f"set {release.binary_environment} or PWNC_QEMU_VERSION_ROOT for {release.id}")
         candidate = Path(selected_root) / release.id / "bin" / manifest.emulator
+        origin = "provisioned"
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
         raise QemuVersionMatrixError(f"QEMU binary for {release.id} does not exist: {candidate}") from exc
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise QemuVersionMatrixError(f"QEMU binary for {release.id} is not an executable file: {resolved}")
-    return resolved
+    return QemuBinaryResolution(resolved, origin)
 
 
 def _file_sha256(path: Path) -> str:
@@ -310,13 +354,230 @@ def attest_qemu_binary(
     return QemuBinaryAttestation(release, path, _file_sha256(path), banner, observed)
 
 
+def qemu_configure_arguments(target_list: str) -> tuple[str, ...]:
+    """Return the exact configure arguments represented by provenance."""
+
+    return (f"--target-list={target_list}", *_CONFIGURE_OPTIONS)
+
+
+def qemu_build_identity(
+    manifest: QemuVersionManifest,
+    release: QemuRelease,
+    *,
+    build_mode: str,
+    source_tree_sha256: str,
+    builder_recipe_sha256: str | None,
+    builder_image_id: str | None,
+    native_toolchain: Mapping[str, Mapping[str, str]] | None,
+) -> str:
+    """Hash every source/configuration choice that may share a build cache."""
+
+    if build_mode not in {"container", "native"}:
+        raise QemuVersionMatrixError(f"invalid QEMU build mode {build_mode!r}")
+    if _SHA256.fullmatch(source_tree_sha256) is None:
+        raise QemuVersionMatrixError("QEMU builds require an extracted source-tree SHA-256")
+    if build_mode == "container":
+        if builder_recipe_sha256 is None or _SHA256.fullmatch(builder_recipe_sha256) is None:
+            raise QemuVersionMatrixError("container builds require a full builder recipe SHA-256")
+        if builder_image_id is None or re.fullmatch(r"sha256:[0-9a-f]{64}", builder_image_id) is None:
+            raise QemuVersionMatrixError("container builds require the resolved builder image ID")
+        if native_toolchain is not None:
+            raise QemuVersionMatrixError("container builds cannot claim a native toolchain")
+        container_image: str | None = manifest.build_container_image
+    else:
+        if builder_recipe_sha256 is not None or builder_image_id is not None:
+            raise QemuVersionMatrixError("native builds cannot claim a container builder")
+        if not isinstance(native_toolchain, Mapping) or not native_toolchain:
+            raise QemuVersionMatrixError("native builds require toolchain identity")
+        required_tools = {"cc", "make", "meson", "ninja", "pkg-config", "python3"}
+        if set(native_toolchain) != required_tools:
+            raise QemuVersionMatrixError(
+                f"native toolchain fields must be exact; missing={required_tools - set(native_toolchain)!r}, "
+                f"extra={set(native_toolchain) - required_tools!r}"
+            )
+        for name, tool in native_toolchain.items():
+            if not isinstance(tool, Mapping) or set(tool) != {"path", "version"}:
+                raise QemuVersionMatrixError(f"native toolchain entry {name!r} needs exact path/version fields")
+            if not all(isinstance(tool[field], str) and tool[field] for field in ("path", "version")):
+                raise QemuVersionMatrixError(f"native toolchain entry {name!r} has an empty path or version")
+        container_image = None
+    payload = {
+        "release": release.id,
+        "source_sha256": release.source_sha256,
+        "source_tree_sha256": source_tree_sha256,
+        "configure_arguments": list(qemu_configure_arguments(manifest.target_list)),
+        "build_mode": build_mode,
+        "container_image": container_image,
+        "builder_recipe_sha256": builder_recipe_sha256,
+        "builder_image_id": builder_image_id,
+        "native_toolchain": native_toolchain,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def qemu_provenance_path(binary: str | Path) -> Path:
+    """Return the adjacent provenance filename for a provisioned binary."""
+
+    path = Path(binary)
+    return path.with_name(f"{path.name}.provenance.json")
+
+
+def _require_exact_fields(record: object, fields: set[str], context: str) -> dict[str, object]:
+    if not isinstance(record, dict):
+        raise QemuVersionMatrixError(f"{context} must be a JSON object")
+    if set(record) != fields:
+        raise QemuVersionMatrixError(
+            f"{context} fields must be exact; missing={fields - set(record)!r}, extra={set(record) - fields!r}"
+        )
+    return record
+
+
+def attest_provisioned_qemu_binary(
+    manifest: QemuVersionManifest,
+    release: QemuRelease,
+    binary: str | Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> QemuProvisionedAttestation:
+    """Validate a provisioned binary and its source/config/build sidecar."""
+
+    attestation = attest_qemu_binary(release, binary, environment=environment)
+    sidecar = qemu_provenance_path(attestation.path)
+    try:
+        record = json.loads(sidecar.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise QemuVersionMatrixError(f"cannot read provisioned QEMU provenance {sidecar}: {exc}") from exc
+    top = _require_exact_fields(
+        record,
+        {
+            "schema_version",
+            "origin",
+            "release",
+            "architecture",
+            "emulator",
+            "execution_policy",
+            "contains_exec_permission_fix",
+            "exec_permission_fix",
+            "binary",
+            "source",
+            "configure",
+            "build",
+        },
+        "QEMU provenance",
+    )
+    expected_scalars = {
+        "schema_version": _PROVENANCE_SCHEMA_VERSION,
+        "origin": "provisioned",
+        "release": release.id,
+        "architecture": manifest.architecture,
+        "emulator": manifest.emulator,
+        "execution_policy": release.execution_policy.value,
+        "contains_exec_permission_fix": release.contains_exec_permission_fix,
+        "exec_permission_fix": manifest.exec_permission_fix,
+    }
+    for field, expected in expected_scalars.items():
+        if top[field] != expected:
+            raise QemuVersionMatrixError(f"QEMU provenance {field} is {top[field]!r}, expected {expected!r}")
+
+    observed_binary = _require_exact_fields(
+        top["binary"],
+        {"name", "sha256", "banner", "observed_version"},
+        "QEMU provenance binary",
+    )
+    expected_binary = {
+        "name": manifest.emulator,
+        "sha256": attestation.sha256,
+        "banner": attestation.banner,
+        "observed_version": attestation.observed_version,
+    }
+    if observed_binary != expected_binary:
+        raise QemuVersionMatrixError("QEMU provenance does not match the resolved binary hash and banner")
+
+    observed_source = _require_exact_fields(
+        top["source"],
+        {"url", "sha256", "archive_name", "directory", "tree_sha256"},
+        "QEMU provenance source",
+    )
+    expected_source = {
+        "url": release.source_url,
+        "sha256": release.source_sha256,
+        "archive_name": release.archive_name,
+        "directory": release.source_directory,
+    }
+    tree_sha256 = observed_source.pop("tree_sha256")
+    if observed_source != expected_source or not isinstance(tree_sha256, str) or _SHA256.fullmatch(tree_sha256) is None:
+        raise QemuVersionMatrixError("QEMU provenance does not match the pinned source archive")
+
+    observed_configure = _require_exact_fields(
+        top["configure"],
+        {"target_list", "arguments"},
+        "QEMU provenance configure",
+    )
+    expected_configure = {
+        "target_list": manifest.target_list,
+        "arguments": list(qemu_configure_arguments(manifest.target_list)),
+    }
+    if observed_configure != expected_configure:
+        raise QemuVersionMatrixError("QEMU provenance does not match the pinned configure arguments")
+
+    observed_build = _require_exact_fields(
+        top["build"],
+        {
+            "mode",
+            "source_tree_sha256",
+            "container_image",
+            "builder_recipe_sha256",
+            "builder_image_id",
+            "native_toolchain",
+            "identity",
+        },
+        "QEMU provenance build",
+    )
+    mode = observed_build["mode"]
+    recipe = observed_build["builder_recipe_sha256"]
+    image_id = observed_build["builder_image_id"]
+    toolchain = observed_build["native_toolchain"]
+    if (
+        not isinstance(mode, str)
+        or (recipe is not None and not isinstance(recipe, str))
+        or (image_id is not None and not isinstance(image_id, str))
+        or (toolchain is not None and not isinstance(toolchain, dict))
+    ):
+        raise QemuVersionMatrixError("QEMU provenance has invalid build mode or recipe digest")
+    identity = qemu_build_identity(
+        manifest,
+        release,
+        build_mode=mode,
+        source_tree_sha256=str(observed_build["source_tree_sha256"]),
+        builder_recipe_sha256=recipe,
+        builder_image_id=image_id,
+        native_toolchain=toolchain,
+    )
+    expected_image = manifest.build_container_image if mode == "container" else None
+    if (
+        observed_build["source_tree_sha256"] != tree_sha256
+        or observed_build["container_image"] != expected_image
+        or observed_build["identity"] != identity
+    ):
+        raise QemuVersionMatrixError("QEMU provenance build identity does not match its source/config/build mode")
+    return QemuProvisionedAttestation(attestation, mode, identity, sidecar)
+
+
 __all__ = [
     "QemuBinaryAttestation",
+    "QemuBinaryResolution",
+    "QemuProvisionedAttestation",
     "QemuRelease",
     "QemuVersionManifest",
     "QemuVersionMatrixError",
+    "attest_provisioned_qemu_binary",
     "attest_qemu_binary",
     "load_qemu_version_manifest",
+    "qemu_build_identity",
+    "qemu_configure_arguments",
+    "qemu_provenance_path",
     "qemu_test_environment",
     "resolve_qemu_binary",
+    "resolve_qemu_binary_with_origin",
 ]
