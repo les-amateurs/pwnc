@@ -676,6 +676,15 @@ guest `SIGSEGV`; after changing the same mapping to RX, both releases exit 42.
 This establishes that exact AArch64 boundary. It does not turn a QEMU version
 number into evidence for every target, vendor patch set, or configuration.
 
+There are two deliberately different provenance levels. Binaries selected
+through `PWNC_QEMU_VERSION_ROOT` must have a valid adjacent build-provenance
+sidecar, so the suite can bind their observed behavior to the pinned source and
+recorded build identity. An explicit `PWNC_QEMU_7_1_AARCH64` or
+`PWNC_QEMU_7_2_AARCH64` override instead records the external binary's version
+banner and SHA-256 and tests its behavior, but does not claim that it came from
+the pinned upstream archive or recorded build. The test reports that weaker
+origin as `external:behavior-attested`.
+
 ## Tests
 
 Run the normal foundation, lowering, assembly, and matrix tests with:
@@ -766,11 +775,14 @@ python3 -m unittest payloads.tests.test_glibc_qemu -v
 ```
 
 With no selector, all 33 specs are mandatory. A selected run is useful
-evidence only for those IDs; development validation for this change used
-focused samples and did not execute the entire 2.39 lane in one local run.
-The FSOP support cells are QEMU-verified because the checked-in no-selector
-test contract covers all 20 mapped 2.39 target variants, not because every
-FSOP activation or exploitation precondition is covered.
+evidence only for those IDs. Live validation has completed every mapped target
+in the 2.23, 2.24, 2.39, and 2.41 lanes across focused selector batches,
+including distinct ARM/Thumb runs, both PPC64 ABIs, and SPARC32's
+external-GCC/pinned-glibc combination; this was not one no-selector invocation.
+The FSOP support cells are QEMU-verified because both the checked-in
+no-selector contract and those completed live batches cover all 20 mapped 2.39
+target variants, not because every FSOP activation or exploitation
+precondition is covered.
 
 The dynamic fixture is invoked with the provisioned loader directly,
 `--inhibit-cache`, and an exact `--library-path`; it does not use raw `qemu -L`.
@@ -793,13 +805,24 @@ PWNC_QEMU_VERSION_TESTS=1 \
 python3 -m unittest payloads.tests.test_qemu_versions -v
 ```
 
-The provisioner downloads and verifies the official source archives, builds
-only `aarch64-linux-user`, validates each `--version` banner, hashes each output
-binary, and writes `attestation.json`. Its default builder pins the Ubuntu
-22.04 base-image digest, but the Dockerfile resolves unversioned packages from
-mutable `apt` repositories. The suite is therefore source-pinned and
-output-attested, not guaranteed to produce bit-identical binaries at a later
-date. `--native-build` is an explicit, less isolated compatibility path.
+The provisioner downloads and verifies the official source archives and builds
+only `aarch64-linux-user`. Each installed binary gets an adjacent
+`qemu-aarch64.provenance.json`; the root also gets an aggregate
+`attestation.json`. The sidecar binds the binary hash, banner, and version to
+the archive URL/SHA-256/name, extracted-source tree hash, exact target/configure
+arguments, expected execute policy/fix, and build-mode identity. A container
+build additionally binds the pinned base image, builder Dockerfile hash, and
+resolved image ID. A native build instead binds the selected tool paths and
+version banners.
+
+`PWNC_QEMU_VERSION_ROOT` requires those sidecars to validate before execution;
+an older pre-sidecar cache must be reprovisioned. Per-release `PWNC_QEMU_*`
+overrides intentionally accept external binaries without a sidecar, but then
+provide only banner/hash/behavior evidence as described above. The default
+container still resolves unversioned packages from mutable `apt` repositories,
+so even provisioned-root evidence is source/build-identity-bound and
+output-hashed, not a promise of bit-identical future rebuilds. `--native-build`
+is an explicit, less isolated compatibility path.
 
 ### What the execution evidence means
 
@@ -808,7 +831,7 @@ date. `--native-build` is an explicit, less isolated compatibility path.
 | Native i386/AMD64 | Direct host-kernel execution and the exact loaded host libc; FSOP callback dispatch and live-base ret2libc | Compiled fixtures, supplied control transfer, and challenge preconditions |
 | General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, and materialized ROP control flow | Minimal static ELF envelopes and semantic ROP gadgets are test-owned; shellcode cases use no foreign libc |
 | Pinned glibc qemu-user | Real dynamic programs, exact pinned loader/libc identity, target-endian FSOP ingestion, live Apple 2/Cat dispatch, glibc 2.23 legacy dispatch, and x86 libc ORW/sendfile chains | Heap FILE placement, activation call, callbacks, challenge ELF, and its pivot/gadgets are test fixtures; the host QEMU version is not pinned |
-| QEMU 7.1/7.2 boundary | Exact source releases, observed banners/output hashes, and RW-versus-RX AArch64 instruction fetch | A purpose-built static probe; no libc, payload exploit, non-AArch64, or native-hardware claim |
+| QEMU 7.1/7.2 boundary | Provisioned roots bind observed banners, output hashes, source trees, configure arguments, and build identity; both origins test RW-versus-RX AArch64 fetch | Explicit binary overrides attest only banner/hash/behavior; the static probe makes no libc, payload-exploit, non-AArch64, or native-hardware claim |
 
 The x86 pinned-libc ROP fixture supplies the file path in writable main-image
 storage, composes `open` with either `read`/`write` or `sendfile`, deliberately
