@@ -126,6 +126,21 @@ def _expected_pwntools_arch(target: Target) -> str:
     }[target.arch]
 
 
+def _accepted_pwntools_elf_arches(target: Target) -> tuple[str, ...]:
+    """Return parser spellings accepted for an exact target.
+
+    Pwntools' public context spelling for s390x is ``s390``, while its ELF
+    parser can expose pyelftools' machine name ``em_s390`` for a real s390x
+    artifact.  Keep the context/backend spelling strict and admit the parser
+    alias only at the byte-backed ELF cross-check boundary.
+    """
+
+    expected = _expected_pwntools_arch(target)
+    if target.arch is Architecture.S390X:
+        return (expected, "em_s390")
+    return (expected,)
+
+
 def _crosscheck_pwntools_elf(elf: ELF, profile: ELFProfile) -> PwntoolsMitigations:
     target = profile.target
     expected_arch = _expected_pwntools_arch(target)
@@ -133,9 +148,15 @@ def _crosscheck_pwntools_elf(elf: ELF, profile: ELFProfile) -> PwntoolsMitigatio
         raise PwntoolsCompatibilityError(
             f"target backend alias {target.pwntools_arch!r} does not match {expected_arch!r} for {target.name}"
         )
-    if elf.arch != expected_arch:
+    accepted_arches = _accepted_pwntools_elf_arches(target)
+    if elf.arch not in accepted_arches:
+        expected_description = (
+            repr(expected_arch)
+            if len(accepted_arches) == 1
+            else "one of " + ", ".join(repr(item) for item in accepted_arches)
+        )
         raise PwntoolsCompatibilityError(
-            f"pwntools reports arch={elf.arch!r}, expected {expected_arch!r} for {target.name}"
+            f"pwntools reports arch={elf.arch!r}, expected {expected_description} for {target.name}"
         )
     if elf.bits != target.bits:
         raise PwntoolsCompatibilityError(f"pwntools reports {elf.bits} bits, expected {target.bits}")

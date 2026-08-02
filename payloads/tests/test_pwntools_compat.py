@@ -6,14 +6,16 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from pwnlib.context import context
 
-from payloads import SUPPORTED_TARGETS, inspect_elf, resolve_target
+from payloads import SUPPORTED_TARGETS, Relro, inspect_elf, resolve_target
 from payloads.libc import LibcIdentity
 from payloads.pwntools_compat import (
     ExactELFAdapter,
     PwntoolsCompatibilityError,
+    _crosscheck_pwntools_elf,
     pack_target_word,
 )
 
@@ -188,6 +190,46 @@ class PwntoolsPackingTests(unittest.TestCase):
         target = resolve_target("x86")
         with self.assertRaises(OverflowError):
             pack_target_word(target, 1 << target.bits)
+
+
+class PwntoolsArchitectureAliasTests(unittest.TestCase):
+    @staticmethod
+    def _profile(*, backend_arch: str = "s390") -> mock.Mock:
+        target = replace(resolve_target("s390x"), pwntools_arch=backend_arch)
+        return mock.Mock(
+            target=target,
+            pie=False,
+            nx=True,
+            relro=Relro.FULL,
+            symbol_offsets={"write": 0x12340},
+        )
+
+    @staticmethod
+    def _elf(arch: str) -> mock.Mock:
+        return mock.Mock(
+            arch=arch,
+            bits=64,
+            endian="big",
+            os="linux",
+            pie=False,
+            nx=True,
+            relro="Full",
+            canary=False,
+            fortify=False,
+            symbols={"write": 0x12340},
+        )
+
+    def test_real_s390_elf_parser_alias_is_accepted(self) -> None:
+        mitigations = _crosscheck_pwntools_elf(self._elf("em_s390"), self._profile())
+        self.assertTrue(mitigations.nx)
+
+    def test_unrelated_s390_arch_spelling_is_rejected(self) -> None:
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "expected one of 's390', 'em_s390'"):
+            _crosscheck_pwntools_elf(self._elf("s390x"), self._profile())
+
+    def test_s390_context_backend_alias_remains_strict(self) -> None:
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "target backend alias 'em_s390'"):
+            _crosscheck_pwntools_elf(self._elf("em_s390"), self._profile(backend_arch="em_s390"))
 
 
 if __name__ == "__main__":
