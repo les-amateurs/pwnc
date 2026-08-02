@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from math import lcm
 from typing import Any, Protocol, runtime_checkable
 
+from pwnlib.memleak import MemLeak
+
 from pwnc.types.provider import ByteOrder, BytesProvider
 
 from .errors import ConstraintError, MemoryAccessError, UnsupportedTargetError
@@ -269,6 +271,34 @@ class ArbitraryMemory:
 
         return cls(target, read_at=provider_read, write_at=provider_write, traits=traits)
 
+    @classmethod
+    def from_pwntools_memleak(
+        cls,
+        leak: MemLeak,
+        target: Target,
+        *,
+        write_at: WriteAt | None = None,
+        traits: IOPrimitiveTraits | None = None,
+    ) -> ArbitraryMemory:
+        """Adapt a pwntools :class:`~pwnlib.memleak.MemLeak` exactly.
+
+        ``MemLeak`` is a cached, byte-oriented read interface.  The adapter
+        retains its cache and convenience behavior while restoring pwnc's
+        strict exact-length and target-width checks.  An independently known
+        arbitrary-write callback can be composed through ``write_at``.
+        """
+
+        if not isinstance(leak, MemLeak):
+            raise TypeError("leak must be a pwntools MemLeak")
+
+        def read_memleak(address: int, size: int) -> bytes:
+            result = leak.n(address, size)
+            if result is None:
+                raise MemoryAccessError(f"pwntools MemLeak could not read {size} bytes at {address:#x}")
+            return result
+
+        return cls(target, read_at=read_memleak, write_at=write_at, traits=traits)
+
     def _require_reader(self) -> ReadAt:
         if self.read_at is None:
             raise MemoryAccessError("this arbitrary-memory interface has no read primitive")
@@ -389,6 +419,32 @@ class ArbitraryMemory:
         """Expose this interface through the small ``BytesProvider`` protocol."""
 
         return ArbitraryMemoryBytesProvider(self, base_address)
+
+    def as_pwntools_memleak(
+        self,
+        *,
+        leak_size: int | None = None,
+        search_range: int = 0,
+    ) -> MemLeak:
+        """Expose exact reads through pwntools' cached ``MemLeak`` API.
+
+        The callback fetches one target word by default.  Pwntools caches the
+        returned bytes, so subsequent ``b``/``w``/``d``/``q``/``n`` calls do
+        not repeatedly exercise a slow challenge primitive.  Set
+        ``leak_size`` when the transport has a more natural fixed quantum.
+        """
+
+        self._require_reader()
+        amount = self.target.word_size if leak_size is None else leak_size
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ValueError("leak_size must be a positive integer or None")
+        if not isinstance(search_range, int) or isinstance(search_range, bool) or search_range < 0:
+            raise ValueError("search_range must be a non-negative integer")
+
+        def leak(address: int) -> bytes:
+            return self.read(address, amount)
+
+        return MemLeak(leak, search_range=search_range, reraise=True)
 
 
 @dataclass(frozen=True, slots=True)

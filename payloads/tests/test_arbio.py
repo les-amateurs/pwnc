@@ -35,6 +35,7 @@ from payloads.arbio import (
 )
 from payloads.errors import MemoryAccessError
 from pwnc.types import BytesProvider, Int
+from pwnlib.memleak import MemLeak
 
 
 class MemoryBackend:
@@ -266,6 +267,46 @@ class ArbitraryMemoryTests(unittest.TestCase):
             round_trip.read(0x103F, 1)
         with self.assertRaisesRegex(MemoryAccessError, "below provider base"):
             round_trip.write(0x103F, b"X")
+
+    def test_pwntools_memleak_adapter_is_cached_and_target_endian_aware(self) -> None:
+        memory, backend = memory_for("mipseb")
+        backend.data[0x40:0x48] = b"\x11\x22\x33\x44\xaa\xbb\xcc\xdd"
+        leak = memory.as_pwntools_memleak()
+
+        self.assertIsInstance(leak, MemLeak)
+        self.assertEqual(leak.n(0x1040, 8), b"\x11\x22\x33\x44\xaa\xbb\xcc\xdd")
+        self.assertEqual(backend.read_calls, [(0x1040, 4), (0x1044, 4)])
+        self.assertEqual(leak.n(0x1040, 8), b"\x11\x22\x33\x44\xaa\xbb\xcc\xdd")
+        self.assertEqual(backend.read_calls, [(0x1040, 4), (0x1044, 4)])
+
+    def test_arbitrary_memory_accepts_pwntools_memleak_and_optional_writer(self) -> None:
+        target = resolve_target("x86_64")
+        backend = MemoryBackend(0x4000)
+        backend.data[0x20:0x28] = b"abcdefgh"
+        pwntools_leak = MemLeak(lambda address: backend.read(address, 8), search_range=0, reraise=True)
+        memory = ArbitraryMemory.from_pwntools_memleak(
+            pwntools_leak,
+            target,
+            write_at=backend.write,
+        )
+
+        self.assertEqual(memory.read(0x4020, 8), b"abcdefgh")
+        memory.write(0x4028, b"ABCDEFGH")
+        self.assertEqual(bytes(backend.data[0x28:0x30]), b"ABCDEFGH")
+
+    def test_pwntools_memleak_adapter_validates_arguments_and_missing_bytes(self) -> None:
+        memory, _ = memory_for("x86")
+        with self.assertRaisesRegex(ValueError, "leak_size"):
+            memory.as_pwntools_memleak(leak_size=0)
+        with self.assertRaisesRegex(ValueError, "search_range"):
+            memory.as_pwntools_memleak(search_range=-1)
+        with self.assertRaisesRegex(TypeError, "pwntools MemLeak"):
+            ArbitraryMemory.from_pwntools_memleak(object(), memory.target)  # type: ignore[arg-type]
+
+        unavailable = MemLeak(lambda _address: None, search_range=0, reraise=True)
+        adapted = ArbitraryMemory.from_pwntools_memleak(unavailable, memory.target)
+        with self.assertRaisesRegex(MemoryAccessError, "could not read"):
+            adapted.read(0x1000, 4)
 
 
 class PayloadStagerTests(unittest.TestCase):
