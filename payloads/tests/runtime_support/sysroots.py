@@ -96,6 +96,7 @@ class SysrootSpec:
     interpreter: str | None
     loader: str
     libc: str
+    static_libc: str
     elf: ElfIdentity
     version_marker: str
 
@@ -122,6 +123,7 @@ class SysrootSpec:
             "qemu": self.qemu,
             "loader": self.loader,
             "libc": self.libc,
+            "static_libc": self.static_libc,
             "elf": {
                 "class": self.elf.elf_class,
                 "endian": self.elf.endian,
@@ -184,6 +186,12 @@ class ProvisionedSysroot:
     @property
     def qemu(self) -> str:
         return self.spec.qemu
+
+    @property
+    def static_libc(self) -> Path:
+        """The exact target ``libc.a`` selected for static fixtures."""
+
+        return _resolve_guest_path(self.sysroot, self.spec.static_libc)
 
     def resolve_guest_path(self, guest_path: str | os.PathLike[str]) -> Path:
         """Resolve guest-absolute symlinks beneath this sysroot.
@@ -340,7 +348,7 @@ def provision_sysroot(
 
 
 def validate_provisioned_sysroot(provisioned: ProvisionedSysroot) -> None:
-    """Reject the wrong libc, byte order, ELF class, machine, or PPC64 ABI."""
+    """Reject the wrong dynamic or static libc and incompatible ELF ABIs."""
 
     spec = provisioned.spec
     libc = _resolve_guest_path(provisioned.sysroot, spec.libc)
@@ -351,6 +359,10 @@ def validate_provisioned_sysroot(provisioned: ProvisionedSysroot) -> None:
         _validate_elf(path, spec.elf, f"{spec.id} {label}")
     if spec.version_marker.encode() not in libc.read_bytes():
         raise SysrootError(f"{spec.id}: libc does not contain version marker {spec.version_marker!r}")
+    static_libc = provisioned.static_libc
+    if not static_libc.is_file():
+        raise SysrootError(f"{spec.id}: expected static libc does not exist: {static_libc}")
+    _validate_ar_archive(static_libc, f"{spec.id} static libc")
 
 
 def _parse_manifest(raw: Any) -> SysrootManifest:
@@ -526,6 +538,9 @@ def _parse_sysroot(
     if sysroot_subdir is not None and not isinstance(sysroot_subdir, str):
         raise SysrootError(f"{spec_id}: sysroot_subdir must be a string")
     loader = _normalize_guest_path(_required_string(raw, "loader"), spec_id)
+    static_libc_raw = raw.get("static_libc", "usr/lib/libc.a")
+    if not isinstance(static_libc_raw, str) or not static_libc_raw:
+        raise SysrootError(f"{spec_id}: static_libc must be a nonempty string")
     interpreter_raw = raw.get("interpreter")
     if interpreter_raw is not None and (not isinstance(interpreter_raw, str) or not interpreter_raw):
         raise SysrootError(f"{spec_id}: interpreter must be a nonempty string when specified")
@@ -544,6 +559,7 @@ def _parse_sysroot(
         interpreter=_normalize_guest_path(interpreter_raw, spec_id) if interpreter_raw is not None else None,
         loader=loader,
         libc=_normalize_guest_path(_required_string(raw, "libc"), spec_id),
+        static_libc=_normalize_guest_path(static_libc_raw, f"{spec_id} static libc"),
         elf=ElfIdentity(elf_class, endian, machine, flags_mask, flags_value),
         version_marker=_required_string(raw, "version_marker"),
     )
@@ -839,6 +855,13 @@ def _validate_elf(path: Path, expected: ElfIdentity, label: str) -> None:
         )
 
 
+def _validate_ar_archive(path: Path, label: str) -> None:
+    with path.open("rb") as archive:
+        magic = archive.read(8)
+    if magic != b"!<arch>\n":
+        raise SysrootError(f"{label}: not a regular ar archive")
+
+
 def _validated_cached_sysroot(final: Path, spec: SysrootSpec) -> ProvisionedSysroot | None:
     marker = final / ".complete.json"
     if not marker.is_file():
@@ -883,7 +906,11 @@ def _write_completion_marker(final: Path, spec: SysrootSpec, provisioned: Provis
 def _provisioned_file_integrity(final: Path, provisioned: ProvisionedSysroot) -> dict[str, dict[str, str | None]]:
     root = final.resolve()
     records: dict[str, dict[str, str | None]] = {}
-    paths = [("libc", provisioned.libc), ("loader", provisioned.loader)]
+    paths = [
+        ("libc", provisioned.libc),
+        ("static_libc", provisioned.static_libc),
+        ("loader", provisioned.loader),
+    ]
     if provisioned.spec.compiler.kind == "bundled-gcc":
         paths.append(("compiler", _bundled_gcc_driver(provisioned)))
     for label, path in paths:

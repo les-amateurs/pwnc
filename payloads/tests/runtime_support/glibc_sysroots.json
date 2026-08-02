@@ -338,6 +338,7 @@
       "qemu": "qemu-mips64el",
       "loader": "lib64/ld.so.1",
       "libc": "lib/libc.so.6",
+      "static_libc": "lib/libc.a",
       "elf": {"class": 64, "endian": "little", "machine": 8},
       "version_marker": "stable release version 2.39"
     },
@@ -369,6 +370,7 @@
       "qemu": "qemu-mips64",
       "loader": "lib64/ld.so.1",
       "libc": "lib/libc.so.6",
+      "static_libc": "lib/libc.a",
       "elf": {"class": 64, "endian": "big", "machine": 8},
       "version_marker": "stable release version 2.39"
     },
@@ -471,6 +473,7 @@
       "interpreter": "lib/ld-linux.so.2",
       "loader": "usr/sparc64-linux-gnu/lib32/ld-linux.so.2",
       "libc": "usr/sparc64-linux-gnu/lib32/libc.so.6",
+      "static_libc": "usr/sparc64-linux-gnu/lib32/libc.a",
       "elf": {"class": 32, "endian": "big", "machine": 18},
       "version_marker": "stable release version 2.39"
     },
@@ -513,6 +516,7 @@
       "qemu": "qemu-x86_64",
       "loader": "lib64/ld-linux-x86-64.so.2",
       "libc": "lib/x86_64-linux-gnu/libc.so.6",
+      "static_libc": "usr/lib/x86_64-linux-gnu/libc.a",
       "elf": {"class": 64, "endian": "little", "machine": 62},
       "version_marker": "stable release version 2.23"
     },

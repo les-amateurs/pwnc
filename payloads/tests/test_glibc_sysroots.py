@@ -136,6 +136,15 @@ class GlibcSysrootManifestTests(unittest.TestCase):
             ),
         )
 
+    def test_static_libc_path_defaults_and_package_overrides_are_exact(self) -> None:
+        self.assertEqual(resolve_sysroot("x86_64").static_libc, "usr/lib/libc.a")
+        self.assertEqual(resolve_sysroot("mips64").static_libc, "lib/libc.a")
+        self.assertEqual(resolve_sysroot("sparc32").static_libc, "usr/sparc64-linux-gnu/lib32/libc.a")
+        self.assertEqual(
+            resolve_sysroot("x86_64", lane="glibc-2.23").static_libc,
+            "usr/lib/x86_64-linux-gnu/libc.a",
+        )
+
     def test_interpreter_override_is_absent_by_default(self) -> None:
         spec = resolve_sysroot("x86_64", lane="glibc-2.23")
         self.assertIsNone(spec.interpreter)
@@ -156,6 +165,16 @@ class GlibcSysrootManifestTests(unittest.TestCase):
         manifest = json.loads(source.read_text(encoding="utf-8"))
         mips = next(item for item in manifest["sysroots"] if item["id"].startswith("mips64-n64-"))
         mips["compiler"]["driver"] = "../../usr/bin/host-gcc"
+        with tempfile.TemporaryDirectory(prefix="pwnc-manifest-unit-") as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(SysrootError, "unsafe guest path"):
+                load_manifest(path)
+
+    def test_unsafe_static_libc_path_is_rejected(self) -> None:
+        source = Path(__file__).with_name("runtime_support") / "glibc_sysroots.json"
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+        manifest["sysroots"][0]["static_libc"] = "../host/libc.a"
         with tempfile.TemporaryDirectory(prefix="pwnc-manifest-unit-") as directory:
             path = Path(directory) / "manifest.json"
             path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -321,7 +340,7 @@ class GlibcSysrootArtifactValidationTests(unittest.TestCase):
         spec = resolve_sysroot("x86_64", lane="glibc-2.23")
         build_id = bytes.fromhex("0123456789abcdef0123456789abcdef01234567")
         image = _minimal_elf64_with_build_id(62, 0, build_id) + spec.version_marker.encode()
-        for mutated_label in ("libc", "loader"):
+        for mutated_label in ("libc", "static_libc", "loader"):
             with (
                 self.subTest(mutated_label=mutated_label),
                 tempfile.TemporaryDirectory(prefix="pwnc-sysroot-unit-") as directory,
@@ -335,6 +354,8 @@ class GlibcSysrootArtifactValidationTests(unittest.TestCase):
                 libc.write_bytes(image)
                 loader.write_bytes(image)
                 provisioned = ProvisionedSysroot(spec, final, final, libc, loader)
+                provisioned.static_libc.parent.mkdir(parents=True, exist_ok=True)
+                provisioned.static_libc.write_bytes(b"!<arch>\n")
                 validate_provisioned_sysroot(provisioned)
                 _write_completion_marker(final, spec, provisioned)
                 marker = json.loads((final / ".complete.json").read_text(encoding="utf-8"))
@@ -342,7 +363,12 @@ class GlibcSysrootArtifactValidationTests(unittest.TestCase):
                 self.assertEqual(marker["artifacts"], [artifact.sha256 for artifact in spec.artifacts])
                 self.assertEqual(
                     {record["build_id"] for record in marker["files"].values()},
-                    {build_id.hex()},
+                    {build_id.hex(), None},
+                )
+                self.assertEqual(marker["files"]["static_libc"]["path"], spec.static_libc)
+                self.assertEqual(
+                    marker["files"]["static_libc"]["sha256"],
+                    "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5",
                 )
 
                 with mock.patch("payloads.tests.runtime_support.sysroots._materialize_artifact") as materialize:
@@ -364,6 +390,27 @@ class GlibcSysrootArtifactValidationTests(unittest.TestCase):
                 materialize.assert_called_once()
                 self.assertFalse(final.exists())
 
+    def test_static_libc_requires_regular_ar_magic(self) -> None:
+        spec = resolve_sysroot("x86_64")
+        with tempfile.TemporaryDirectory(prefix="pwnc-sysroot-unit-") as directory:
+            sysroot = Path(directory)
+            libc = sysroot / spec.libc
+            loader = sysroot / spec.loader
+            libc.parent.mkdir(parents=True)
+            loader.parent.mkdir(parents=True, exist_ok=True)
+            image = _minimal_elf(64, "little", 62, 0) + spec.version_marker.encode()
+            libc.write_bytes(image)
+            loader.write_bytes(image)
+            provisioned = ProvisionedSysroot(spec, sysroot, sysroot, libc, loader)
+            provisioned.static_libc.parent.mkdir(parents=True)
+            provisioned.static_libc.write_bytes(b"!<thin>\n")
+
+            with self.assertRaisesRegex(SysrootError, "not a regular ar archive"):
+                validate_provisioned_sysroot(provisioned)
+
+            provisioned.static_libc.write_bytes(b"!<arch>\n")
+            validate_provisioned_sysroot(provisioned)
+
     def test_exact_elf_identity_and_version_marker_are_required(self) -> None:
         spec = resolve_sysroot("x86_64")
         with tempfile.TemporaryDirectory(prefix="pwnc-sysroot-unit-") as directory:
@@ -376,6 +423,8 @@ class GlibcSysrootArtifactValidationTests(unittest.TestCase):
             libc.write_bytes(image)
             loader.write_bytes(image)
             provisioned = ProvisionedSysroot(spec, sysroot, sysroot, libc, loader)
+            provisioned.static_libc.parent.mkdir(parents=True)
+            provisioned.static_libc.write_bytes(b"!<arch>\n")
             validate_provisioned_sysroot(provisioned)
 
             libc.write_bytes(_minimal_elf(64, "little", 21, 0) + spec.version_marker.encode())
