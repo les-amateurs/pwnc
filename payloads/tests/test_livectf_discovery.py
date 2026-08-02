@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import platform
+import signal
 import sys
 import tempfile
 import unittest
@@ -31,8 +32,37 @@ _NATIVE_AMD64 = sys.platform.startswith("linux") and platform.machine().lower() 
 _SEEK_MENU = b"What do you want to do?\n1. Open file\n2. Close file\n3. Write to file\n4. Read from file\n> "
 
 
+def _challenge_environment() -> dict[str, str]:
+    """Keep host loader controls and an oversized ambient environment out."""
+
+    return {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"}
+
+
+def _kill_process_group(tube: process) -> None:
+    """Bound cleanup to the dedicated process group created by pwntools."""
+
+    if tube.poll() is not None:
+        return
+    try:
+        group = os.getpgid(tube.pid)
+        if group != os.getpgrp():
+            os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _bounded_status(tube: process, timeout: float = 5) -> int | None:
+    tube.wait_for_close(timeout=timeout)
+    return tube.poll()
+
+
 class _SeekAndDestroyMemory:
-    """Turn seek-and-destroy's real menu into byte-exact process memory I/O."""
+    """Use the challenge's menu as a local payload-debugging transport only.
+
+    Production discovery receives only the resulting callbacks.  Neither the
+    payload APIs nor generated exploits assume that ``/proc/self/mem`` exists
+    locally or on a remote target.
+    """
 
     def __init__(self, tube: process) -> None:
         self.tube = tube
@@ -156,6 +186,23 @@ def _exact_adapters(root: Path) -> tuple[ExactELFAdapter, ExactELFAdapter, Exact
     )
 
 
+def _read_maps_prefix(transport: _SeekAndDestroyMemory) -> bytes:
+    """Read bounded, complete chunks until the two required mappings appear."""
+
+    result = bytearray()
+    for offset in range(0, 0x4000, 0x100):
+        try:
+            result.extend(transport.read_current_file(offset, 0x100))
+        except OSError:
+            break
+        lines = bytes(result).splitlines()
+        if any(b"[heap]" in line for line in lines) and any(
+            b"libc.so.6" in line and len(line.split()) >= 3 and line.split()[2] == b"00000000" for line in lines
+        ):
+            return bytes(result)
+    raise AssertionError("bounded /proc/self/maps debug prefix omitted the heap or libc base mapping")
+
+
 def _exit_chain(libc: ExactELFAdapter, libc_base: int, slot: int, status: int) -> ROPChain:
     lowest_load = min(item.start for item in libc.profile.load_ranges)
     elf, rop = libc.fresh_rop(runtime_base=libc_base + lowest_load)
@@ -191,6 +238,7 @@ class LiveCTFDiscoveryTests(unittest.TestCase):
         cls._temporary: tempfile.TemporaryDirectory[str] | None = None
         if configured_cache is None:
             cls._temporary = tempfile.TemporaryDirectory(prefix="pwnc-livectf-discovery-")
+            cls.addClassCleanup(cls._temporary.cleanup)
             configured_cache = cls._temporary.name
         manifest = load_manifest()
         cls.seek = provision_handout(
@@ -202,26 +250,22 @@ class LiveCTFDiscoveryTests(unittest.TestCase):
             configured_cache,
         )
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._temporary is not None:
-            cls._temporary.cleanup()
-
     def test_seek_and_destroy_composes_every_transition_and_executes_rop(self) -> None:
         root = self.seek.root / "handout"
         main, libc, loader = _exact_adapters(root)
         argv = [
             str(root / "ld-linux-x86-64.so.2"),
+            "--inhibit-cache",
             "--library-path",
             str(root),
             str(root / "challenge"),
         ]
         with context.local(log_level="error"):
-            tube = process(argv)
+            tube = process(argv, env=_challenge_environment())
         try:
             transport = _SeekAndDestroyMemory(tube)
             transport.open_file(b"/proc/self/maps", b"r")
-            maps = transport.read_current_file(0, 0x400)
+            maps = _read_maps_prefix(transport)
             heap_line = next(line for line in maps.splitlines() if b"[heap]" in line)
             heap_start, heap_end = (int(value, 16) for value in heap_line.split()[0].split(b"-"))
             libc_line = next(
@@ -289,8 +333,11 @@ class LiveCTFDiscoveryTests(unittest.TestCase):
             plan = discovery.plan_rop_insertion(return_site, chain)
             transport.expect_process_exit = True
             self.assertEqual(plan.apply(memory, verify=False), chain.byte_length)
-            self.assertEqual(tube.poll(block=True), 73)
+            status = _bounded_status(tube)
+            self.assertIsNotNone(status, "seek-and-destroy ROP did not terminate within five seconds")
+            self.assertEqual(status, 73)
         finally:
+            _kill_process_group(tube)
             tube.close()
 
     def test_ptrace_me_maybe_discovers_layout_and_round_trips_rop_plan(self) -> None:
@@ -298,13 +345,16 @@ class LiveCTFDiscoveryTests(unittest.TestCase):
         main, libc, loader = _exact_adapters(root)
         argv = [
             str(root / "ld-linux-x86-64.so.2"),
+            "--inhibit-cache",
             "--library-path",
             str(root),
             str(root / "challenge"),
         ]
         with context.local(log_level="error"):
-            tube = process(argv)
+            tube = process(argv, env=_challenge_environment())
         transport = _PtraceMemory(tube)
+        mutation_attempted = False
+        restoration_confirmed = True
         try:
             rip = transport.call(transport.PEEKUSER, 16 * 8)
             rsp = transport.call(transport.PEEKUSER, 19 * 8)
@@ -343,21 +393,33 @@ class LiveCTFDiscoveryTests(unittest.TestCase):
             chain = _exit_chain(libc, libc_result.base, return_site.slot_address, 71)
             plan = discovery.plan_rop_insertion(return_site, chain)
             original = plan.writes[0].expected
-            self.assertEqual(plan.apply(memory), chain.byte_length)
-            self.assertEqual(memory.read(return_site.slot_address, len(original)), chain.materialize())
-            self.assertEqual(memory.write(return_site.slot_address, original), len(original))
-            self.assertEqual(memory.read(return_site.slot_address, len(original)), original)
+            mutation_attempted = True
+            try:
+                self.assertEqual(plan.apply(memory), chain.byte_length)
+                self.assertEqual(memory.read(return_site.slot_address, len(original)), chain.materialize())
+            finally:
+                restoration_confirmed = False
+                self.assertEqual(memory.write(return_site.slot_address, original), len(original))
+                self.assertEqual(memory.read(return_site.slot_address, len(original)), original)
+                restoration_confirmed = True
 
             leak = memory.as_pwntools_memleak()
             self.assertEqual(leak.q(rsp), int.from_bytes(memory.read(rsp, 8), "little"))
             transport.finish()
-            self.assertEqual(tube.poll(block=True), 0)
+            status = _bounded_status(tube)
+            self.assertIsNotNone(status, "ptrace-me-maybe did not terminate within five seconds")
+            self.assertEqual(status, 0)
         finally:
             if tube.poll() is None:
-                try:
-                    transport.finish()
-                except (EOFError, OSError):
-                    pass
+                if not mutation_attempted or restoration_confirmed:
+                    try:
+                        transport.finish()
+                        _bounded_status(tube)
+                    except (EOFError, OSError):
+                        pass
+                # Never detach a child whose return stack may contain a
+                # partial chain.  Kill the dedicated parent/tracee group.
+                _kill_process_group(tube)
             tube.close()
 
 
