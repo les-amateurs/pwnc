@@ -917,6 +917,56 @@ support in addition to LLVM and LLD. Once enabled, a missing prerequisite or a
 kernel that cannot execute i386 ELF files fails the run rather than skipping
 one half of the matrix.
 
+### Pinned LiveCTF challenge corpus
+
+`payloads/tests/runtime_support/livectf_artifacts.json` pins the official
+[DEF CON 30](https://github.com/Live-CTF/LiveCTF-DEFCON30),
+[DEF CON 31](https://github.com/Live-CTF/LiveCTF-DEFCON31),
+[DEF CON 32](https://github.com/Live-CTF/LiveCTF-DEFCON32), and
+[DEF CON 33](https://github.com/Live-CTF/LiveCTF-DEFCON33) source snapshots by
+commit, archive size, SHA-256, license, and challenge-critical source member.
+It separately pins the exact release handouts for DEF CON 30
+`seek-and-destroy` and DEF CON 31 `ptrace-me-maybe`, including the challenge,
+libc, and loader SHA-256/build ID. Normal tests parse and mutation-test this
+catalog offline. Downloads are explicit and content-addressed:
+
+```sh
+PWNC_LIVECTF_TESTS=1 \
+PWNC_LIVECTF_CACHE=/tmp/pwnc-livectf-cache \
+python3 -m unittest \
+  payloads.tests.test_livectf_artifacts \
+  payloads.tests.test_livectf_discovery -v
+```
+
+On native AMD64 Linux, the process suite runs those release binaries through
+their real challenge protocols. `seek-and-destroy` supplies byte-granular
+`/proc/self/mem` reads and writes: the test composes heap -> libc, libc ->
+heap, libc -> `environ`/stack, saved-main-return classification, libc ->
+loader, and `r_debug` -> `link_map`, then executes a pwntools-selected exact-
+libc `exit(73)` ROP chain through the classified return slot. Its exact loader
+contains another page-aligned `\x7fELF` at `+0x2c000`; the test proves that the
+strict header/program-header matcher rejects that false base.
+
+`ptrace-me-maybe` adapts the stopped child's real `PTRACE_PEEK*` and
+`PTRACE_POKE*` operations. It derives the exact libc from the leaked RIP,
+finds the stack through `environ`, classifies the main-image continuation,
+enumerates the loader list, materializes and writes an exact-libc ROP chain,
+verifies it, restores every original word, and also exercises the live
+pwntools `MemLeak` bridge before detaching cleanly.
+
+Historical source is not the same thing as a reproducible historical runtime.
+The DEF CON 30 Dockerfile now encounters archived Debian Buster package
+repositories and clones an unpinned nsjail head; DEF CON 31's multistage
+package upgrade can produce a runtime libc different from its release
+handout. DEF CON 32 has no selected immutable handout in this corpus: its
+floating `livectf/livectf:quals-nsjail` rebuild is recorded only as a dated,
+non-provisionable observation. In that audit rebuild, the challenge's invalid
+read consistently disclosed PIE writable data at `binary+0x22a8`, not the
+stack value assumed by the historical hardcoded solve. The tests preserve
+these as workflow failures rather than treating a current Docker rebuild as
+historical evidence. DEF CON 33 is source-attested here but has no runtime
+execution claim.
+
 ### Pinned glibc sysroots
 
 `payloads/tests/runtime_support/glibc_sysroots.json` contains 33
@@ -1087,6 +1137,7 @@ is an explicit, less isolated compatibility path.
 | Suite | Real runtime evidence | Test-owned or not established |
 | --- | --- | --- |
 | Native i386/AMD64 | Direct host-kernel execution and exact loaded host libc for FSOP/live-base ret2libc; seven pinned-libc semantic-write mirrors; seven static-glibc syscall/`exit` mirrors | Compiled fixtures, supplied control transfer, and challenge preconditions |
+| Pinned LiveCTF | Exact release challenge/libc/loader identities; real `/proc/self/mem` and ptrace transports; complete discovery graph; one executed and one verified/restored exact-libc ROP chain | Runtime execution is AMD64-only; DEF CON 32/33 have source provenance but no exact handout execution claim |
 | General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, and materialized ROP control flow | Minimal static ELF envelopes and semantic ROP gadgets are test-owned; shellcode cases use no foreign libc |
 | Pinned glibc qemu-user | Real dynamic programs and exact loader/libc identity; target-endian FSOP dispatch; exact-libc semantic `write` on 28 mappings; x86 ORW/sendfile on seven; real static-glibc syscall ROP on 37 and libc `exit` ROP on 28 | Heap FILE placement, activation call, callbacks, challenge ELF, pivot/gadgets, and static ROP input protocol are test fixtures; the host QEMU version is not pinned |
 | QEMU 7.1/7.2 boundary | Provisioned roots bind observed banners, output hashes, source trees, configure arguments, and build identity; both origins test RW-versus-RX AArch64 fetch | Explicit binary overrides attest only banner/hash/behavior; the static probe makes no libc, payload-exploit, non-AArch64, or native-hardware claim |
