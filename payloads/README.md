@@ -629,7 +629,8 @@ libc_image = discover.heap_to_libc(
 # mapping. Multiple corroborating slots into one mapping are one result.
 heap = discover.libc_to_heap(libc_image, heap_span=heap_window)
 
-# Dereference this libc's environ variable and validate the stack mapping.
+# Dereference this libc's environ variable. The resulting environ-array
+# address is the stack leak; supplying the mapping validates it.
 stack = discover.libc_to_stack(
     libc_image,
     stack_base=stack_mapping_start,
@@ -677,8 +678,16 @@ but pointers to distinct images or heap classifications remain ambiguous.
 
 All automatic scans are bounded by `MemorySpan`, `scan_size`, `scan_before`,
 `scan_after`, `image_search_pages`, `max_entries`, or `max_name_size`, and obey
-the primitive's declared width, alignment, and chunking. Reading a caller-
-supplied mapped span does not itself require speculative reads. Walking
+the primitive's declared width, alignment, and chunking. Whole-span pointer
+scans require a span which directly satisfies those constraints. For smaller
+ELF fields, pointers, instruction encodings, and C-string bytes, discovery
+explicitly reads the smallest aligned covering transfer and slices the
+requested field only when `covering_read_safe=True`; a word-only primitive can
+therefore opt in when those neighboring bytes are proven readable. Otherwise,
+normalize word reads into exact byte callbacks in the transport adapter, as
+the ptrace LiveCTF test does. This capability is distinct from
+`invalid_read_safe` and never authorizes probing an unknown address. Reading a
+caller-supplied mapped span does not itself require speculative reads. Walking
 backward from an unsymbolized image pointer to infer a libc/loader load bias,
 or inferring a PIE main bias from stack pointers, does probe candidate pages;
 those operations require `invalid_read_safe=True`. Do not set that trait for a
@@ -700,18 +709,30 @@ silently:
   to dereference. Supplying both makes the observed slot value prove the
   hardcoded pointer before resolution continues.
 - `environ_address` overrides the absolute address of the libc `environ`
-  variable; `environ_symbol` selects another exact-libc symbol. `return_slot`
-  restricts classification to one absolute stack word. `symbol=` filters the
-  singular result by its nearest exact-main symbol.
+  variable and must still occupy writable data in the exact libc;
+  `environ_symbol` selects another exact-libc symbol. The non-NULL `environ`
+  value itself is the stack leak. Its first string pointer is optional
+  corroboration: it is read only when a validated `stack_span` was supplied or
+  invalid reads are explicitly safe, and it may legitimately point into heap
+  storage. `return_slot` restricts classification to one absolute stack word.
+  `symbol=` filters the singular result by its nearest exact-main symbol.
 - `plan_rop_insertion()` accepts `stack_base`, `main_base`, `return_slot`, and
   `post_return_sp` as consistency assertions, plus a complete `layout` for
   symbolic chain materialization. An override which disagrees with the
   classified return site is an error.
 - `r_debug_address` overrides the exact loader's `_r_debug` address and
   `link_map_address` asserts the list head. A nonzero `r_debug.r_map` must agree
-  with that head. `known_images` is optional and only attaches an adapter after
-  basename selection and exact runtime validation; it is not DSO discovery by
+  with that head, and the full inspected prefix must occupy writable loader
+  data. `known_images` is optional and only attaches an adapter after basename
+  selection, exact runtime validation, and agreement between `link_map.l_ld`
+  and that artifact's load-biased `PT_DYNAMIC`; it is not DSO discovery by
   pathname.
+
+An explicit `PointerLeak(symbol=..., addend=...)` used together with an image
+base must equal that exact symbol expression. Explicit libc scan spans must be
+wholly contained in one readable `PT_LOAD`, and in a writable one for libc
+pointer-source scans. These checks make the overrides assertions rather than
+alternate unchecked paths.
 
 An ELF `base` here means additive load bias, matching `link_map.l_addr` and
 `RuntimeLayout`. It is not necessarily the address containing `\x7fELF`: for
@@ -721,11 +742,21 @@ pwntools' rebased `ELF.address` denotes the runtime address of the lowest
 when it asks pwntools for GOT slots. Exact adapters SHA-256-bind and recheck
 the local file. Runtime image validation compares the ELF header, complete
 program-header table, and `PT_LOAD` geometry against that artifact and checks
-that a candidate pointer lies in its mapped ranges; an embedded page-aligned
-`\x7fELF` string is not sufficient evidence.
+that a candidate pointer lies in its mapped ranges. When the exact artifact's
+GNU build-ID descriptor is file-backed by a readable `PT_LOAD`, its runtime
+bytes are compared too. A section-only build ID cannot be authenticated from
+arbitrary runtime memory, so such an image is explicitly only a structural
+header/program-header match. An embedded page-aligned `\x7fELF` string is not
+sufficient evidence.
 
-Return classification recognizes call continuations on the catalog ABIs, but
-automatic flat saved-return replacement is deliberately limited to i386 and
+Return classification recognizes a bounded set of exact-artifact-backed call
+encodings: x86 near `call`, AArch64 `BL`, ARM `BL`, Thumb-2 `BL`/immediate
+`BLX`, MIPS `JAL`, RISC-V `JAL`/`JALR` writing `ra`, PowerPC unconditional
+branch-and-link, and a SPARC saved `%i7` link to `call`.
+It does not guess s390x, compressed RISC-V calls, or other conditional/indirect
+link forms; callers can inspect executable-pointer candidates with
+`require_call_continuation=False` and restrict them with `return_slot`.
+Automatic flat saved-return replacement is deliberately limited to i386 and
 AMD64 SysV. It does not model saved-link-register frames, stack pivots, CET or
 shadow stacks, AArch64 PAC, or architecture-specific unwinding. The plan
 captures every overwritten byte before mutation, checks them all again before
@@ -740,7 +771,10 @@ names and nodes, and checks `r_state` plus the list head again after traversal.
 It walks one namespace and is not a musl, static-binary, audit-namespace, or
 arbitrary-loader abstraction. `l_name` bytes are untrusted process data:
 `.name` is only a surrogate-safe display string, and the implementation never
-opens that path. Callers must not treat it as an authenticated local filename.
+opens that path. Its basename/SONAME can only shortlist a caller-supplied exact
+artifact; mapped build-ID evidence and `l_ld == load_bias + PT_DYNAMIC` perform
+the attachment check. Callers must not treat `l_name` as an authenticated local
+filename.
 
 Pwntools `MemLeak` can be retained on either side of the adapter boundary:
 
@@ -940,12 +974,16 @@ python3 -m unittest \
 
 On native AMD64 Linux, the process suite runs those release binaries through
 their real challenge protocols. `seek-and-destroy` supplies byte-granular
-`/proc/self/mem` reads and writes: the test composes heap -> libc, libc ->
-heap, libc -> `environ`/stack, saved-main-return classification, libc ->
-loader, and `r_debug` -> `link_map`, then executes a pwntools-selected exact-
-libc `exit(73)` ROP chain through the classified return slot. Its exact loader
-contains another page-aligned `\x7fELF` at `+0x2c000`; the test proves that the
-strict header/program-header matcher rejects that false base.
+`/proc/self/mem` reads and writes as a local payload-debugging transport: the
+test composes heap -> libc, libc -> heap, libc -> `environ`/stack,
+saved-main-return classification, libc -> loader, and `r_debug` -> `link_map`,
+then executes a pwntools-selected exact-libc `exit(73)` ROP chain through the
+classified return slot. This is deliberately not a production or remote
+transport assumption; payload generation sees only caller-supplied
+`read_at`/`write_at` callbacks, and no production workflow opens
+`/proc/self/mem`. The exact loader contains another page-aligned `\x7fELF` at
+`+0x2c000`; the test
+proves that the strict header/program-header matcher rejects that false base.
 
 `ptrace-me-maybe` adapts the stopped child's real `PTRACE_PEEK*` and
 `PTRACE_POKE*` operations. It derives the exact libc from the leaked RIP,
@@ -958,14 +996,15 @@ Historical source is not the same thing as a reproducible historical runtime.
 The DEF CON 30 Dockerfile now encounters archived Debian Buster package
 repositories and clones an unpinned nsjail head; DEF CON 31's multistage
 package upgrade can produce a runtime libc different from its release
-handout. DEF CON 32 has no selected immutable handout in this corpus: its
-floating `livectf/livectf:quals-nsjail` rebuild is recorded only as a dated,
-non-provisionable observation. In that audit rebuild, the challenge's invalid
-read consistently disclosed PIE writable data at `binary+0x22a8`, not the
-stack value assumed by the historical hardcoded solve. The tests preserve
-these as workflow failures rather than treating a current Docker rebuild as
-historical evidence. DEF CON 33 is source-attested here but has no runtime
-execution claim.
+handout. Those two are narrative findings from the 2026-08-02 rebuild audit,
+not rebuild assertions in the test suite. DEF CON 32 has no selected immutable
+handout in this corpus: its floating `livectf/livectf:quals-nsjail` rebuild is
+recorded in the manifest only as a dated, non-provisionable observation. In
+that audit rebuild, the challenge's invalid read consistently disclosed PIE
+writable data at `binary+0x22a8`, not the stack value assumed by the historical
+hardcoded solve. DEF CON 33 is source-attested here but has no runtime
+execution claim. Exact handout tests invoke the pinned loader directly under
+the host kernel; they do not claim to recreate historical nsjail or Docker.
 
 ### Pinned glibc sysroots
 
@@ -1014,8 +1053,8 @@ print(root.qemu_argv("/tmp/dynamic-fixture"))
 ```
 
 `PWNC_GLIBC_QEMU_TESTS=1` enables the dynamic FSOP/composed-x86 ROP module, the
-dynamic exact-libc semantic ROP module, and the static-glibc ROP module. Run
-every pinned spec and every target mapped by it with:
+dynamic exact-libc semantic ROP module, the static-glibc ROP module, and the
+bounded arbitrary-read discovery module. Run the declared matrices with:
 
 ```sh
 PWNC_GLIBC_QEMU_TESTS=1 \
@@ -1023,6 +1062,7 @@ PWNC_GLIBC_SYSROOT_CACHE=/tmp/pwnc-runtime-sysroot-cache \
 python3 -m unittest \
   payloads.tests.test_glibc_qemu \
   payloads.tests.test_glibc_semantic_rop_qemu \
+  payloads.tests.test_glibc_discovery_qemu \
   payloads.tests.test_glibc_static_rop_qemu -v
 ```
 
@@ -1035,6 +1075,7 @@ PWNC_GLIBC_QEMU_SPECS=aarch64-glibc-2.39,amd64-xenial-glibc-2.23 \
 python3 -m unittest \
   payloads.tests.test_glibc_qemu \
   payloads.tests.test_glibc_semantic_rop_qemu \
+  payloads.tests.test_glibc_discovery_qemu \
   payloads.tests.test_glibc_static_rop_qemu -v
 ```
 
@@ -1044,6 +1085,16 @@ the broader `PWNC_GLIBC_QEMU_TESTS=1` contract. Add `PWNC_NATIVE_TESTS=1` on an
 x86-64 Linux host to enable the seven pinned dynamic semantic-write mirrors.
 On that host, an enabled static module also runs its seven eligible pinned x86
 cases directly as part of the static contract, without qemu-user.
+
+`PWNC_GLIBC_DISCOVERY_QEMU_TESTS=1` enables just the real arbitrary-read lane.
+Without a selector it deliberately runs two glibc-2.39 representatives:
+AArch64 little-endian and 32-bit ARM EABI big-endian. Each guest allocates a
+real heap word containing a libc function pointer and exposes an ordinary
+target-side address/length read protocol. The host scans that heap word,
+derives exact libc, reads `environ`, checks a sentinel on the real initial
+stack, resolves the exact loader, and enumerates the real SVR4 `link_map`.
+There is no `/proc/self/mem`, `process_vm_readv`, host address-space access, or
+implicit invalid-page probing in this lane.
 
 With no selector, each invoked module makes its entire declared matrix
 mandatory: 37 mappings for the static and base pinned-glibc modules and 28 for
@@ -1137,9 +1188,9 @@ is an explicit, less isolated compatibility path.
 | Suite | Real runtime evidence | Test-owned or not established |
 | --- | --- | --- |
 | Native i386/AMD64 | Direct host-kernel execution and exact loaded host libc for FSOP/live-base ret2libc; seven pinned-libc semantic-write mirrors; seven static-glibc syscall/`exit` mirrors | Compiled fixtures, supplied control transfer, and challenge preconditions |
-| Pinned LiveCTF | Exact release challenge/libc/loader identities; real `/proc/self/mem` and ptrace transports; complete discovery graph; one executed and one verified/restored exact-libc ROP chain | Runtime execution is AMD64-only; DEF CON 32/33 have source provenance but no exact handout execution claim |
+| Pinned LiveCTF | Exact release challenge/libc/loader identities; test-only local `/proc/self/mem` debugging and real challenge ptrace transport; complete discovery graph; one executed and one verified/restored exact-libc ROP chain | Payloads never assume `/proc/self/mem`; runtime execution is AMD64-only; DEF CON 32/33 have source provenance but no exact handout execution claim |
 | General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, and materialized ROP control flow | Minimal static ELF envelopes and semantic ROP gadgets are test-owned; shellcode cases use no foreign libc |
-| Pinned glibc qemu-user | Real dynamic programs and exact loader/libc identity; target-endian FSOP dispatch; exact-libc semantic `write` on 28 mappings; x86 ORW/sendfile on seven; real static-glibc syscall ROP on 37 and libc `exit` ROP on 28 | Heap FILE placement, activation call, callbacks, challenge ELF, pivot/gadgets, and static ROP input protocol are test fixtures; the host QEMU version is not pinned |
+| Pinned glibc qemu-user | Real dynamic programs and exact loader/libc identity; direct guest arbitrary-read discovery on AArch64 LE and ARM BE; target-endian FSOP dispatch; exact-libc semantic `write` on 28 mappings; x86 ORW/sendfile on seven; real static-glibc syscall ROP on 37 and libc `exit` ROP on 28 | Heap FILE placement, activation call, callbacks, challenge ELF, pivot/gadgets, and static ROP input protocol are test fixtures; the discovery read protocol is test-owned; the host QEMU version is not pinned |
 | QEMU 7.1/7.2 boundary | Provisioned roots bind observed banners, output hashes, source trees, configure arguments, and build identity; both origins test RW-versus-RX AArch64 fetch | Explicit binary overrides attest only banner/hash/behavior; the static probe makes no libc, payload-exploit, non-AArch64, or native-hardware claim |
 
 The x86 pinned-libc ROP fixture supplies the file path in writable main-image
