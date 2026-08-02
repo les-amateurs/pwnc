@@ -206,6 +206,16 @@ class InvalidELFTests(unittest.TestCase):
             with self.assertRaisesRegex(ELFInspectionError, "address space"):
                 inspect_elf(address_overflow)
 
+            unmapped_dynamic = root / "unmapped-dynamic"
+            _mutate_program_header(
+                source,
+                unmapped_dynamic,
+                lambda segment: str(segment.header.p_type) == "PT_DYNAMIC",
+                lambda header, _bits, _artifact_size: {"p_vaddr": int(header.p_vaddr) + 0x100000},
+            )
+            with self.assertRaisesRegex(ELFInspectionError, "PT_DYNAMIC.*readable PT_LOAD"):
+                inspect_elf(unmapped_dynamic)
+
 
 class CompilerELFFixtures(unittest.TestCase):
     temporary: tempfile.TemporaryDirectory[str]
@@ -316,16 +326,82 @@ class CompilerELFFixtures(unittest.TestCase):
         if profile.build_id is not None:
             self.assertRegex(profile.build_id, r"\A[0-9a-f]+\Z")
             self.assertEqual(len(profile.build_id) % 2, 0)
+            self.assertGreater(len(profile.build_id_ranges), 0)
+            raw = path.read_bytes()
+            for item in profile.build_id_ranges:
+                self.assertEqual(item.kind, "NT_GNU_BUILD_ID")
+                self.assertTrue(item.readable)
+                self.assertEqual(raw[item.file_offset : item.file_offset + item.file_size].hex(), profile.build_id)
         self.assertIn(profile.target.bits, {32, 64})
         self.assertGreater(len(profile.load_ranges), 1)
         self.assertTrue(any(item.executable for item in profile.load_ranges))
         self.assertTrue(any(item.writable for item in profile.load_ranges))
         self.assertTrue(all(item.kind == "PT_LOAD" for item in profile.load_ranges))
+        self.assertIsNotNone(profile.dynamic_range)
+        assert profile.dynamic_range is not None
+        self.assertEqual(profile.dynamic_range.kind, "PT_DYNAMIC")
+        self.assertTrue(profile.dynamic_range.readable)
         with self.assertRaises(TypeError):
             profile.symbol_offsets["new"] = 1  # type: ignore[index]
         with self.assertRaisesRegex(Exception, "cannot assign"):
             profile.pie = True  # type: ignore[misc]
         self.assertEqual(load_elf_profile(path), profile)
+
+    def test_program_header_metadata_survives_a_stripped_section_table(self) -> None:
+        source = self.fixtures["nonpie_partial"]
+        original = inspect_elf(source)
+        raw = bytearray(source.read_bytes())
+        elf = BytesIO(raw)
+        try:
+            from elftools.elf.elffile import ELFFile
+        except ImportError as exc:  # pragma: no cover - project dependency
+            self.skipTest(str(exc))
+        parsed = ELFFile(elf)
+        byte_order = "little" if parsed.little_endian else "big"
+        if parsed.elfclass == 64:
+            raw[40:48] = (0).to_bytes(8, byte_order)  # e_shoff
+            for offset in (58, 60, 62):
+                raw[offset : offset + 2] = (0).to_bytes(2, byte_order)
+        else:
+            raw[32:36] = (0).to_bytes(4, byte_order)  # e_shoff
+            for offset in (46, 48, 50):
+                raw[offset : offset + 2] = (0).to_bytes(2, byte_order)
+        stripped = self.directory / "nonpie-no-sections"
+        stripped.write_bytes(raw)
+
+        profile = inspect_elf(stripped)
+
+        self.assertEqual(profile.build_id, original.build_id)
+        self.assertEqual(profile.build_id_ranges, original.build_id_ranges)
+        self.assertEqual(profile.dynamic_range, original.dynamic_range)
+        self.assertEqual(profile.symbol_offsets, {})
+
+    def test_unmapped_build_id_note_is_not_exposed_as_a_runtime_range(self) -> None:
+        source = self.fixtures["nonpie_partial"]
+        original = inspect_elf(source)
+        if len(original.build_id_ranges) != 1:
+            self.skipTest("fixture does not have exactly one runtime-mapped GNU build-ID descriptor")
+
+        def carries_build_id(segment) -> bool:
+            if str(segment.header.p_type) != "PT_NOTE":
+                return False
+            return any(
+                note.get("n_type") == "NT_GNU_BUILD_ID" and str(note.get("n_name") or "").rstrip("\0") == "GNU"
+                for note in segment.iter_notes()
+            )
+
+        unmapped = self.directory / "nonpie-unmapped-build-id"
+        _mutate_program_header(
+            source,
+            unmapped,
+            carries_build_id,
+            lambda _header, _bits, _artifact_size: {"p_memsz": 0},
+        )
+
+        profile = inspect_elf(unmapped)
+
+        self.assertEqual(profile.build_id, original.build_id)
+        self.assertEqual(profile.build_id_ranges, ())
 
     def test_pie_nonpie_and_shared_object_are_distinguished(self) -> None:
         nonpie = self.profile("nonpie_partial")
@@ -468,6 +544,8 @@ class CompilerELFFixtures(unittest.TestCase):
             ),
             relro_ranges=(ELFRange(0x12000, 0x23000, Permission.READ, 0, 0, 1, "PT_GNU_RELRO"),),
             load_alignment_hint=0x1000,
+            build_id_ranges=(),
+            dynamic_range=None,
             got_offsets={"slot": 0x11000},
         )
         self.assertFalse(synthetic.got_slot_writable("slot"))

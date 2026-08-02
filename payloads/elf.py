@@ -118,6 +118,8 @@ class ELFProfile:
     got_offsets: Mapping[str, int] = field(default_factory=dict)
     plt_offsets: Mapping[str, int] = field(default_factory=dict)
     evidence: tuple[str, ...] = ()
+    build_id_ranges: tuple[ELFRange, ...] = ()
+    dynamic_range: ELFRange | None = None
 
     def __post_init__(self) -> None:
         digest = self.sha256.lower()
@@ -149,6 +151,11 @@ class ELFProfile:
         object.__setattr__(self, "needed_libraries", tuple(self.needed_libraries))
         object.__setattr__(self, "load_ranges", tuple(self.load_ranges))
         object.__setattr__(self, "relro_ranges", tuple(self.relro_ranges))
+        object.__setattr__(
+            self,
+            "build_id_ranges",
+            tuple(sorted(self.build_id_ranges, key=lambda item: (item.start, item.end, item.file_offset))),
+        )
         object.__setattr__(self, "evidence", tuple(self.evidence))
         if (
             not isinstance(self.entry_offset, int)
@@ -156,10 +163,29 @@ class ELFProfile:
             or not 0 <= self.entry_offset <= self.target.mask
         ):
             raise ValueError("entry_offset must fit the target address width")
-        for name in ("load_ranges", "relro_ranges"):
+        for name in ("load_ranges", "relro_ranges", "build_id_ranges"):
             for item in getattr(self, name):
+                if not isinstance(item, ELFRange):
+                    raise TypeError(f"{name} must contain ELFRange values")
                 if item.start > self.target.mask or item.end > self.target.mask + 1:
                     raise ValueError(f"{name} contains a range outside the target address space")
+        if self.dynamic_range is not None:
+            if not isinstance(self.dynamic_range, ELFRange):
+                raise TypeError("dynamic_range must be ELFRange or None")
+            if self.dynamic_range.start > self.target.mask or self.dynamic_range.end > self.target.mask + 1:
+                raise ValueError("dynamic_range lies outside the target address space")
+            if self.dynamic_range.kind != "PT_DYNAMIC" or not self.dynamic_range.size:
+                raise ValueError("dynamic_range must describe a nonempty PT_DYNAMIC")
+            if not _exact_file_backed_loads(self.dynamic_range, self.load_ranges):
+                raise ValueError("dynamic_range is not exactly file-backed by a readable PT_LOAD")
+        expected_build_id_size = len(bytes.fromhex(self.build_id)) if self.build_id is not None else None
+        for item in self.build_id_ranges:
+            if item.kind != "NT_GNU_BUILD_ID" or not item.size or item.file_size != item.size:
+                raise ValueError("build_id_ranges must describe nonempty file-backed GNU build-ID bytes")
+            if expected_build_id_size is None or item.size != expected_build_id_size:
+                raise ValueError("build_id_ranges disagree with build_id")
+            if not _exact_file_backed_loads(item, self.load_ranges):
+                raise ValueError("build_id_ranges are not exactly file-backed by a readable PT_LOAD")
         for name in ("symbol_offsets", "got_offsets", "plt_offsets"):
             values = dict(getattr(self, name))
             if any(
@@ -381,8 +407,8 @@ def _validate_program_segment(segment: Any, target: Target, artifact_size: int, 
     virtual_address = int(header.p_vaddr)
     alignment = int(header.p_align)
 
-    if kind == "PT_LOAD" and file_size > memory_size:
-        raise ELFInspectionError("PT_LOAD file size exceeds its memory size")
+    if kind in {"PT_LOAD", "PT_DYNAMIC"} and file_size > memory_size:
+        raise ELFInspectionError(f"{kind} file size exceeds its memory size")
     if offset > artifact_size or file_size > artifact_size - offset:
         raise ELFInspectionError(f"{kind} file range extends beyond the artifact")
     if virtual_address > target.mask or memory_size > target.mask + 1 - virtual_address:
@@ -407,6 +433,150 @@ def _range_is_load_mapped(candidate: ELFRange, load_ranges: tuple[ELFRange, ...]
         if cursor >= candidate.end:
             return True
     return False
+
+
+def _exact_file_backed_loads(
+    candidate: ELFRange,
+    load_ranges: tuple[ELFRange, ...],
+) -> tuple[ELFRange, ...]:
+    """Return readable loads which map a range from the claimed file bytes."""
+
+    matches: list[ELFRange] = []
+    for load in load_ranges:
+        relative = candidate.start - load.start
+        if relative < 0 or not load.readable or not load.contains(candidate.start, candidate.size):
+            continue
+        if relative + candidate.file_size > load.file_size:
+            continue
+        if load.file_offset + relative != candidate.file_offset:
+            continue
+        matches.append(load)
+    return tuple(matches)
+
+
+def _runtime_mapped_range(
+    candidate: ELFRange,
+    load_ranges: tuple[ELFRange, ...],
+    *,
+    required: bool,
+) -> ELFRange | None:
+    """Attach conservative runtime permissions to one exact file mapping."""
+
+    loads = _exact_file_backed_loads(candidate, load_ranges)
+    if not loads:
+        if required:
+            raise ELFInspectionError(f"{candidate.kind} is not exactly file-backed by a readable PT_LOAD segment")
+        return None
+    permissions = loads[0].permissions
+    for load in loads[1:]:
+        permissions &= load.permissions
+    return ELFRange(
+        candidate.start,
+        candidate.end,
+        permissions,
+        candidate.file_offset,
+        candidate.file_size,
+        candidate.alignment,
+        candidate.kind,
+    )
+
+
+def _runtime_build_id_ranges(
+    elf: Any,
+    data: bytes,
+    target: Target,
+    segments: tuple[Any, ...],
+    load_ranges: tuple[ELFRange, ...],
+) -> tuple[ELFRange, ...]:
+    """Locate GNU build-ID descriptor bytes mapped by exact PT_NOTE records."""
+
+    try:
+        from elftools.elf.segments import NoteSegment
+    except ImportError as exc:  # pragma: no cover
+        raise ELFInspectionError("pyelftools is required for ELF inspection") from exc
+
+    header_size = int(elf.structs.Elf_Nhdr.sizeof())
+    found: dict[tuple[int, int, int], tuple[ELFRange, bytes]] = {}
+    for segment in segments:
+        if not isinstance(segment, NoteSegment):
+            continue
+        _validate_program_segment(segment, target, len(data), "PT_NOTE")
+        segment_offset = int(segment.header.p_offset)
+        segment_file_end = segment_offset + int(segment.header.p_filesz)
+        segment_vaddr = int(segment.header.p_vaddr)
+        segment_memory_end = segment_vaddr + int(segment.header.p_memsz)
+        for note in segment.iter_notes():
+            note_type = note.get("n_type")
+            note_name = str(note.get("n_name") or "").rstrip("\0")
+            if note_type not in {3, "NT_GNU_BUILD_ID"} or note_name != "GNU":
+                continue
+            description = note.get("n_descdata")
+            if not isinstance(description, (bytes, bytearray, memoryview)) or not description:
+                raise ELFInspectionError("GNU build-ID note has an empty or invalid descriptor")
+            raw_description = bytes(description)
+            note_offset = int(note["n_offset"])
+            name_size = int(note["n_namesz"])
+            description_size = int(note["n_descsz"])
+            if description_size != len(raw_description):
+                raise ELFInspectionError("GNU build-ID descriptor size is inconsistent")
+            description_offset = note_offset + header_size + ((name_size + 3) & ~3)
+            description_end = description_offset + description_size
+            description_vaddr = segment_vaddr + description_offset - segment_offset
+            if note_offset < segment_offset or description_end > segment_file_end:
+                raise ELFInspectionError("GNU build-ID descriptor lies outside its PT_NOTE segment")
+            if description_vaddr < segment_vaddr or description_vaddr + description_size > segment_memory_end:
+                # PT_NOTE records need not be mapped.  Retain their artifact
+                # identity through `_build_id`, but expose runtime coordinates
+                # only when the program header describes them in memory.
+                continue
+            if data[description_offset:description_end] != raw_description:
+                raise ELFInspectionError("GNU build-ID descriptor differs from the exact artifact bytes")
+            candidate = ELFRange(
+                description_vaddr,
+                description_vaddr + description_size,
+                _permissions(int(segment.header.p_flags)),
+                description_offset,
+                description_size,
+                4,
+                "NT_GNU_BUILD_ID",
+            )
+            mapped = _runtime_mapped_range(candidate, load_ranges, required=False)
+            if mapped is None:
+                continue
+            key = (mapped.start, mapped.file_offset, mapped.file_size)
+            previous = found.get(key)
+            if previous is not None and previous[1] != raw_description:
+                raise ELFInspectionError("conflicting GNU build-ID descriptors share one runtime address")
+            found[key] = (mapped, raw_description)
+    return tuple(item[0] for _key, item in sorted(found.items()))
+
+
+def _exact_dynamic_range(
+    elf: Any,
+    data: bytes,
+    target: Target,
+    segments: tuple[Any, ...],
+    load_ranges: tuple[ELFRange, ...],
+) -> ELFRange | None:
+    """Return the unique, exactly mapped PT_DYNAMIC range when present."""
+
+    dynamic_segments = tuple(segment for segment in segments if str(segment.header.p_type) == "PT_DYNAMIC")
+    if len(dynamic_segments) > 1:
+        raise ELFInspectionError("ELF contains multiple PT_DYNAMIC headers")
+    if not dynamic_segments:
+        return None
+    segment = dynamic_segments[0]
+    _validate_program_segment(segment, target, len(data), "PT_DYNAMIC")
+    candidate = _program_range(segment, "PT_DYNAMIC")
+    entry_size = int(elf.structs.Elf_Dyn.sizeof())
+    if (
+        not candidate.size
+        or not candidate.file_size
+        or candidate.file_size % entry_size
+        or candidate.start % target.word_size
+    ):
+        raise ELFInspectionError("PT_DYNAMIC has invalid address or entry-table dimensions")
+    return _runtime_mapped_range(candidate, load_ranges, required=True)
 
 
 def _resolve_target(elf: Any) -> Target:
@@ -597,7 +767,9 @@ def _build_id(elf: Any) -> str | None:
                 continue
             if value and len(value) % 2 == 0 and all(character in "0123456789abcdef" for character in value):
                 candidates.add(value)
-    return next(iter(candidates)) if len(candidates) == 1 else None
+    if len(candidates) > 1:
+        raise ELFInspectionError("ELF contains conflicting GNU build IDs")
+    return next(iter(candidates)) if candidates else None
 
 
 def _dynamic_facts(elf: Any) -> tuple[int, int, tuple[str, ...], str | None, bool]:
@@ -767,6 +939,8 @@ def inspect_elf(path: str | Path) -> ELFProfile:
         )
         if not load_ranges:
             raise ELFInspectionError("ELF has no PT_LOAD segments")
+        dynamic_range = _exact_dynamic_range(elf, data, target, segments, load_ranges)
+        build_id_ranges = _runtime_build_id_ranges(elf, data, target, segments, load_ranges)
         relro_segments = tuple(segment for segment in segments if str(segment.header.p_type) == "PT_GNU_RELRO")
         for segment in relro_segments:
             _validate_program_segment(segment, target, len(data), "PT_GNU_RELRO")
@@ -816,6 +990,11 @@ def inspect_elf(path: str | Path) -> ELFProfile:
         symbols = _symbol_offsets(elf)
         got, plt = _got_and_plt_offsets(elf, target)
         build_id = _build_id(elf)
+        mapped_build_ids = {
+            data[item.file_offset : item.file_offset + item.file_size].hex() for item in build_id_ranges
+        }
+        if mapped_build_ids and mapped_build_ids != {build_id}:
+            raise ELFInspectionError("runtime-mapped GNU build ID disagrees with ELF identity metadata")
     except ELFInspectionError:
         raise
     except (ELFError, KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
@@ -832,6 +1011,10 @@ def inspect_elf(path: str | Path) -> ELFProfile:
         f"RELRO={relro.value} from PT_GNU_RELRO and bind-now tags",
         "target from ELF machine/class/endian/ABI flags and ARM entry state",
     ]
+    if build_id_ranges:
+        evidence.append(f"GNU build ID has {len(build_id_ranges)} exact runtime-mapped PT_NOTE descriptor(s)")
+    if dynamic_range is not None:
+        evidence.append("PT_DYNAMIC has an exact readable PT_LOAD mapping")
     try:
         return ELFProfile(
             path=str(artifact),
@@ -854,6 +1037,8 @@ def inspect_elf(path: str | Path) -> ELFProfile:
             load_ranges=load_ranges,
             relro_ranges=relro_ranges,
             load_alignment_hint=load_alignment_hint,
+            build_id_ranges=build_id_ranges,
+            dynamic_range=dynamic_range,
             symbol_offsets=symbols,
             got_offsets=got,
             plt_offsets=plt,
