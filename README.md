@@ -16,11 +16,16 @@ See the [payload framework documentation](https://github.com/les-amateurs/pwnc/b
 for the supported-target matrix, public API examples, execution-policy model,
 QEMU evidence, and limitations.
 
-The opt-in runtime tests include 33 SHA-256-pinned glibc sysroot specs, direct
-native i386/AMD64 execution, qemu-user dynamic-libc/FSOP/ROP fixtures, and an
-exact QEMU 7.1.0/7.2.0 AArch64 execute-permission boundary. The payload
-documentation distinguishes checked full-matrix contracts from focused local
-runs and test-owned exploit fixtures.
+The opt-in runtime tests include 33 SHA-256-pinned glibc sysroot specs mapped
+to 37 target runs. Real-libc ROP coverage includes exact dynamic `write` calls
+on 28 mappings across 15 ABI variants, composed ORW/sendfile chains on all
+seven x86 mappings, static-glibc syscall chains on all 37 mappings, and static
+glibc `exit` calls on the 28 supported direct-call mappings. The seven pinned
+x86 mappings also have direct native mirrors. These contracts have been
+completed in focused selector batches rather than one no-selector invocation.
+The suite also covers qemu-user FSOP and an exact QEMU 7.1.0/7.2.0 AArch64
+execute-permission boundary; the payload documentation distinguishes the real
+artifacts from test-owned exploit primitives.
 
 ## commands
 

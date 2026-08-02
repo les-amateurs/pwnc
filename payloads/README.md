@@ -411,14 +411,31 @@ independent test-owned ABI table at runtime. PPC64 ELFv1 and SPARC therefore
 have syscall-only ROP execution evidence, and PPC32 little-endian is
 unit-tested only.
 
-Separate i386 and AMD64 fixtures load the host's exact target libc through
-QEMU, disclose the actual `system` address and owning mapping base, parse that
-same artifact as a `LibcImage`, and execute a late-materialized
-`build_ret2libc_system` chain. The test verifies the libc SONAME, the
-independently disclosed base, placement in writable non-executable memory,
-command output, and the return path. This is live-base and exact-artifact
-evidence, not ASLR-variance evidence: the tested QEMU version may choose a
-repeatable guest libc base.
+Separate general i386 and AMD64 fixtures load the host's exact target libc
+through QEMU, disclose the actual `system` address and owning mapping base,
+parse that artifact as a `LibcImage`, and execute a late-materialized
+`build_ret2libc_system` chain. They verify the libc SONAME, independently
+disclosed base, command output, and return path.
+
+The pinned-glibc suite adds real-library evidence over 33 sysroot specs and 37
+spec/target mappings. Dynamic fixtures load each exact libc through its pinned
+loader, disclose its path, base, version, and `write` address, then execute a
+late-materialized semantic `write(1, ...)` chain on all 28 mappings whose
+direct-call ABI is modeled: 15 distinct architecture/endian/ABI variants. The
+chain resides in writable non-executable BSS and returns through a
+fixture-owned success stub.
+Thumb mappings are excluded because the libc shared with ARM has ARM-state
+function entries; applying the Thumb function-pointer bit would enter them in
+the wrong state. PPC64 ELFv1 remains excluded because function descriptors and
+TOC setup are not modeled, and SPARC32/64 remain excluded because register
+windows and their return frames are not modeled.
+
+All seven pinned i386/AMD64 mappings additionally execute the fully composed
+pwntools ORW and sendfile programs described above. Their semantic `write`
+chains are also run directly through the pinned loaders on an x86-64 host when
+`PWNC_NATIVE_TESTS=1`. This is live-base and exact-artifact evidence, not
+ASLR-variance evidence: a tested qemu-user version may choose a repeatable
+guest libc base.
 
 ## FILE-stream payloads (FSOP)
 
@@ -716,9 +733,10 @@ one half of the matrix.
 ### Pinned glibc sysroots
 
 `payloads/tests/runtime_support/glibc_sysroots.json` contains 33
-content-pinned runtime specifications. Every input has an exact HTTPS URL and
-SHA-256; provisioning validates the libc and loader ELF class, endian,
-machine, PPC64 ABI flags where applicable, and a glibc version marker.
+content-pinned runtime specifications mapped to 37 catalog-target runs. Every
+input has an exact HTTPS URL and SHA-256; provisioning validates the libc and
+loader ELF class, endian, machine, PPC64 ABI flags where applicable, and a
+glibc version marker.
 
 | Lane | Sysroot specs | Catalog targets | Purpose |
 | --- | ---: | ---: | --- |
@@ -732,14 +750,15 @@ distinct target-state runs. The 2.24 and 2.41 matrices are representative,
 not architecture-by-version cross products; their AArch64 representative is
 big-endian, while the full 2.39 lane includes both AArch64 endians. PPC32
 little-endian is explicitly unsupported because there is no standardized
-upstream Linux/glibc ABI for it. The SPARC32 baseline uses the real Ubuntu
-SPARC V8+ multilib root and requires an external `sparc64-linux-gnu-gcc -m32`
-compiler; a missing compiler is an error in an enabled run. Its headers,
-glibc linker inputs, loader, and runtime libraries are pinned by the sysroot,
-while GCC's multilib CRT objects and `libgcc` come from that external compiler.
-Ubuntu stores the SPARC32 loader below its cross-package prefix even though
-guest binaries request the canonical `/lib/ld-linux.so.2` ABI path; the
-manifest records and validates those two paths separately.
+upstream Linux/glibc ABI for it. The Ubuntu Noble MIPS64 big- and little-endian
+roots and the SPARC32 V8+ multilib root include SHA-256-pinned GCC, cpp,
+binutils, development, and runtime packages. Provisioning invokes their
+extracted GCC drivers with a cache-local tool path; it does not resolve those
+three cross compilers from the host `PATH`. The remaining Bootlin roots use the
+compiler shipped in their pinned SDK. Ubuntu stores the SPARC32 loader below
+its cross-package prefix even though guest binaries request the canonical
+`/lib/ld-linux.so.2` ABI path; the manifest records and validates those two
+paths separately.
 
 Provision one root through the checked API (there is deliberately no implicit
 download in the normal test suite):
@@ -757,12 +776,17 @@ print(root.compiler_argv)
 print(root.qemu_argv("/tmp/dynamic-fixture"))
 ```
 
-Run every pinned spec and every target mapped by it with:
+`PWNC_GLIBC_QEMU_TESTS=1` enables the dynamic FSOP/composed-x86 ROP module, the
+dynamic exact-libc semantic ROP module, and the static-glibc ROP module. Run
+every pinned spec and every target mapped by it with:
 
 ```sh
 PWNC_GLIBC_QEMU_TESTS=1 \
 PWNC_GLIBC_SYSROOT_CACHE=/tmp/pwnc-runtime-sysroot-cache \
-python3 -m unittest payloads.tests.test_glibc_qemu -v
+python3 -m unittest \
+  payloads.tests.test_glibc_qemu \
+  payloads.tests.test_glibc_semantic_rop_qemu \
+  payloads.tests.test_glibc_static_rop_qemu -v
 ```
 
 For a focused development run, select exact manifest IDs:
@@ -771,14 +795,59 @@ For a focused development run, select exact manifest IDs:
 PWNC_GLIBC_QEMU_TESTS=1 \
 PWNC_GLIBC_SYSROOT_CACHE=/tmp/pwnc-runtime-sysroot-cache \
 PWNC_GLIBC_QEMU_SPECS=aarch64-glibc-2.39,amd64-xenial-glibc-2.23 \
-python3 -m unittest payloads.tests.test_glibc_qemu -v
+python3 -m unittest \
+  payloads.tests.test_glibc_qemu \
+  payloads.tests.test_glibc_semantic_rop_qemu \
+  payloads.tests.test_glibc_static_rop_qemu -v
 ```
 
-With no selector, all 33 specs are mandatory. A selected run is useful
-evidence only for those IDs. Live validation has completed every mapped target
-in the 2.23, 2.24, 2.39, and 2.41 lanes across focused selector batches,
-including distinct ARM/Thumb runs, both PPC64 ABIs, and SPARC32's
-external-GCC/pinned-glibc combination; this was not one no-selector invocation.
+For a dedicated static-only run, use `PWNC_GLIBC_STATIC_ROP_TESTS=1` with
+`payloads.tests.test_glibc_static_rop_qemu`. The static module is also part of
+the broader `PWNC_GLIBC_QEMU_TESTS=1` contract. Add `PWNC_NATIVE_TESTS=1` on an
+x86-64 Linux host to enable the seven pinned dynamic semantic-write mirrors.
+On that host, an enabled static module also runs its seven eligible pinned x86
+cases directly as part of the static contract, without qemu-user.
+
+With no selector, each invoked module makes its entire declared matrix
+mandatory: 37 mappings for the static and base pinned-glibc modules and 28 for
+the semantic direct-call module. A selected run is useful evidence only for
+those IDs. Live validation has completed those applicable matrices in the
+2.23, 2.24, 2.39, and 2.41 lanes across focused selector batches, including
+distinct ARM/Thumb static runs, both PPC64 ABIs, and SPARC32's
+bundled-GCC/pinned-glibc combination; this was not one no-selector invocation.
+
+The completed real-libc ROP evidence is:
+
+| Fixture | qemu-user focused-batch evidence | Direct-host x86-64 mirror |
+| --- | --- | --- |
+| Dynamic exact-libc semantic `write` | 28 mappings; 15 architecture/endian/ABI variants | All seven pinned i386/AMD64 mappings |
+| Dynamic composed ORW and sendfile | All seven pinned i386/AMD64 mappings | Not claimed by this pinned-libc fixture |
+| Static-glibc syscall ROP | All 37 mappings | All seven pinned i386/AMD64 mappings |
+| Static-glibc direct `exit` ROP | 28 mappings; 15 architecture/endian/ABI variants | All seven pinned i386/AMD64 mappings |
+
+The nine excluded direct-call mappings are the Thumb mappings whose shared
+libcs expose ARM-state functions, PPC64 ELFv1 mappings needing descriptor/TOC
+support, and SPARC32/64 mappings needing register-window-aware calls. Those
+mappings still execute static syscall ROP, so the exclusion is specific to
+libc function dispatch rather than to ROP execution generally.
+
+Each static case is a real C program linked with `-static`. It reports
+`gnu_get_libc_version()` at runtime, and the test checks static linkage, target
+identity, absence of a dynamic interpreter and `DT_NEEDED` entries, plus the
+expected stack-NX evidence. A GNU ld map must identify exactly one `libc.a`
+under the selected provisioned sysroot, its SHA-256 is checked again after
+execution, and `--trace-symbol=exit` must identify an archive member from that
+same file as the definition used by the direct-call chain. The pivot and
+register-loading/syscall gadgets remain explicit test-owned exploit
+primitives.
+
+The pinned SPARC32 and SPARC64 GNU ld layouts are one documented exception to
+the writable-non-executable chain-storage assertion: their executable `.iplt`
+is co-located with `.data`/`.bss` in an RWX `PT_LOAD`. Their `PT_GNU_STACK`
+remains RW and the independent ELF inspection therefore still reports stack
+NX. The tests assert this segment layout explicitly instead of treating it as
+non-executable storage.
+
 The FSOP support cells are QEMU-verified because both the checked-in
 no-selector contract and those completed live batches cover all 20 mapped 2.39
 target variants, not because every FSOP activation or exploitation
@@ -828,9 +897,9 @@ is an explicit, less isolated compatibility path.
 
 | Suite | Real runtime evidence | Test-owned or not established |
 | --- | --- | --- |
-| Native i386/AMD64 | Direct host-kernel execution and the exact loaded host libc; FSOP callback dispatch and live-base ret2libc | Compiled fixtures, supplied control transfer, and challenge preconditions |
+| Native i386/AMD64 | Direct host-kernel execution and exact loaded host libc for FSOP/live-base ret2libc; seven pinned-libc semantic-write mirrors; seven static-glibc syscall/`exit` mirrors | Compiled fixtures, supplied control transfer, and challenge preconditions |
 | General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, and materialized ROP control flow | Minimal static ELF envelopes and semantic ROP gadgets are test-owned; shellcode cases use no foreign libc |
-| Pinned glibc qemu-user | Real dynamic programs, exact pinned loader/libc identity, target-endian FSOP ingestion, live Apple 2/Cat dispatch, glibc 2.23 legacy dispatch, and x86 libc ORW/sendfile chains | Heap FILE placement, activation call, callbacks, challenge ELF, and its pivot/gadgets are test fixtures; the host QEMU version is not pinned |
+| Pinned glibc qemu-user | Real dynamic programs and exact loader/libc identity; target-endian FSOP dispatch; exact-libc semantic `write` on 28 mappings; x86 ORW/sendfile on seven; real static-glibc syscall ROP on 37 and libc `exit` ROP on 28 | Heap FILE placement, activation call, callbacks, challenge ELF, pivot/gadgets, and static ROP input protocol are test fixtures; the host QEMU version is not pinned |
 | QEMU 7.1/7.2 boundary | Provisioned roots bind observed banners, output hashes, source trees, configure arguments, and build identity; both origins test RW-versus-RX AArch64 fetch | Explicit binary overrides attest only banner/hash/behavior; the static probe makes no libc, payload-exploit, non-AArch64, or native-hardware claim |
 
 The x86 pinned-libc ROP fixture supplies the file path in writable main-image
