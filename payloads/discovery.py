@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum, IntEnum
+from math import lcm
 from pathlib import Path
 
 from .arbio import ArbitraryMemory
@@ -54,6 +55,37 @@ def _integer(value: object, name: str, *, positive: bool = False) -> int:
         qualifier = "positive" if positive else "non-negative"
         raise ValueError(f"{name} must be {qualifier}")
     return value
+
+
+def _read_covered(memory: ArbitraryMemory, address: int, size: int) -> bytes:
+    """Read a slice through a primitive which may require wider transfers.
+
+    ``ArbitraryMemory.read`` intentionally never over-reads.  Runtime
+    structures, instruction bytes, and C strings sometimes occupy sub-word
+    fields, while real primitives such as ptrace only transfer aligned words.
+    Discovery explicitly reads the smallest aligned covering interval and
+    returns only the requested slice.
+    """
+
+    _integer(address, "read address")
+    _integer(size, "read size")
+    if not size:
+        return b""
+    alignment = memory.traits.read_alignment
+    width = memory.traits.read_width
+    if address % alignment == 0 and size % width == 0:
+        return memory.read(address, size)
+    if not memory.traits.covering_read_safe:
+        raise MemoryAccessError(
+            "discovery needs an aligned covering read for this sub-width field; "
+            "normalize it in the transport adapter or declare covering_read_safe"
+        )
+    start = address - address % alignment
+    prefix = address - start
+    covered = prefix + size
+    total = covered + (-covered % width)
+    raw = memory.read(start, total)
+    return raw[prefix : prefix + size]
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +250,7 @@ class ROPInsertionPlan:
             raise TypeError("verify must be bool")
         # Check every expectation before making the first mutation.
         for write in self.writes:
-            actual = memory.read(write.address, len(write.expected))
+            actual = _read_covered(memory, write.address, len(write.expected))
             if actual != write.expected:
                 raise StaleDiscoveryError(f"memory at {write.address:#x} changed after ROP insertion was planned")
         total = 0
@@ -325,6 +357,16 @@ class ExactProcessDiscovery:
             raise ValueError("span does not fit the target address width")
         return span
 
+    def _read_bytes(self, address: int, size: int) -> bytes:
+        self._check_address(address, "read address")
+        _integer(size, "read size")
+        if size and address + size - 1 > self.target.mask:
+            raise ValueError("read does not fit the target address width")
+        return _read_covered(self.memory, address, size)
+
+    def _read_pointer(self, address: int) -> int:
+        return self.target.unpack(self._read_bytes(address, self.target.word_size))
+
     def scan_pointers(
         self,
         span: MemorySpan,
@@ -353,8 +395,42 @@ class ExactProcessDiscovery:
         return tuple((base + item.start, base + item.end, item) for item in adapter.profile.load_ranges)
 
     def _pointer_in_image(self, pointer: int, adapter: ExactELFAdapter, base: int) -> bool:
-        normalized = pointer & ~1 if Architecture.THUMB in {adapter.target.arch, self.target.arch} else pointer
-        return any(start <= normalized < end for start, end, _item in self._runtime_ranges(adapter, base))
+        # Image discovery accepts arbitrary data pointers.  Thumb state-bit
+        # normalization belongs only to explicitly classified code pointers,
+        # as in ``environ_to_main_returns`` below.
+        return any(start <= pointer < end for start, end, _item in self._runtime_ranges(adapter, base))
+
+    def _require_image_span(
+        self,
+        adapter: ExactELFAdapter,
+        base: int,
+        address: int,
+        size: int,
+        *,
+        label: str,
+        writable: bool = False,
+        executable: bool = False,
+    ) -> None:
+        """Require one complete interval to occupy a suitable exact PT_LOAD."""
+
+        self._check_address(address, label)
+        _integer(size, f"{label} size", positive=True)
+        if address + size - 1 > self.target.mask:
+            raise DiscoveryError(f"{label} does not fit the target address width")
+        if not any(
+            start <= address
+            and address + size <= end
+            and load.readable
+            and (load.writable or not writable)
+            and (load.executable or not executable)
+            for start, end, load in self._runtime_ranges(adapter, base)
+        ):
+            permissions = "readable"
+            if writable:
+                permissions += "/writable"
+            if executable:
+                permissions += "/executable"
+            raise DiscoveryError(f"{label} is outside one exact {permissions} PT_LOAD")
 
     def _validate_runtime_image(self, adapter: ExactELFAdapter, base: int) -> None:
         self._check_address(base, "image base")
@@ -371,7 +447,7 @@ class ExactProcessDiscovery:
         expected = Path(adapter.path).read_bytes()[:header_size]
         if len(expected) != header_size or not expected.startswith(b"\x7fELF"):
             raise PwntoolsCompatibilityError("exact adapter path no longer contains an ELF header")
-        actual = self.memory.read(runtime_address, header_size)
+        actual = self._read_bytes(runtime_address, header_size)
         if actual != expected:
             raise DiscoveryError(f"runtime ELF identity mismatch at {runtime_address:#x}")
         expected_class = 2 if adapter.target.bits == 64 else 1
@@ -407,7 +483,7 @@ class ExactProcessDiscovery:
         if phoff > len(artifact) or table_size > len(artifact) - phoff:
             raise PwntoolsCompatibilityError("exact ELF program-header table is outside the artifact")
         expected_table = artifact[phoff : phoff + table_size]
-        actual_table = self.memory.read(runtime_address + phoff, table_size)
+        actual_table = self._read_bytes(runtime_address + phoff, table_size)
         if actual_table != expected_table:
             raise DiscoveryError("runtime ELF program-header table differs from the exact artifact")
 
@@ -445,6 +521,19 @@ class ExactProcessDiscovery:
         if observed_loads != expected_loads:
             raise DiscoveryError("runtime ELF PT_LOAD records differ from the exact ELF profile")
 
+        # A mapped GNU build-ID descriptor gives a runtime identity check in
+        # addition to the structural ELF/program-header comparison above.
+        # Some valid ELFs expose a section-only build ID; those deliberately
+        # remain structural matches because section bytes need not be mapped.
+        expected_build_id = bytes.fromhex(adapter.profile.build_id) if adapter.profile.build_id else None
+        for note in adapter.profile.build_id_ranges:
+            expected_note = artifact[note.file_offset : note.file_offset + note.file_size]
+            if expected_build_id is None or expected_note != expected_build_id:
+                raise PwntoolsCompatibilityError("exact ELF profile has inconsistent GNU build-ID metadata")
+            actual_note = self._read_bytes(base + note.start, note.file_size)
+            if actual_note != expected_note:
+                raise DiscoveryError("runtime GNU build ID differs from the exact artifact")
+
     def _exact_runtime_bytes(
         self,
         adapter: ExactELFAdapter,
@@ -476,6 +565,13 @@ class ExactProcessDiscovery:
     ) -> int:
         if explicit_base is not None:
             base = self._check_address(explicit_base, f"{image_name}_base")
+            if leak.symbol is not None:
+                expected = base + adapter.symbol(leak.symbol) + leak.addend
+                if leak.value != expected:
+                    raise DiscoveryError(
+                        f"{image_name} symbol leak {leak.value:#x} disagrees with "
+                        f"{leak.symbol}+{leak.addend:#x} at hardcoded base {base:#x}"
+                    )
             # Reject the overwhelmingly common non-image pointer before doing
             # any transport reads.  This keeps large heap/libc scans usable on
             # menu-driven primitives while the one surviving base is still
@@ -505,7 +601,7 @@ class ExactProcessDiscovery:
                 if candidate < 0:
                     break
                 try:
-                    if self.memory.read(candidate + header.start, 4) != b"\x7fELF":
+                    if self._read_bytes(candidate + header.start, 4) != b"\x7fELF":
                         continue
                     self._validate_runtime_image(adapter, candidate)
                 except (DiscoveryError, MemoryAccessError):
@@ -565,10 +661,12 @@ class ExactProcessDiscovery:
             start = heap_base if heap_base is not None else origin & -self.runtime_page_size
             heap_span = MemorySpan(start, _integer(scan_size, "scan_size", positive=True), "heap scan")
         self._check_span(heap_span)
+        if heap_base is not None and heap_span.address != heap_base:
+            raise ConstraintError("heap_base and heap_span.address disagree")
 
         if libc_pointer_address is not None:
             address = self._check_address(libc_pointer_address, "libc_pointer_address")
-            observed = self.memory.read_ptr(address)
+            observed = self._read_pointer(address)
             if libc_pointer is not None and observed != libc_pointer:
                 raise DiscoveryError("hardcoded libc pointer does not match its supplied memory slot")
             leak = PointerLeak(observed, address)
@@ -646,7 +744,16 @@ class ExactProcessDiscovery:
         writable_only: bool,
     ) -> tuple[MemorySpan, ...]:
         if explicit is not None:
-            return (self._check_span(explicit),)
+            span = self._check_span(explicit)
+            self._require_image_span(
+                adapter,
+                base,
+                span.address,
+                span.size,
+                label="explicit image scan span",
+                writable=writable_only,
+            )
+            return (span,)
         return tuple(
             MemorySpan(base + item.start, item.size, "exact image scan")
             for item in adapter.profile.load_ranges
@@ -684,7 +791,7 @@ class ExactProcessDiscovery:
 
         if heap_pointer_address is not None:
             slot = self._check_address(heap_pointer_address, "heap_pointer_address")
-            observed = self.memory.read_ptr(slot)
+            observed = self._read_pointer(slot)
             if heap_pointer is not None and observed != heap_pointer:
                 raise DiscoveryError("hardcoded heap pointer does not match its supplied memory slot")
             if not valid(observed):
@@ -743,7 +850,17 @@ class ExactProcessDiscovery:
             if environ_address is not None
             else base + self.libc.symbol(environ_symbol)
         )
-        environ_pointer = self.memory.read_ptr(symbol_address)
+        self._require_image_span(
+            self.libc,
+            base,
+            symbol_address,
+            self.target.word_size,
+            label=f"{environ_symbol} address",
+            writable=True,
+        )
+        environ_pointer = self._read_pointer(symbol_address)
+        if not environ_pointer:
+            raise DiscoveryNotFoundError(f"resolved {environ_symbol} is NULL")
         if stack_span is None and stack_base is not None:
             stack_span = MemorySpan(stack_base, 0x1000000, "hardcoded stack window")
         if stack_span is not None:
@@ -752,13 +869,22 @@ class ExactProcessDiscovery:
                 raise ConstraintError("stack_base and stack_span.address disagree")
             if not stack_span.contains(environ_pointer, self.target.word_size):
                 raise DiscoveryError("environ does not point into the supplied stack span")
-        first = self.memory.read_ptr(environ_pointer)
-        if stack_span is not None and first and not stack_span.contains(first):
-            raise DiscoveryError("the first environment string pointer is outside the supplied stack span")
+        # `environ` itself is the stack leak.  Its first string is only useful
+        # corroboration and may legally point into heap storage after setenv()
+        # or putenv().  Do not turn that optional read into a remote primitive
+        # requirement when no safe stack interval was supplied.
+        first: int | None = None
+        if stack_span is not None:
+            first = self._read_pointer(environ_pointer) or None
+        elif self.memory.traits.invalid_read_safe:
+            try:
+                first = self._read_pointer(environ_pointer) or None
+            except MemoryAccessError:
+                first = None
         return StackResolution(
             symbol_address,
             environ_pointer,
-            first or None,
+            first,
             stack_base,
             stack_span,
             (f"resolved exact {environ_symbol}",),
@@ -770,34 +896,105 @@ class ExactProcessDiscovery:
 
     def _call_site(self, return_address: int, adapter: ExactELFAdapter, base: int) -> int | None:
         target = self.target
+
+        def exact_instruction(address: int, size: int) -> bytes | None:
+            try:
+                self._require_image_span(
+                    adapter,
+                    base,
+                    address,
+                    size,
+                    label="candidate call instruction",
+                    executable=True,
+                )
+            except DiscoveryError:
+                return None
+            exact = self._exact_runtime_bytes(adapter, base, address, size)
+            if exact is None:
+                return None
+            return exact if self._read_bytes(address, size) == exact else None
+
         if target.arch in {Architecture.X86, Architecture.X86_64}:
             if return_address >= 5:
                 call_site = return_address - 5
-                runtime = self.memory.read(call_site, 5)
                 exact = self._exact_runtime_bytes(adapter, base, call_site, 5)
-                if runtime[:1] == b"\xe8" and exact == runtime:
+                if exact is not None and exact[:1] == b"\xe8" and exact_instruction(call_site, 5) is not None:
                     return call_site
             return None
         if target.arch is Architecture.ARM64 and return_address >= 4:
-            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
-            return return_address - 4 if instruction & 0xFC000000 == 0x94000000 else None
+            call_site = return_address - 4
+            exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+            if exact is None:
+                return None
+            instruction = int.from_bytes(exact, target.endian.value)
+            if instruction & 0xFC000000 != 0x94000000:
+                return None
+            if exact_instruction(call_site, 4) is None:
+                return None
+            return call_site
         if target.arch is Architecture.ARM and return_address >= 4:
-            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
-            return return_address - 4 if instruction & 0x0F000000 == 0x0B000000 else None
+            call_site = return_address - 4
+            exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+            if exact is None:
+                return None
+            instruction = int.from_bytes(exact, target.endian.value)
+            if instruction & 0x0F000000 != 0x0B000000:
+                return None
+            return call_site if exact_instruction(call_site, 4) is not None else None
+        if target.arch is Architecture.THUMB and return_address >= 4:
+            call_site = return_address - 4
+            exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+            if exact is None:
+                return None
+            first = int.from_bytes(exact[:2], target.endian.value)
+            second = int.from_bytes(exact[2:], target.endian.value)
+            # Thumb-2 BL and BLX-immediate share a 11110 first halfword and a
+            # linked 11xx second halfword.  B.W uses a different second prefix.
+            if first & 0xF800 != 0xF000 or second & 0xC000 != 0xC000:
+                return None
+            return call_site if exact_instruction(call_site, 4) is not None else None
         if target.arch is Architecture.MIPS32 or target.arch is Architecture.MIPS64:
             if return_address >= 8:
-                instruction = int.from_bytes(self.memory.read(return_address - 8, 4), target.endian.value)
-                return return_address - 8 if instruction >> 26 == 3 else None
+                call_site = return_address - 8
+                exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+                if exact is None:
+                    return None
+                instruction = int.from_bytes(exact, target.endian.value)
+                if instruction >> 26 == 3 and exact_instruction(call_site, 4) is not None:
+                    return call_site
             return None
         if target.arch in {Architecture.RISCV32, Architecture.RISCV64} and return_address >= 4:
-            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
-            return return_address - 4 if instruction & 0x7F == 0x6F else None
+            call_site = return_address - 4
+            exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+            if exact is None:
+                return None
+            instruction = int.from_bytes(exact, target.endian.value)
+            opcode = instruction & 0x7F
+            destination = instruction >> 7 & 0x1F
+            linked = destination == 1 and (opcode == 0x6F or (opcode == 0x67 and instruction >> 12 & 0x7 == 0))
+            if not linked:
+                return None
+            return call_site if exact_instruction(call_site, 4) is not None else None
         if target.arch in {Architecture.POWERPC32, Architecture.POWERPC64} and return_address >= 4:
-            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
-            return return_address - 4 if instruction >> 26 == 18 and instruction & 1 else None
-        if target.arch in {Architecture.SPARC32, Architecture.SPARC64} and return_address >= 8:
-            instruction = int.from_bytes(self.memory.read(return_address - 8, 4), target.endian.value)
-            return return_address - 8 if instruction >> 30 == 1 else None
+            call_site = return_address - 4
+            exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+            if exact is None:
+                return None
+            instruction = int.from_bytes(exact, target.endian.value)
+            if instruction >> 26 == 18 and instruction & 1 and exact_instruction(call_site, 4) is not None:
+                return call_site
+            return None
+        if target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+            # SPARC `call` stores its own PC in %o7/%i7; `ret` reaches the
+            # architectural continuation by adding 8 for the delay slot.
+            call_site = return_address
+            exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
+            if exact is None:
+                return None
+            instruction = int.from_bytes(exact, target.endian.value)
+            if instruction >> 30 == 1 and exact_instruction(call_site, 4) is not None:
+                return call_site
+            return None
         return None
 
     def _nearest_symbol(self, adapter: ExactELFAdapter, offset: int) -> str | None:
@@ -889,7 +1086,7 @@ class ExactProcessDiscovery:
             slot = self._check_address(return_slot, "return_slot")
             if not stack_span.contains(slot, self.target.word_size):
                 raise DiscoveryError("return_slot is outside the supplied stack span")
-            slots = (DiscoveryCandidate(slot, self.memory.read_ptr(slot), "stack-pointer"),)
+            slots = (DiscoveryCandidate(slot, self._read_pointer(slot), "stack-pointer"),)
         else:
             slots = self.scan_pointers(stack_span)
         candidates: list[MainReturnAddress] = []
@@ -1014,7 +1211,7 @@ class ExactProcessDiscovery:
             replacement = chain.materialize(active_layout)
         else:
             replacement = chain.materialize(active_layout, chain_base=slot)
-        expected = self.memory.read(slot, len(replacement))
+        expected = self._read_bytes(slot, len(replacement))
         if self.target.unpack(expected[: self.target.word_size]) != return_site.return_address:
             raise StaleDiscoveryError("classified return address changed before ROP insertion was planned")
         write = PlannedMemoryWrite(slot, expected, replacement, "replace saved return address with flat ROP chain")
@@ -1059,7 +1256,7 @@ class ExactProcessDiscovery:
         _leak, resolved_libc = self._resolve_image_input(libc_leak, self.libc, libc_base, image_name="libc")
         if loader_pointer_address is not None:
             slot = self._check_address(loader_pointer_address, "loader_pointer_address")
-            observed = self.memory.read_ptr(slot)
+            observed = self._read_pointer(slot)
             if loader_pointer is not None and observed != loader_pointer:
                 raise DiscoveryError("hardcoded loader pointer does not match its supplied memory slot")
             leak = PointerLeak(observed, slot)
@@ -1079,7 +1276,7 @@ class ExactProcessDiscovery:
 
         def collect(candidate_slots: Sequence[tuple[int, str | None, str]]) -> None:
             for slot, symbol, source in dict.fromkeys(candidate_slots):
-                pointer = self.memory.read_ptr(slot)
+                pointer = self._read_pointer(slot)
                 try:
                     base = self._base_from_leak(
                         PointerLeak(pointer, slot, symbol=symbol),
@@ -1124,6 +1321,11 @@ class ExactProcessDiscovery:
         # which explicitly tolerates invalid exploratory reads.
         if not matches and (loader_base is not None or self.memory.traits.invalid_read_safe):
             collect([(slot, None, "resolved libc GOT slot") for _name, slot in got_entries])
+        if not matches and loader_base is None and not self.memory.traits.invalid_read_safe:
+            raise ConstraintError(
+                "resolving an unnamed loader pointer requires invalid_read_safe, loader_base, "
+                "or an exact loader-owned libc relocation"
+            )
         if not matches:
             fallback_slots: list[int] = []
             for span in self._image_scan_spans(
@@ -1157,21 +1359,28 @@ class ExactProcessDiscovery:
     def _read_cstring(self, address: int, limit: int) -> bytes:
         _integer(limit, "max_name_size", positive=True)
         result = bytearray()
-        for offset in range(limit):
-            byte = self.memory.read(address + offset, 1)
-            if byte == b"\0":
+        quantum = lcm(self.memory.traits.read_alignment, self.memory.traits.read_width)
+        while len(result) < limit:
+            current = address + len(result)
+            boundary = (current // quantum + 1) * quantum
+            amount = min(limit - len(result), boundary - current)
+            block = self._read_bytes(current, amount)
+            terminator = block.find(b"\0")
+            if terminator >= 0:
+                result.extend(block[:terminator])
                 return bytes(result)
-            result.extend(byte)
+            result.extend(block)
         raise InconsistentLinkMapError(f"link_map name at {address:#x} is not NUL-terminated within {limit} bytes")
 
     def _match_loaded_adapter(
         self,
         name: bytes,
         base: int,
+        dynamic_address: int,
         known_images: Sequence[ExactELFAdapter],
     ) -> ExactELFAdapter | None:
         basename = Path(name.decode(errors="surrogateescape")).name if name else ""
-        matches = [
+        named = [
             item
             for item in known_images
             if basename
@@ -1181,15 +1390,33 @@ class ExactProcessDiscovery:
                 item.profile.soname or "",
             }
         ]
+        if not named:
+            return None
+
+        # The name is target-controlled and only selects candidates.  Exact
+        # runtime ELF/build-ID validation plus link_map.l_ld decide which
+        # artifact, if any, is allowed to attach.
+        deduplicated = {item.identity.sha256: item for item in named}
+        matches: list[ExactELFAdapter] = []
+        for item in deduplicated.values():
+            dynamic = item.profile.dynamic_range
+            if dynamic is None or dynamic_address != base + dynamic.start:
+                continue
+            try:
+                self._validate_runtime_image(item, base)
+            except (DiscoveryError, MemoryAccessError):
+                continue
+            matches.append(item)
+        if not matches:
+            raise DiscoveryError(
+                f"loaded object {basename!r} does not match any named exact artifact and PT_DYNAMIC address"
+            )
         if len(matches) > 1:
             candidates = tuple(
                 DiscoveryCandidate(base, base, "loaded-object-artifact", (item.path,)) for item in matches
             )
             raise DiscoveryAmbiguityError(f"loaded object {basename!r}", candidates)
-        if matches:
-            self._validate_runtime_image(matches[0], base)
-            return matches[0]
-        return None
+        return matches[0]
 
     def loader_to_link_map(
         self,
@@ -1216,13 +1443,22 @@ class ExactProcessDiscovery:
         r_state_offset = word * 3
         r_ldbase_offset = word * 4
 
-        version_before = int.from_bytes(self.memory.read(debug, 4), self.target.endian.value)
+        self._require_image_span(
+            self.loader,
+            base,
+            debug,
+            word * 5,
+            label="r_debug address",
+            writable=True,
+        )
+
+        version_before = int.from_bytes(self._read_bytes(debug, 4), self.target.endian.value)
         if version_before not in {1, 2}:
             raise InconsistentLinkMapError(f"unsupported r_debug version {version_before}")
-        head_before = self.memory.read_ptr(debug + r_map_offset)
-        r_brk = self.memory.read_ptr(debug + r_brk_offset)
-        state_before = int.from_bytes(self.memory.read(debug + r_state_offset, 4), self.target.endian.value)
-        r_ldbase = self.memory.read_ptr(debug + r_ldbase_offset)
+        head_before = self._read_pointer(debug + r_map_offset)
+        r_brk = self._read_pointer(debug + r_brk_offset)
+        state_before = int.from_bytes(self._read_bytes(debug + r_state_offset, 4), self.target.endian.value)
+        r_ldbase = self._read_pointer(debug + r_ldbase_offset)
         try:
             state = RDebugState(state_before)
         except ValueError as exc:
@@ -1254,14 +1490,14 @@ class ExactProcessDiscovery:
             if len(objects) >= limit:
                 raise InconsistentLinkMapError(f"link_map exceeds max_entries={limit}")
             seen.add(current)
-            values = tuple(self.memory.read_ptr(current + index * word) for index in range(5))
+            values = tuple(self._read_pointer(current + index * word) for index in range(5))
             object_base, name_address, dynamic_address, next_address, previous_address = values
             if previous_address != previous:
                 raise InconsistentLinkMapError(
                     f"link_map backlink at {current:#x} is {previous_address:#x}, expected {previous:#x}"
                 )
             name = b"" if name_address == 0 else self._read_cstring(name_address, max_name_size)
-            adapter = self._match_loaded_adapter(name, object_base, normalized_known)
+            adapter = self._match_loaded_adapter(name, object_base, dynamic_address, normalized_known)
             objects.append(
                 LoadedObject(
                     current,
@@ -1277,8 +1513,8 @@ class ExactProcessDiscovery:
             )
             previous, current = current, next_address
 
-        state_after = int.from_bytes(self.memory.read(debug + r_state_offset, 4), self.target.endian.value)
-        head_after = self.memory.read_ptr(debug + r_map_offset)
+        state_after = int.from_bytes(self._read_bytes(debug + r_state_offset, 4), self.target.endian.value)
+        head_after = self._read_pointer(debug + r_map_offset)
         if state_after != state_before or head_after != head_before:
             raise InconsistentLinkMapError("r_debug changed while link_map was being traversed")
         return LinkMapSnapshot(

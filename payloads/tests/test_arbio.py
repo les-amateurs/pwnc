@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from pwnlib.memleak import MemLeak
+
 from payloads import (
     SUPPORTED_TARGETS,
     ConstraintError,
@@ -35,7 +37,6 @@ from payloads.arbio import (
 )
 from payloads.errors import MemoryAccessError
 from pwnc.types import BytesProvider, Int
-from pwnlib.memleak import MemLeak
 
 
 class MemoryBackend:
@@ -89,6 +90,12 @@ def exact_libc(target_name: str, symbols: dict[str, int]) -> LibcImage:
 
 
 class ArbitraryMemoryTests(unittest.TestCase):
+    def test_covering_read_trait_preserves_legacy_positional_field_order(self) -> None:
+        traits = IOPrimitiveTraits(None, None, 1, 1, 1, 1, False, True)
+
+        self.assertTrue(traits.verify_writes)
+        self.assertFalse(traits.covering_read_safe)
+
     def test_pointer_width_and_endian_are_target_driven(self) -> None:
         cases = (
             ("x86", 0x11223344, b"\x44\x33\x22\x11"),

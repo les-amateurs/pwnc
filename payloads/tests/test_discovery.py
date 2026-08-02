@@ -22,7 +22,7 @@ from payloads.discovery import (
 from payloads.elf import ELFImageKind, ELFProfile, ELFRange
 from payloads.errors import ConstraintError, MemoryAccessError, UnsupportedTargetError
 from payloads.libc import LibcIdentity
-from payloads.model import Image, Linkage, Permission, Relro
+from payloads.model import Address, Image, Linkage, Permission, Relro, RuntimeLayout
 from payloads.pwntools_compat import ExactELFAdapter, PwntoolsMitigations
 from payloads.rop import ChainWord, ROPChain
 from payloads.target import Target, resolve_target
@@ -78,11 +78,19 @@ def exact_adapter(
         "arm64": 183,
         "mips32": 8,
         "mips64": 8,
+        "powerpc32": 20,
+        "powerpc64": 21,
+        "riscv32": 243,
+        "riscv64": 243,
+        "s390x": 22,
+        "sparc32": 2,
+        "sparc64": 43,
     }[target.arch.value]
 
     def put(offset: int, value: int, width: int) -> None:
         data[offset : offset + width] = value.to_bytes(width, byteorder)
 
+    segment_flags = 7 if writable and executable else 6 if writable else 5 if executable else 4
     data[:16] = (
         b"\x7fELF"
         + (b"\x02" if target.bits == 64 else b"\x01")
@@ -97,21 +105,30 @@ def exact_adapter(
         put(32, header_size, 8)
         put(52, header_size, 2)
         put(54, phentsize, 2)
-        put(56, 1, 2)
+        put(56, 2, 2)
         phdr = header_size
         put(phdr, 1, 4)
-        put(phdr + 4, 7 if writable and executable else 6 if writable else 5 if executable else 4, 4)
+        put(phdr + 4, segment_flags, 4)
         put(phdr + 8, 0, 8)
         put(phdr + 16, start, 8)
         put(phdr + 24, start, 8)
         put(phdr + 32, size, 8)
         put(phdr + 40, size, 8)
         put(phdr + 48, 0x1000, 8)
+        dynamic_phdr = phdr + phentsize
+        put(dynamic_phdr, 2, 4)
+        put(dynamic_phdr + 4, segment_flags, 4)
+        put(dynamic_phdr + 8, 0x500, 8)
+        put(dynamic_phdr + 16, start + 0x500, 8)
+        put(dynamic_phdr + 24, start + 0x500, 8)
+        put(dynamic_phdr + 32, 0x80, 8)
+        put(dynamic_phdr + 40, 0x80, 8)
+        put(dynamic_phdr + 48, target.word_size, 8)
     else:
         put(28, header_size, 4)
         put(40, header_size, 2)
         put(42, phentsize, 2)
-        put(44, 1, 2)
+        put(44, 2, 2)
         phdr = header_size
         put(phdr, 1, 4)
         put(phdr + 4, 0, 4)
@@ -119,8 +136,17 @@ def exact_adapter(
         put(phdr + 12, start, 4)
         put(phdr + 16, size, 4)
         put(phdr + 20, size, 4)
-        put(phdr + 24, 7 if writable and executable else 6 if writable else 5 if executable else 4, 4)
+        put(phdr + 24, segment_flags, 4)
         put(phdr + 28, 0x1000, 4)
+        dynamic_phdr = phdr + phentsize
+        put(dynamic_phdr, 2, 4)
+        put(dynamic_phdr + 4, 0x500, 4)
+        put(dynamic_phdr + 8, start + 0x500, 4)
+        put(dynamic_phdr + 12, start + 0x500, 4)
+        put(dynamic_phdr + 16, 0x80, 4)
+        put(dynamic_phdr + 20, 0x80, 4)
+        put(dynamic_phdr + 24, segment_flags, 4)
+        put(dynamic_phdr + 28, target.word_size, 4)
     for offset, value in (patches or {}).items():
         data[offset : offset + len(value)] = value
     path = root / name
@@ -132,6 +158,15 @@ def exact_adapter(
     if executable:
         permissions |= Permission.EXECUTE
     load = ELFRange(start, start + size, permissions, 0, size, 0x1000, "PT_LOAD")
+    dynamic = ELFRange(
+        start + 0x500,
+        start + 0x580,
+        permissions,
+        0x500,
+        0x80,
+        target.word_size,
+        "PT_DYNAMIC",
+    )
     loaded_symbols = symbols or {}
     profile = ELFProfile(
         path=str(path),
@@ -154,6 +189,7 @@ def exact_adapter(
         load_ranges=(load,),
         relro_ranges=(),
         load_alignment_hint=0x1000,
+        dynamic_range=dynamic,
         symbol_offsets=loaded_symbols,
     )
     return ExactELFAdapter(
@@ -354,6 +390,41 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(plan.apply(resolver.memory), chain.byte_length)
         self.assertEqual(backend.read(slot, chain.byte_length), chain.materialize())
 
+    def test_discovered_bases_materialize_a_symbolic_rop_insertion(self) -> None:
+        target, backend, resolver, libc_base, main_base, stack, slot, _return_address = self._return_fixture()
+        libc_result = ImageResolution(
+            Image.LIBC,
+            libc_base,
+            resolver.libc,
+            PointerLeak(libc_base + 0x100),
+        )
+        stack_result = resolver.libc_to_stack(
+            libc_result,
+            stack_base=stack.address,
+            stack_span=stack,
+        )
+        return_site = resolver.environ_to_main_return(
+            stack_result,
+            main_base=main_base,
+            return_slot=slot,
+        )
+        layout = libc_result.merged_layout(RuntimeLayout(main_base=return_site.main_base))
+        chain = ROPChain(
+            target,
+            (
+                ChainWord(Address(0x440, Image.LIBC), "libc-relative word"),
+                ChainWord(Address(0x550, Image.MAIN), "main-relative word"),
+            ),
+        )
+
+        plan = resolver.plan_rop_insertion(return_site, chain, layout=layout)
+
+        self.assertEqual(plan.apply(resolver.memory), chain.byte_length)
+        self.assertEqual(
+            backend.read(slot, chain.byte_length),
+            target.pack(libc_base + 0x440) + target.pack(main_base + 0x550),
+        )
+
     def test_environ_classifies_returns_and_infers_pie_base_automatically(self) -> None:
         target, backend, resolver, libc_base, main_base, stack, slot, return_address = self._return_fixture()
         automatic = ExactProcessDiscovery(
@@ -493,20 +564,33 @@ class DiscoveryTests(unittest.TestCase):
                     + target.pack(0)
                     + target.pack(first),
                 )
-                backend.map(first_name, b"\0")
-                backend.map(second_name, b"ld-test.so\0")
-                resolver = ExactProcessDiscovery(self.memory(target, backend), loader=loader)
+                loader_name = Path(loader.path).name.encode()
+                backend.map(first_name, b"\0" * target.word_size)
+                backend.map(second_name, loader_name + b"\0" + b"\0" * target.word_size)
+                word_memory = ArbitraryMemory(
+                    target,
+                    read_at=backend.read,
+                    write_at=backend.write,
+                    traits=IOPrimitiveTraits(
+                        read_alignment=target.word_size,
+                        read_width=target.word_size,
+                        covering_read_safe=True,
+                    ),
+                )
+                resolver = ExactProcessDiscovery(word_memory, loader=loader)
 
                 snapshot = resolver.loader_to_link_map(
                     PointerLeak(loader_base + 0x100),
                     loader_base=loader_base,
+                    known_images=(loader,),
                     max_entries=4,
                 )
 
                 self.assertIs(snapshot.r_state, RDebugState.CONSISTENT)
                 self.assertEqual(snapshot.r_ldbase, loader_base)
-                self.assertEqual([item.name for item in snapshot.objects], ["", "ld-test.so"])
+                self.assertEqual([item.name for item in snapshot.objects], ["", loader_name.decode()])
                 self.assertEqual(snapshot.objects[1].previous_address, first)
+                self.assertIs(snapshot.objects[1].adapter, loader)
 
     def test_link_map_cycle_and_bad_backlink_are_rejected(self) -> None:
         target = resolve_target("x86_64")
@@ -608,6 +692,37 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result.leak.address, loader_slot)
         self.assertEqual(result.leak.symbol, "_rtld_global")
         self.assertIn("GOT slot", result.evidence[0])
+
+    @unittest.skipUnless(shutil.which("cc"), "a native C compiler is required")
+    def test_runtime_mapped_build_id_is_part_of_image_validation(self) -> None:
+        source = self.root / "build-id-source.c"
+        shared = self.root / "libbuild-id.so"
+        source.write_text("int build_id_fixture(void) { return 7; }\n", encoding="utf-8")
+        subprocess.run(
+            ["cc", "-shared", "-fPIC", "-Wl,--build-id", "-o", str(shared), str(source)],
+            check=True,
+            capture_output=True,
+        )
+        libc = ExactELFAdapter.from_file(shared)
+        self.assertIsNotNone(libc.profile.build_id)
+        self.assertGreater(len(libc.profile.build_id_ranges), 0)
+        target = libc.target
+        backend = SparseMemory()
+        libc_base = 0x700000
+        map_adapter(backend, libc, libc_base)
+        build_id = libc.profile.build_id_ranges[0]
+        runtime_note = libc_base + build_id.start
+        original = backend.read(runtime_note, build_id.size)
+        backend.map(runtime_note, bytes((original[0] ^ 1,)) + original[1:])
+        resolver = ExactProcessDiscovery(self.memory(target, backend), libc=libc)
+
+        with self.assertRaisesRegex(DiscoveryError, "runtime GNU build ID"):
+            resolver.heap_to_libc(
+                0x500000,
+                heap_span=MemorySpan(0x500000, target.word_size),
+                libc_pointer=libc_base + libc.profile.load_ranges[0].start,
+                libc_base=libc_base,
+            )
 
 
 if __name__ == "__main__":

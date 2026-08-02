@@ -87,6 +87,9 @@ class IOPrimitiveTraits:
     ``invalid_read_safe`` means that probing an invalid address is known not
     to kill or corrupt the target.  It gates :meth:`ArbitraryMemory.probe` and
     is deliberately unrelated to ordinary reads of known-valid ranges.
+    ``covering_read_safe`` separately permits discovery helpers to satisfy an
+    unaligned or sub-width field by reading the smallest aligned interval
+    containing it.  It does not permit probing an unknown address.
     ``verify_writes`` makes read-back comparison the default for every write.
     """
 
@@ -98,6 +101,7 @@ class IOPrimitiveTraits:
     write_width: int = 1
     invalid_read_safe: bool = False
     verify_writes: bool = False
+    covering_read_safe: bool = False
 
     def __post_init__(self) -> None:
         for name in ("read_alignment", "write_alignment", "read_width", "write_width"):
@@ -113,7 +117,7 @@ class IOPrimitiveTraits:
                 raise ValueError(f"{direction}_chunk must be a positive integer or None")
             if chunk < width or chunk % width:
                 raise ValueError(f"{direction}_chunk must be a positive multiple of {direction}_width")
-        for name in ("invalid_read_safe", "verify_writes"):
+        for name in ("invalid_read_safe", "covering_read_safe", "verify_writes"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be bool")
 
