@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "license_name": "Apache License 2.0",
+    "spdx": "Apache-2.0",
+    "license_url": "https://www.apache.org/licenses/LICENSE-2.0"
+  },
+  "sources": [
+    {
+      "id": "defcon30",
+      "event": "LiveCTF DEF CON 30",
+      "repository": "https://github.com/Live-CTF/LiveCTF-DEFCON30",
+      "commit": "2f54bc3c481c1fd43559b6c85db41c968479f0e9",
+      "archive_root": "LiveCTF-DEFCON30-2f54bc3c481c1fd43559b6c85db41c968479f0e9",
+      "archive": {
+        "name": "LiveCTF-DEFCON30-2f54bc3c481c1fd43559b6c85db41c968479f0e9.tar.gz",
+        "url": "https://codeload.github.com/Live-CTF/LiveCTF-DEFCON30/tar.gz/2f54bc3c481c1fd43559b6c85db41c968479f0e9",
+        "size": 176923,
+        "sha256": "25ba5cc484f3725259baee980c69bd8d584e574f1008f093fc2dba47de4208d7"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "size": 11357,
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      "critical_members": [
+        {
+          "path": "challenges/seek-and-destroy/challenge/src/challenge.c",
+          "size": 4007,
+          "sha256": "6535ded7684f2ece21727891549bf5af2b1b8e3a1356e6a696492d4469004a0f"
+        }
+      ]
+    },
+    {
+      "id": "defcon31",
+      "event": "LiveCTF DEF CON 31",
+      "repository": "https://github.com/Live-CTF/LiveCTF-DEFCON31",
+      "commit": "d654ed5b65b28ed52dbad1a441083cce47edd707",
+      "archive_root": "LiveCTF-DEFCON31-d654ed5b65b28ed52dbad1a441083cce47edd707",
+      "archive": {
+        "name": "LiveCTF-DEFCON31-d654ed5b65b28ed52dbad1a441083cce47edd707.tar.gz",
+        "url": "https://codeload.github.com/Live-CTF/LiveCTF-DEFCON31/tar.gz/d654ed5b65b28ed52dbad1a441083cce47edd707",
+        "size": 10796848,
+        "sha256": "becacad94a0cc0a54739c213beeeb81b6f2bb5feb5b1464ba94b919dfc9f7950"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "size": 11337,
+        "sha256": "7b017d41bcf5214f310c78b03d5328b441948895d943ef984034a14aacde61fb"
+      },
+      "critical_members": [
+        {
+          "path": "qualifiers/challenges/ptrace-me-maybe/challenge/src/challenge.c",
+          "size": 1408,
+          "sha256": "febe90db5a2953f02c84bac556f560caee88461ea583d03642308fd6a152a34e"
+        }
+      ]
+    },
+    {
+      "id": "defcon32",
+      "event": "LiveCTF DEF CON 32",
+      "repository": "https://github.com/Live-CTF/LiveCTF-DEFCON32",
+      "commit": "bd7dbd3aebcf2b79d7db810c92222de6657dc350",
+      "archive_root": "LiveCTF-DEFCON32-bd7dbd3aebcf2b79d7db810c92222de6657dc350",
+      "archive": {
+        "name": "LiveCTF-DEFCON32-bd7dbd3aebcf2b79d7db810c92222de6657dc350.tar.gz",
+        "url": "https://codeload.github.com/Live-CTF/LiveCTF-DEFCON32/tar.gz/bd7dbd3aebcf2b79d7db810c92222de6657dc350",
+        "size": 1941441,
+        "sha256": "cc032711a1289a0d05b829105ac98b467ca3faaef4ed0c61eb582965cb615f9f"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "size": 11337,
+        "sha256": "55f37965840192644c895d1fd0f70337609711dc9e2b82393efeeba752163432"
+      },
+      "critical_members": [
+        {
+          "path": "qualifiers/challenges/process_vm_readv-me-maybe/challenge/src/challenge.c",
+          "size": 3384,
+          "sha256": "2c228d41744ba135eb20ee9181349eb50536e874330b7b9c4520e656daf4cab8"
+        }
+      ]
+    },
+    {
+      "id": "defcon33",
+      "event": "LiveCTF DEF CON 33",
+      "repository": "https://github.com/Live-CTF/LiveCTF-DEFCON33",
+      "commit": "be722a0191dc51f4531b76b6c7195dc538fb2496",
+      "archive_root": "LiveCTF-DEFCON33-be722a0191dc51f4531b76b6c7195dc538fb2496",
+      "archive": {
+        "name": "LiveCTF-DEFCON33-be722a0191dc51f4531b76b6c7195dc538fb2496.tar.gz",
+        "url": "https://codeload.github.com/Live-CTF/LiveCTF-DEFCON33/tar.gz/be722a0191dc51f4531b76b6c7195dc538fb2496",
+        "size": 3328179,
+        "sha256": "977bb408a82581000e4195e5ec699b4a8e267991de04763b0fb1012ba0967b2d"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "size": 11337,
+        "sha256": "55f37965840192644c895d1fd0f70337609711dc9e2b82393efeeba752163432"
+      },
+      "critical_members": [
+        {
+          "path": "qualifiers/challenges/ropably/challenge/generator/main.c",
+          "size": 745,
+          "sha256": "0b94c5a394d55dd03dab2ec3800b81a71c497a5697043eb0ea40f7a9c608c8ba"
+        }
+      ]
+    }
+  ],
+  "handouts": [
+    {
+      "id": "defcon30-seek-and-destroy",
+      "source_id": "defcon30",
+      "release": {
+        "tag": "defcon30",
+        "name": "LiveCTF 2022 (w/ binaries) - DEF CON 30 Edition"
+      },
+      "outer_archive": {
+        "name": "LiveCTF2022-WithHandouts.tar.gz",
+        "url": "https://github.com/Live-CTF/LiveCTF-DEFCON30/releases/download/defcon30/LiveCTF2022-WithHandouts.tar.gz",
+        "size": 19060863,
+        "sha256": "d5d879be936d7b94bb5ae35176828a1462dee03673308614224c9121e4114760"
+      },
+      "nested_archive": {
+        "path": "handouts/seek-and-destroy.tar.gz",
+        "size": 1072395,
+        "sha256": "2fde19e72bea8435e9747f318f6c6dbccba6c5301cd8f0a6b2351aa5c7ae66ab"
+      },
+      "files": [
+        {
+          "path": "handout/challenge",
+          "size": 17032,
+          "sha256": "04e32ae6b498301f138cb1f80b17893d8c5f81be804cd9c2ed6c2bea7f9a92c7",
+          "elf_build_id": "63ba880052171c400257b8788ce0b3fb6bb470f8"
+        },
+        {
+          "path": "handout/libc.so.6",
+          "size": 2216304,
+          "sha256": "568740b06a8afa26db4874f8cf61985ecbc6dd127f4229416fe95da8f9ec13fb",
+          "elf_build_id": "69389d485a9793dbe873f0ea2c93e02efaa9aa3d"
+        },
+        {
+          "path": "handout/ld-linux-x86-64.so.2",
+          "size": 240936,
+          "sha256": "ee7aa16bd8443a946286c9ab84a0af0cbc47aa53a8f00477bf8ada5c38580a36",
+          "elf_build_id": "61ef896a699bb1c2e4e231642b2e1688b2f1a61e"
+        }
+      ]
+    },
+    {
+      "id": "defcon31-ptrace-me-maybe",
+      "source_id": "defcon31",
+      "release": {
+        "tag": "v1.0",
+        "name": "LiveCTF 2023 Challenges"
+      },
+      "outer_archive": {
+        "name": "quals-ptrace-me-maybe-handout.tar.gz",
+        "url": "https://github.com/Live-CTF/LiveCTF-DEFCON31/releases/download/v1.0/quals-ptrace-me-maybe-handout.tar.gz",
+        "size": 1075488,
+        "sha256": "b5580b0f55b770d7d5c78ef9960369d588b4418c8e0140db232e64ea78884cb9"
+      },
+      "nested_archive": null,
+      "files": [
+        {
+          "path": "handout/challenge",
+          "size": 21304,
+          "sha256": "e7d437ba4e946db7666d66293f74868160d2d2b92bf8f6e26601a184fa5a8336",
+          "elf_build_id": "e0bf43aef9b524cf1adff851b2d97a8250a06fa0"
+        },
+        {
+          "path": "handout/libc.so.6",
+          "size": 2216304,
+          "sha256": "568740b06a8afa26db4874f8cf61985ecbc6dd127f4229416fe95da8f9ec13fb",
+          "elf_build_id": "69389d485a9793dbe873f0ea2c93e02efaa9aa3d"
+        },
+        {
+          "path": "handout/ld-linux-x86-64.so.2",
+          "size": 240936,
+          "sha256": "ee7aa16bd8443a946286c9ab84a0af0cbc47aa53a8f00477bf8ada5c38580a36",
+          "elf_build_id": "61ef896a699bb1c2e4e231642b2e1688b2f1a61e"
+        }
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "id": "defcon32-process-vm-readv-current-mutable-build",
+      "source_id": "defcon32",
+      "observed_at": "2026-08-02",
+      "reproducible": false,
+      "reason": "The challenge Dockerfile uses a floating quals-nsjail tag and apt repository packages; these identities describe the audit-time rebuild, not a pinned release artifact.",
+      "base_image": {
+        "reference": "livectf/livectf:quals-nsjail",
+        "resolved_digest": "sha256:6c8f8523a926d9a75dcaaf7279ae7bd6474eb2285dd5a4410db785b4ef2c0c86",
+        "config_digest": "sha256:944d8301d4367dbc334d21ba7ef8b8a9bb21182902a8218d940b5bfd4dbe1add",
+        "created": "2025-04-09T23:19:45.018061151+01:00",
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "files": [
+        {
+          "path": "handout/challenge",
+          "size": 14192,
+          "sha256": "522c43ef02200e65038458d132b1eb36fc7d15672819cf05f4e54110cfbe0ce0",
+          "elf_build_id": "821bece5cbe7a5b8095f67909e6428d2c96a010f"
+        },
+        {
+          "path": "handout/libc.so.6",
+          "size": 2125328,
+          "sha256": "8db37cf3f2169f59a0f07ef1fea308c35656668c64c8ff294e1860f4121eb161",
+          "elf_build_id": "328820b908de8ea1ef79afa8995e302e819163d7"
+        },
+        {
+          "path": "handout/ld-linux-x86-64.so.2",
+          "size": 236616,
+          "sha256": "cd4df4f3c7b83673d61189bf2eaebd33ca4f2853ab9772b8a25e025ef99b1e81",
+          "elf_build_id": "f58808c9c8a388055b126492a1706d732761f86e"
+        },
+        {
+          "path": "usr/lib/x86_64-linux-gnu/libseccomp.so.2.5.5",
+          "size": 125360,
+          "sha256": "b4d9140a7797ccf3ac14f5d9d579b64f157111662940cb8330c632b11a8cea8e",
+          "elf_build_id": "ebbca39470299c86d412c32d82a25b2aba80a5f6"
+        }
+      ],
+      "bootstrap_observation": {
+        "executions": 5,
+        "invalid_address": 0,
+        "result_classification": "PIE writable segment",
+        "stable_offset": "0x22a8",
+        "immutable_contract": false
+      }
+    }
+  ]
+}
