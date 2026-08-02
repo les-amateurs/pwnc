@@ -29,6 +29,9 @@ class GlibcSysrootManifestTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.manifest = load_manifest()
 
+    def test_manifest_schema_is_current(self) -> None:
+        self.assertEqual(self.manifest.schema_version, 2)
+
     def test_full_239_lane_is_every_qemu_runnable_catalog_target(self) -> None:
         ppc32le = resolve_target("powerpc32", endian="little").name
         expected = {target.name for target in SUPPORTED_TARGETS} - {ppc32le}
@@ -98,10 +101,16 @@ class GlibcSysrootManifestTests(unittest.TestCase):
             with self.subTest(endian=endian):
                 self.assertEqual(spec.elf.elf_class, 64)
                 self.assertEqual(spec.loader, "lib64/ld.so.1")
-                self.assertEqual(spec.compiler.kind, "zig")
-                self.assertIn("gnuabi64", spec.compiler.target or "")
+                self.assertEqual(spec.compiler.kind, "bundled-gcc")
+                self.assertIn("gnuabi64-gcc-13", spec.compiler.driver or "")
+                self.assertEqual(spec.compiler.argv, ("--sysroot={root}",))
                 self.assertTrue(all("archive.ubuntu.com" in item.url for item in spec.artifacts))
                 self.assertTrue(any("linux-libc-dev" in item.name for item in spec.artifacts))
+                self.assertTrue(any(item.name.startswith("gcc-13-") for item in spec.artifacts))
+                self.assertTrue(any(item.name.startswith("cpp-13-") for item in spec.artifacts))
+                self.assertTrue(any(item.name.startswith("binutils-") for item in spec.artifacts))
+                self.assertTrue(any(item.name.startswith("libgcc-13-dev-") for item in spec.artifacts))
+                self.assertTrue(any(item.name.startswith("libgcc-s1-") for item in spec.artifacts))
 
     def test_sparc32_records_v8plus_emulator_and_real_multilib_root(self) -> None:
         spec = resolve_sysroot("sparc32")
@@ -113,10 +122,12 @@ class GlibcSysrootManifestTests(unittest.TestCase):
         # Ubuntu's V8+ multilib objects identify as EM_SPARC32PLUS (18), not
         # the legacy EM_SPARC (2) machine used by plain V8 objects.
         self.assertEqual((spec.elf.elf_class, spec.elf.machine), (32, 18))
+        self.assertEqual(spec.compiler.kind, "bundled-gcc")
+        self.assertEqual(spec.compiler.driver, "usr/bin/sparc64-linux-gnu-gcc-13")
         self.assertEqual(
             spec.compiler.argv,
             (
-                "sparc64-linux-gnu-gcc",
+                "--sysroot={root}",
                 "-m32",
                 "-isystem",
                 "{sysroot}/usr/sparc64-linux-gnu/include",
@@ -138,6 +149,17 @@ class GlibcSysrootManifestTests(unittest.TestCase):
             path = Path(directory) / "manifest.json"
             path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(SysrootError, "unsupported compiler argv template"):
+                load_manifest(path)
+
+    def test_unsafe_bundled_compiler_driver_is_rejected(self) -> None:
+        source = Path(__file__).with_name("runtime_support") / "glibc_sysroots.json"
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+        mips = next(item for item in manifest["sysroots"] if item["id"].startswith("mips64-n64-"))
+        mips["compiler"]["driver"] = "../../usr/bin/host-gcc"
+        with tempfile.TemporaryDirectory(prefix="pwnc-manifest-unit-") as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(SysrootError, "unsafe guest path"):
                 load_manifest(path)
 
     def test_ppc64_roots_attest_elfv1_and_elfv2_e_flags(self) -> None:
@@ -194,27 +216,61 @@ class GlibcSysrootManifestTests(unittest.TestCase):
 
 
 class GlibcSysrootArtifactValidationTests(unittest.TestCase):
-    def test_system_compiler_expands_sysroot_templates(self) -> None:
+    def test_bundled_compiler_uses_extracted_driver_and_runtime(self) -> None:
         spec = resolve_sysroot("sparc32")
-        sysroot = Path("/cache/root")
-        provisioned = ProvisionedSysroot(
-            spec,
-            sysroot,
-            sysroot,
-            sysroot / spec.libc,
-            sysroot / spec.loader,
+        with tempfile.TemporaryDirectory(prefix="pwnc-bundled-gcc-unit-") as directory:
+            root = Path(directory).resolve()
+            driver = root / (spec.compiler.driver or "missing")
+            driver.parent.mkdir(parents=True)
+            driver.write_bytes(b"#!/bin/sh\nexit 0\n")
+            driver.chmod(0o755)
+            host_libraries = root / "usr/lib/x86_64-linux-gnu"
+            host_libraries.mkdir(parents=True)
+            provisioned = ProvisionedSysroot(
+                spec,
+                root,
+                root,
+                root / spec.libc,
+                root / spec.loader,
+            )
+            with mock.patch(
+                "payloads.tests.runtime_support.sysroots.shutil.which",
+                side_effect=AssertionError("bundled compilers must not search the host PATH"),
+            ):
+                argv = provisioned.compiler_argv
+
+        self.assertEqual(
+            argv[:4],
+            (
+                "/usr/bin/env",
+                f"PATH={root / 'usr/bin'}",
+                f"LD_LIBRARY_PATH={host_libraries}",
+                str(driver),
+            ),
         )
-        with mock.patch(
-            "payloads.tests.runtime_support.sysroots.shutil.which",
-            return_value="/toolchain/bin/sparc64-linux-gnu-gcc",
-        ):
-            argv = provisioned.compiler_argv
-        self.assertEqual(argv[0:2], ("/toolchain/bin/sparc64-linux-gnu-gcc", "-m32"))
-        self.assertIn("/cache/root/usr/sparc64-linux-gnu/include", argv)
-        self.assertIn("-B/cache/root/usr/sparc64-linux-gnu/lib32/", argv)
-        self.assertIn("-L/cache/root/usr/sparc64-linux-gnu/lib32", argv)
-        self.assertEqual(argv[-1], "--sysroot=/cache/root")
+        self.assertEqual(argv[4:6], (f"--sysroot={root}", "-m32"))
+        self.assertIn(f"{root}/usr/sparc64-linux-gnu/include", argv)
+        self.assertIn(f"-B{root}/usr/sparc64-linux-gnu/lib32/", argv)
+        self.assertIn(f"-L{root}/usr/sparc64-linux-gnu/lib32", argv)
         self.assertFalse(any("{" in argument or "}" in argument for argument in argv))
+
+    def test_bundled_compiler_rejects_missing_runtime_directories(self) -> None:
+        spec = resolve_sysroot("mips64")
+        with tempfile.TemporaryDirectory(prefix="pwnc-bundled-gcc-unit-") as directory:
+            root = Path(directory).resolve()
+            driver = root / (spec.compiler.driver or "missing")
+            driver.parent.mkdir(parents=True)
+            driver.write_bytes(b"#!/bin/sh\nexit 0\n")
+            driver.chmod(0o755)
+            provisioned = ProvisionedSysroot(
+                spec,
+                root,
+                root / (spec.sysroot_subdir or "."),
+                root / spec.libc,
+                root / spec.loader,
+            )
+            with self.assertRaisesRegex(SysrootError, "runtime directories are missing"):
+                _ = provisioned.compiler_argv
 
     def test_guest_absolute_interpreter_symlink_resolves_inside_sysroot(self) -> None:
         spec = resolve_sysroot("x86_64", lane="glibc-2.23")

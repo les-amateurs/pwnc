@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "default_lane": "glibc-2.39",
   "bootlin_releases": {
     "glibc-2.24": {
@@ -55,6 +55,86 @@
     }
   },
   "packages": {
+    "noble-binutils-mips64": {
+      "name": "binutils-mips64-linux-gnuabi64_2.42-2ubuntu1cross5_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/b/binutils-mipsen/binutils-mips64-linux-gnuabi64_2.42-2ubuntu1cross5_amd64.deb",
+      "sha256": "2d4e43ce4af2c1e8723af3baf16931d6e0e3486cd0b5ea9587aecfd3bdd55551"
+    },
+    "noble-binutils-mips64el": {
+      "name": "binutils-mips64el-linux-gnuabi64_2.42-2ubuntu1cross5_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/b/binutils-mipsen/binutils-mips64el-linux-gnuabi64_2.42-2ubuntu1cross5_amd64.deb",
+      "sha256": "5ffd21f0449963fe6473fde6fd65deab675035df7bb2b7a4dd314c30ba81b9e4"
+    },
+    "noble-binutils-sparc64": {
+      "name": "binutils-sparc64-linux-gnu_2.42-4ubuntu2.10_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/b/binutils/binutils-sparc64-linux-gnu_2.42-4ubuntu2.10_amd64.deb",
+      "sha256": "eae20ad9c327f65a9980b5228f769e63923e0df3a6661b513c46fd55e1bea8b2"
+    },
+    "noble-cpp-13-mips64": {
+      "name": "cpp-13-mips64-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-mipsen/cpp-13-mips64-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "sha256": "bf2c9cf63a7f41b0006130595ffd736acbd525e3631af31fad0ff6f612c5eaec"
+    },
+    "noble-cpp-13-mips64el": {
+      "name": "cpp-13-mips64el-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-mipsen/cpp-13-mips64el-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "sha256": "95b6806ffbd37f55953973262f65893e9aee36b0ebf9ae6168d99d3662c4ad08"
+    },
+    "noble-cpp-13-sparc64": {
+      "name": "cpp-13-sparc64-linux-gnu_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-ports/cpp-13-sparc64-linux-gnu_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "sha256": "3a0e928b7e77a69184141b01b5b84ef808e3487a430bebb45f700770cc296017"
+    },
+    "noble-gcc-13-mips64": {
+      "name": "gcc-13-mips64-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-mipsen/gcc-13-mips64-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "sha256": "5e829ee5149d0805eaba8999ec010669957ff763791c267175f8af0aa02988d8"
+    },
+    "noble-gcc-13-mips64el": {
+      "name": "gcc-13-mips64el-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-mipsen/gcc-13-mips64el-linux-gnuabi64_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "sha256": "22994e62d9bd4ecee60f23176b3b33d1a8c112a76c0e435841ce4e922e0fea17"
+    },
+    "noble-gcc-13-sparc64": {
+      "name": "gcc-13-sparc64-linux-gnu_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-ports/gcc-13-sparc64-linux-gnu_13.3.0-6ubuntu2~24.04cross1_amd64.deb",
+      "sha256": "7e7c687aa529207633afa1ddde9387b0bf0aa591fb56513bb4f552767df12cd8"
+    },
+    "noble-lib32gcc-13-dev-sparc64": {
+      "name": "lib32gcc-13-dev-sparc64-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-ports/lib32gcc-13-dev-sparc64-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "sha256": "58b438bcdcbfc5d056bb51b5859bbbc9d6b2698d349a1a2c9821afab3c19ce50"
+    },
+    "noble-lib32gcc-s1-sparc64": {
+      "name": "lib32gcc-s1-sparc64-cross_14.2.0-4ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-14-cross-ports/lib32gcc-s1-sparc64-cross_14.2.0-4ubuntu2~24.04cross1_all.deb",
+      "sha256": "ffb6817bec883ff444a4f375a9ef77618bf86cfbf031ef73ab6dead248034754"
+    },
+    "noble-libgcc-13-dev-mips64": {
+      "name": "libgcc-13-dev-mips64-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-mipsen/libgcc-13-dev-mips64-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "sha256": "dc8e0985b7a1550ceacb2931e2d6da2fecf304665224a29c2e6393b9895b8ceb"
+    },
+    "noble-libgcc-13-dev-mips64el": {
+      "name": "libgcc-13-dev-mips64el-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-mipsen/libgcc-13-dev-mips64el-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "sha256": "3924d49dbb74338edb1aca83ffa2e82d02aa63d15a6ca9a6d759d4efc38eb428"
+    },
+    "noble-libgcc-13-dev-sparc64": {
+      "name": "libgcc-13-dev-sparc64-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-13-cross-ports/libgcc-13-dev-sparc64-cross_13.3.0-6ubuntu2~24.04cross1_all.deb",
+      "sha256": "72a74db6a71581827583cb42b1ed469b76c251b8be11c7c3f9a28e00a4f50456"
+    },
+    "noble-libgcc-s1-mips64": {
+      "name": "libgcc-s1-mips64-cross_14.2.0-4ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-14-cross-mipsen/libgcc-s1-mips64-cross_14.2.0-4ubuntu2~24.04cross1_all.deb",
+      "sha256": "7281c26b0190aa1705abbab80def836e15f155511f8d31736b82c9227877a292"
+    },
+    "noble-libgcc-s1-mips64el": {
+      "name": "libgcc-s1-mips64el-cross_14.2.0-4ubuntu2~24.04cross1_all.deb",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gcc-14-cross-mipsen/libgcc-s1-mips64el-cross_14.2.0-4ubuntu2~24.04cross1_all.deb",
+      "sha256": "289250bc4195a92cbacf122c75c45b326bac554afe7e838802ef840a81c3c7b3"
+    },
     "noble-libc6-dev-mips64": {
       "name": "libc6-dev-mips64-cross_2.39-0ubuntu8cross2_all.deb",
       "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/cross-toolchain-base-mipsen/libc6-dev-mips64-cross_2.39-0ubuntu8cross2_all.deb",
@@ -237,11 +317,24 @@
       "targets": ["mips64-le-mips-n64"],
       "source": {
         "kind": "packages",
-        "description": "Ubuntu Noble cross-toolchain-base-mipsen N64 packages",
-        "packages": ["noble-libc6-mips64el", "noble-libc6-dev-mips64el", "noble-linux-libc-dev-mips64el"]
+        "description": "Ubuntu Noble MIPS64EL N64 compiler and runtime packages",
+        "packages": [
+          "noble-libc6-mips64el",
+          "noble-libc6-dev-mips64el",
+          "noble-linux-libc-dev-mips64el",
+          "noble-gcc-13-mips64el",
+          "noble-cpp-13-mips64el",
+          "noble-binutils-mips64el",
+          "noble-libgcc-13-dev-mips64el",
+          "noble-libgcc-s1-mips64el"
+        ]
       },
       "sysroot_subdir": "usr/mips64el-linux-gnuabi64",
-      "compiler": {"kind": "zig", "target": "mips64el-linux-gnuabi64"},
+      "compiler": {
+        "kind": "bundled-gcc",
+        "driver": "usr/bin/mips64el-linux-gnuabi64-gcc-13",
+        "argv": ["--sysroot={root}"]
+      },
       "qemu": "qemu-mips64el",
       "loader": "lib64/ld.so.1",
       "libc": "lib/libc.so.6",
@@ -255,11 +348,24 @@
       "targets": ["mips64-be-mips-n64"],
       "source": {
         "kind": "packages",
-        "description": "Ubuntu Noble cross-toolchain-base-mipsen N64 packages",
-        "packages": ["noble-libc6-mips64", "noble-libc6-dev-mips64", "noble-linux-libc-dev-mips64"]
+        "description": "Ubuntu Noble MIPS64 N64 compiler and runtime packages",
+        "packages": [
+          "noble-libc6-mips64",
+          "noble-libc6-dev-mips64",
+          "noble-linux-libc-dev-mips64",
+          "noble-gcc-13-mips64",
+          "noble-cpp-13-mips64",
+          "noble-binutils-mips64",
+          "noble-libgcc-13-dev-mips64",
+          "noble-libgcc-s1-mips64"
+        ]
       },
       "sysroot_subdir": "usr/mips64-linux-gnuabi64",
-      "compiler": {"kind": "zig", "target": "mips64-linux-gnuabi64"},
+      "compiler": {
+        "kind": "bundled-gcc",
+        "driver": "usr/bin/mips64-linux-gnuabi64-gcc-13",
+        "argv": ["--sysroot={root}"]
+      },
       "qemu": "qemu-mips64",
       "loader": "lib64/ld.so.1",
       "libc": "lib/libc.so.6",
@@ -333,20 +439,27 @@
       "targets": ["sparc32-be-sparc-sysv"],
       "source": {
         "kind": "packages",
-        "description": "Ubuntu Noble SPARC64 cross packages with SPARC V8+ multilib",
+        "description": "Ubuntu Noble SPARC64 compiler and SPARC V8+ multilib runtime packages",
         "packages": [
           "noble-libc6-sparc64",
           "noble-libc6-dev-sparc64",
           "noble-libc6-sparc-multilib",
           "noble-libc6-dev-sparc-multilib",
-          "noble-linux-libc-dev-sparc64"
+          "noble-linux-libc-dev-sparc64",
+          "noble-gcc-13-sparc64",
+          "noble-cpp-13-sparc64",
+          "noble-binutils-sparc64",
+          "noble-libgcc-13-dev-sparc64",
+          "noble-lib32gcc-13-dev-sparc64",
+          "noble-lib32gcc-s1-sparc64"
         ]
       },
       "sysroot_subdir": ".",
       "compiler": {
-        "kind": "system",
+        "kind": "bundled-gcc",
+        "driver": "usr/bin/sparc64-linux-gnu-gcc-13",
         "argv": [
-          "sparc64-linux-gnu-gcc",
+          "--sysroot={root}",
           "-m32",
           "-isystem",
           "{sysroot}/usr/sparc64-linux-gnu/include",

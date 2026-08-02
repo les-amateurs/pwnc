@@ -75,6 +75,7 @@ class CompilerSpec:
     kind: str
     target: str | None = None
     argv: tuple[str, ...] = ()
+    driver: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +133,8 @@ class SysrootSpec:
         }
         if self.interpreter is not None:
             value["interpreter"] = self.interpreter
+        if self.compiler.driver is not None:
+            value["compiler"]["driver"] = self.compiler.driver
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()[:16]
 
@@ -237,13 +240,33 @@ class ProvisionedSysroot:
             if compiler.target is None:
                 raise SysrootError(f"{self.spec.id}: Zig compiler target is missing")
             return (zig, "cc", "-target", compiler.target, "--sysroot", str(self.sysroot))
+        if compiler.kind == "bundled-gcc":
+            driver = _bundled_gcc_driver(self)
+            bundled_bin = self.root / "usr/bin"
+            host_libraries = self.root / "usr/lib/x86_64-linux-gnu"
+            if not bundled_bin.is_dir() or not host_libraries.is_dir():
+                raise SysrootError(f"{self.spec.id}: bundled GCC runtime directories are missing")
+            arguments = tuple(
+                argument.replace("{root}", str(self.root)).replace("{sysroot}", str(self.sysroot))
+                for argument in compiler.argv
+            )
+            return (
+                "/usr/bin/env",
+                f"PATH={bundled_bin}",
+                f"LD_LIBRARY_PATH={host_libraries}",
+                str(driver),
+                *arguments,
+            )
         if compiler.kind == "system":
             if not compiler.argv:
                 raise SysrootError(f"{self.spec.id}: system compiler argv is empty")
             executable = shutil.which(compiler.argv[0])
             if executable is None:
                 raise SysrootError(f"required cross compiler is unavailable: {compiler.argv[0]}")
-            arguments = tuple(argument.replace("{sysroot}", str(self.sysroot)) for argument in compiler.argv[1:])
+            arguments = tuple(
+                argument.replace("{root}", str(self.root)).replace("{sysroot}", str(self.sysroot))
+                for argument in compiler.argv[1:]
+            )
             return (executable, *arguments, f"--sysroot={self.sysroot}")
         raise SysrootError(f"{self.spec.id}: unknown compiler kind {compiler.kind!r}")
 
@@ -331,8 +354,8 @@ def validate_provisioned_sysroot(provisioned: ProvisionedSysroot) -> None:
 
 
 def _parse_manifest(raw: Any) -> SysrootManifest:
-    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-        raise SysrootError("sysroot manifest schema_version must be 1")
+    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+        raise SysrootError("sysroot manifest schema_version must be 2")
     default_lane = _required_string(raw, "default_lane")
     bootlin = raw.get("bootlin_releases")
     packages = raw.get("packages")
@@ -388,7 +411,7 @@ def _parse_manifest(raw: Any) -> SysrootManifest:
     if default_lane not in {item.lane for item in specs}:
         raise SysrootError(f"default lane does not exist: {default_lane}")
     return SysrootManifest(
-        schema_version=1,
+        schema_version=2,
         default_lane=default_lane,
         sysroots=tuple(specs),
         unsupported=MappingProxyType(unsupported),
@@ -473,9 +496,18 @@ def _parse_sysroot(
     if not isinstance(argv_raw, list) or not all(isinstance(item, str) for item in argv_raw):
         raise SysrootError(f"{spec_id}: compiler argv must be a string list")
     for argument in argv_raw:
-        remainder = argument.replace("{sysroot}", "")
+        remainder = argument.replace("{root}", "").replace("{sysroot}", "")
         if "{" in remainder or "}" in remainder:
             raise SysrootError(f"{spec_id}: unsupported compiler argv template {argument!r}")
+    driver_raw = compiler_raw.get("driver")
+    if compiler_kind == "bundled-gcc":
+        if not isinstance(driver_raw, str) or not driver_raw:
+            raise SysrootError(f"{spec_id}: bundled-gcc compiler needs a driver path")
+        driver = _normalize_guest_path(driver_raw, f"{spec_id} compiler driver")
+    elif driver_raw is not None:
+        raise SysrootError(f"{spec_id}: compiler driver is only valid for bundled-gcc")
+    else:
+        driver = None
 
     elf_raw = raw.get("elf")
     if not isinstance(elf_raw, dict):
@@ -507,7 +539,7 @@ def _parse_sysroot(
         extraction_kind=extraction_kind,
         extraction_top=extraction_top,
         sysroot_subdir=sysroot_subdir,
-        compiler=CompilerSpec(compiler_kind, target, tuple(argv_raw)),
+        compiler=CompilerSpec(compiler_kind, target, tuple(argv_raw), driver),
         qemu=_required_string(raw, "qemu"),
         interpreter=_normalize_guest_path(interpreter_raw, spec_id) if interpreter_raw is not None else None,
         loader=loader,
@@ -717,7 +749,7 @@ def _paths_from_root(spec: SysrootSpec, final: Path) -> ProvisionedSysroot:
         sysroot = (final / spec.sysroot_subdir).resolve()
         if not _is_relative_to(sysroot, final.resolve()):
             raise SysrootError(f"{spec.id}: package sysroot escapes its extraction root")
-    return ProvisionedSysroot(
+    provisioned = ProvisionedSysroot(
         spec=spec,
         root=root,
         sysroot=sysroot,
@@ -725,6 +757,27 @@ def _paths_from_root(spec: SysrootSpec, final: Path) -> ProvisionedSysroot:
         loader=_resolve_guest_path(sysroot, spec.loader),
         bootlin_compiler=compiler,
     )
+    if spec.compiler.kind == "bundled-gcc":
+        _bundled_gcc_driver(provisioned)
+    return provisioned
+
+
+def _bundled_gcc_driver(provisioned: ProvisionedSysroot) -> Path:
+    driver_path = provisioned.spec.compiler.driver
+    if driver_path is None:  # pragma: no cover - manifest parser invariant
+        raise SysrootError(f"{provisioned.spec.id}: bundled GCC driver is unspecified")
+    candidate = provisioned.root.joinpath(*PurePosixPath(driver_path).parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise SysrootError(f"{provisioned.spec.id}: bundled GCC driver is missing: {candidate}") from exc
+    if not _is_relative_to(resolved, provisioned.root.resolve()):
+        raise SysrootError(f"{provisioned.spec.id}: bundled GCC driver escapes its extraction root")
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise SysrootError(f"{provisioned.spec.id}: bundled GCC driver is not executable: {candidate}")
+    # Preserve the installed path rather than its resolved target.  Like the
+    # Bootlin wrapper, GCC derives its relocatable prefix from argv[0].
+    return candidate.absolute()
 
 
 def _find_bootlin_compiler(root: Path) -> Path:
@@ -830,7 +883,10 @@ def _write_completion_marker(final: Path, spec: SysrootSpec, provisioned: Provis
 def _provisioned_file_integrity(final: Path, provisioned: ProvisionedSysroot) -> dict[str, dict[str, str | None]]:
     root = final.resolve()
     records: dict[str, dict[str, str | None]] = {}
-    for label, path in (("libc", provisioned.libc), ("loader", provisioned.loader)):
+    paths = [("libc", provisioned.libc), ("loader", provisioned.loader)]
+    if provisioned.spec.compiler.kind == "bundled-gcc":
+        paths.append(("compiler", _bundled_gcc_driver(provisioned)))
+    for label, path in paths:
         resolved = path.resolve(strict=True)
         if not _is_relative_to(resolved, root):
             raise SysrootError(f"{provisioned.spec.id}: cached {label} escapes its extraction root")
