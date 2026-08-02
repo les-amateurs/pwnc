@@ -354,6 +354,39 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(plan.apply(resolver.memory), chain.byte_length)
         self.assertEqual(backend.read(slot, chain.byte_length), chain.materialize())
 
+    def test_environ_classifies_returns_and_infers_pie_base_automatically(self) -> None:
+        target, backend, resolver, libc_base, main_base, stack, slot, return_address = self._return_fixture()
+        automatic = ExactProcessDiscovery(
+            self.memory(target, backend, invalid_safe=True),
+            main=resolver.main,
+            libc=resolver.libc,
+        )
+        stack_result = automatic.libc_to_stack(
+            PointerLeak(libc_base + 0x100),
+            libc_base=libc_base,
+            stack_base=stack.address,
+            stack_span=stack,
+        )
+
+        candidates = automatic.environ_to_main_returns(stack_result)
+        selected = automatic.environ_to_main_return(stack_result, symbol="main")
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(selected.main_base, main_base)
+        self.assertEqual((selected.slot_address, selected.return_address), (slot, return_address))
+
+    def test_pie_base_inference_requires_safe_invalid_reads_or_override(self) -> None:
+        _target, _backend, resolver, libc_base, _main_base, stack, _slot, _return_address = self._return_fixture()
+        stack_result = resolver.libc_to_stack(
+            PointerLeak(libc_base + 0x100),
+            libc_base=libc_base,
+            stack_base=stack.address,
+            stack_span=stack,
+        )
+
+        with self.assertRaisesRegex(ConstraintError, "invalid_read_safe"):
+            resolver.environ_to_main_returns(stack_result)
+
     def test_return_slots_remain_strictly_ambiguous(self) -> None:
         _target, backend, resolver, libc_base, main_base, stack, slot, return_address = self._return_fixture()
         backend.map(slot + 0x10, resolver.target.pack(return_address))
@@ -543,7 +576,7 @@ class DiscoveryTests(unittest.TestCase):
         source = self.root / "source.c"
         shared = self.root / "libsource.so"
         source.write_text(
-            "extern long loader_owned;\nlong read_loader_owned(void) { return loader_owned; }\n",
+            "extern long _rtld_global;\nlong read_loader_owned(void) { return _rtld_global; }\n",
             encoding="utf-8",
         )
         subprocess.run(
@@ -553,14 +586,14 @@ class DiscoveryTests(unittest.TestCase):
         )
         libc = ExactELFAdapter.from_file(shared)
         target = libc.target
-        loader = exact_adapter(self.root, target, "ld-synthetic.so")
+        loader = exact_adapter(self.root, target, "ld-synthetic.so", symbols={"_rtld_global": 0x180})
         backend = SparseMemory()
         libc_base, loader_base = 0x500000, 0x700000
         map_adapter(backend, libc, libc_base)
         map_adapter(backend, loader, loader_base)
         elf = libc.fresh_elf(runtime_base=libc_base)
         try:
-            loader_slot = int(elf.got["loader_owned"])
+            loader_slot = int(elf.got["_rtld_global"])
         finally:
             elf.close()
         backend.map(loader_slot, target.pack(loader_base + 0x180))
@@ -569,11 +602,11 @@ class DiscoveryTests(unittest.TestCase):
         result = resolver.libc_to_loader(
             PointerLeak(libc_base + 0x100),
             libc_base=libc_base,
-            loader_base=loader_base,
         )
 
         self.assertEqual(result.base, loader_base)
         self.assertEqual(result.leak.address, loader_slot)
+        self.assertEqual(result.leak.symbol, "_rtld_global")
         self.assertIn("GOT slot", result.evidence[0])
 
 

@@ -790,7 +790,38 @@ class ExactProcessDiscovery:
         eligible = [(value, name) for name, value in adapter.symbols.items() if value <= offset]
         return max(eligible, default=(0, None))[1]
 
-    def environ_to_main_return(
+    def _main_bases_from_pointer(self, pointer: int) -> tuple[int, ...]:
+        """Infer PIE load bias from exact executable-segment geometry.
+
+        A return address must occupy one page of an executable ``PT_LOAD``.
+        Enumerating those usually few relative pages is both bounded and much
+        cheaper than walking hundreds of pages backward for every stack word.
+        Full ELF/program-header validation still decides each candidate.
+        """
+
+        assert self.main is not None
+        normalized = self._normalize_code_pointer(self.target, pointer)
+        pointer_page = normalized & -self.runtime_page_size
+        candidates: list[int] = []
+        for load in self.main.profile.load_ranges:
+            if not load.executable or not load.size:
+                continue
+            first_page = load.start & -self.runtime_page_size
+            final_page = (load.end - 1) & -self.runtime_page_size
+            for relative_page in range(first_page, final_page + self.runtime_page_size, self.runtime_page_size):
+                base = pointer_page - relative_page
+                if base < 0 or base % self.runtime_page_size or base in candidates:
+                    continue
+                if not self._pointer_in_image(normalized, self.main, base):
+                    continue
+                try:
+                    self._validate_runtime_image(self.main, base)
+                except (DiscoveryError, MemoryAccessError):
+                    continue
+                candidates.append(base)
+        return tuple(candidates)
+
+    def environ_to_main_returns(
         self,
         stack: StackResolution | PointerLeak | int,
         *,
@@ -801,9 +832,16 @@ class ExactProcessDiscovery:
         scan_before: int = 0x10000,
         scan_after: int = 0,
         require_call_continuation: bool = True,
-    ) -> MainReturnAddress:
+    ) -> tuple[MainReturnAddress, ...]:
+        """Classify every saved main-image return address in a stack span.
+
+        PIE load bias is inferred from exact executable-segment geometry when
+        ``main_base`` is omitted.  Pass ``main_base`` to avoid speculative
+        image reads when the primitive cannot safely reject invalid pages.
+        """
+
         if self.main is None:
-            raise ConstraintError("environ_to_main_return requires an exact main ELF adapter")
+            raise ConstraintError("environ_to_main_returns requires an exact main ELF adapter")
         if isinstance(stack, StackResolution):
             environ_pointer = stack.environ_pointer
             stack_base = stack.base if stack_base is None else stack_base
@@ -816,9 +854,12 @@ class ExactProcessDiscovery:
         if resolved_main_base is None:
             if not self.main.profile.pie:
                 resolved_main_base = 0
-            else:
-                raise ConstraintError("PIE return classification requires main_base")
-        self._validate_runtime_image(self.main, resolved_main_base)
+            elif not self.memory.traits.invalid_read_safe:
+                raise ConstraintError(
+                    "inferring PIE main base requires invalid_read_safe or an explicit main_base"
+                )
+        if resolved_main_base is not None:
+            self._validate_runtime_image(self.main, resolved_main_base)
 
         if stack_span is None:
             before = _integer(scan_before, "scan_before")
@@ -839,53 +880,94 @@ class ExactProcessDiscovery:
             slots = (DiscoveryCandidate(slot, self.memory.read_ptr(slot), "stack-pointer"),)
         else:
             slots = self.scan_pointers(stack_span)
-        candidates: list[tuple[DiscoveryCandidate, int | None, str | None]] = []
+        candidates: list[MainReturnAddress] = []
         for item in slots:
             normalized = self._normalize_code_pointer(self.target, item.value)
-            if not self._pointer_in_image(normalized, self.main, resolved_main_base):
-                continue
-            executable = any(
-                start <= normalized < end and load.executable
-                for start, end, load in self._runtime_ranges(self.main, resolved_main_base)
+            bases = (
+                (resolved_main_base,)
+                if resolved_main_base is not None
+                else self._main_bases_from_pointer(normalized)
             )
-            if not executable:
-                continue
-            call_site = self._call_site(normalized, self.main, resolved_main_base)
-            if require_call_continuation and call_site is None:
-                continue
-            offset = normalized - resolved_main_base
-            symbol = self._nearest_symbol(self.main, offset)
-            classification = (
-                ReturnClassification.SYMBOLIZED_CALL_CONTINUATION.value
-                if call_site is not None and symbol is not None
-                else ReturnClassification.CALL_CONTINUATION.value
-                if call_site is not None
-                else ReturnClassification.MAIN_EXECUTABLE_POINTER.value
-            )
-            candidates.append(
-                (
-                    DiscoveryCandidate(
+            for candidate_base in bases:
+                executable = any(
+                    start <= normalized < end and load.executable
+                    for start, end, load in self._runtime_ranges(self.main, candidate_base)
+                )
+                if not executable:
+                    continue
+                call_site = self._call_site(normalized, self.main, candidate_base)
+                if require_call_continuation and call_site is None:
+                    continue
+                offset = normalized - candidate_base
+                symbol = self._nearest_symbol(self.main, offset)
+                classification = (
+                    ReturnClassification.SYMBOLIZED_CALL_CONTINUATION
+                    if call_site is not None and symbol is not None
+                    else ReturnClassification.CALL_CONTINUATION
+                    if call_site is not None
+                    else ReturnClassification.MAIN_EXECUTABLE_POINTER
+                )
+                candidates.append(
+                    MainReturnAddress(
                         item.address,
                         item.value,
-                        classification,
-                        ("points into exact main executable PT_LOAD",),
+                        candidate_base,
                         offset,
-                    ),
-                    call_site,
-                    symbol,
+                        call_site,
+                        classification,
+                        symbol,
+                        ("points into exact main executable PT_LOAD",),
+                    )
                 )
-            )
-        chosen = self._one("main return address", [item for item, _site, _symbol in candidates])
-        call_site, symbol = next((site, symbol) for item, site, symbol in candidates if item == chosen)
-        return MainReturnAddress(
-            chosen.address,
-            chosen.value,
-            resolved_main_base,
-            chosen.image_offset or 0,
-            call_site,
-            ReturnClassification(chosen.classification),
-            symbol,
-            chosen.evidence,
+        unique = {(item.slot_address, item.return_address, item.main_base): item for item in candidates}
+        return tuple(sorted(unique.values(), key=lambda item: item.slot_address))
+
+    def environ_to_main_return(
+        self,
+        stack: StackResolution | PointerLeak | int,
+        *,
+        stack_base: int | None = None,
+        stack_span: MemorySpan | None = None,
+        main_base: int | None = None,
+        return_slot: int | None = None,
+        symbol: str | None = None,
+        scan_before: int = 0x10000,
+        scan_after: int = 0,
+        require_call_continuation: bool = True,
+    ) -> MainReturnAddress:
+        """Return one strict classification, optionally filtered by symbol."""
+
+        if symbol is not None and (not isinstance(symbol, str) or not symbol):
+            raise ValueError("symbol must be a non-empty str or None")
+        candidates = self.environ_to_main_returns(
+            stack,
+            stack_base=stack_base,
+            stack_span=stack_span,
+            main_base=main_base,
+            return_slot=return_slot,
+            scan_before=scan_before,
+            scan_after=scan_after,
+            require_call_continuation=require_call_continuation,
+        )
+        if symbol is not None:
+            candidates = tuple(item for item in candidates if item.symbol == symbol)
+        chosen = self._one(
+            "main return address",
+            tuple(
+                DiscoveryCandidate(
+                    item.slot_address,
+                    item.return_address,
+                    item.classification.value,
+                    item.evidence,
+                    item.main_offset,
+                )
+                for item in candidates
+            ),
+        )
+        return next(
+            item
+            for item in candidates
+            if item.slot_address == chosen.address and item.return_address == chosen.value
         )
 
     def plan_rop_insertion(
@@ -930,16 +1012,21 @@ class ExactProcessDiscovery:
         write = PlannedMemoryWrite(slot, expected, replacement, "replace saved return address with flat ROP chain")
         return ROPInsertionPlan(self.target, return_site, (write,), chain)
 
-    def _pwntools_got_slots(self, adapter: ExactELFAdapter, base: int) -> tuple[int, ...]:
+    def _pwntools_got_entries(self, adapter: ExactELFAdapter, base: int) -> tuple[tuple[str, int], ...]:
         # ExactELFAdapter/pwntools ``ELF.address`` means the runtime address of
         # the lowest PT_LOAD.  RuntimeLayout and link_map l_addr mean additive
         # ELF load bias.  They differ for an ET_EXEC linked at e.g. 0x400000.
         lowest_load = min(item.start for item in adapter.profile.load_ranges)
         elf = adapter.fresh_elf(runtime_base=base + lowest_load)
         try:
-            return tuple(sorted({int(value) for value in elf.got.values()}))
+            return tuple(sorted((str(name), int(value)) for name, value in elf.got.items()))
         finally:
             elf.close()
+
+    def _pwntools_got_slots(self, adapter: ExactELFAdapter, base: int) -> tuple[int, ...]:
+        """Return unique rebased GOT slots while preserving the older helper boundary."""
+
+        return tuple(sorted({slot for _name, slot in self._pwntools_got_entries(adapter, base)}))
 
     def libc_to_loader(
         self,
@@ -979,17 +1066,15 @@ class ExactProcessDiscovery:
             )
             return ImageResolution(Image.LOADER, base, self.loader, leak, ("explicit pointer",))
 
-        got_slots = self._pwntools_got_slots(self.libc, resolved_libc)
-        slots: list[int] = list(got_slots)
-        slot_sources = {slot: "resolved libc GOT slot" for slot in got_slots}
+        got_entries = self._pwntools_got_entries(self.libc, resolved_libc)
         matches: list[tuple[DiscoveryCandidate, int]] = []
 
-        def collect(candidate_slots: Sequence[int]) -> None:
-            for slot in dict.fromkeys(candidate_slots):
+        def collect(candidate_slots: Sequence[tuple[int, str | None, str]]) -> None:
+            for slot, symbol, source in dict.fromkeys(candidate_slots):
                 pointer = self.memory.read_ptr(slot)
                 try:
                     base = self._base_from_leak(
-                        PointerLeak(pointer, slot),
+                        PointerLeak(pointer, slot, symbol=symbol),
                         self.loader,
                         loader_base,
                         image_name="loader",
@@ -997,7 +1082,6 @@ class ExactProcessDiscovery:
                     )
                 except DiscoveryError:
                     continue
-                source = slot_sources.get(slot, "exact libc writable PT_LOAD")
                 matches.append(
                     (
                         DiscoveryCandidate(
@@ -1011,7 +1095,29 @@ class ExactProcessDiscovery:
                     )
                 )
 
-        collect(slots)
+        # These libc relocations point at data symbols owned by ld.so.  Keeping
+        # the relocation name lets the exact loader turn one pointer into its
+        # load bias without probing any unknown page.  `_rtld_global` is
+        # present in every pinned glibc sysroot; the remaining names are useful
+        # corroboration and compatibility fallbacks.
+        preferred_names = ("_rtld_global", "_rtld_global_ro", "__libc_stack_end", "_dl_argv")
+        named = {name: slot for name, slot in got_entries if name in self.loader.symbols}
+        preferred = [
+            (named[name], name, f"resolved libc GOT slot for {name}")
+            for name in preferred_names
+            if name in named
+        ]
+        preferred.extend(
+            (slot, name, f"resolved libc GOT slot for {name}")
+            for name, slot in got_entries
+            if name in self.loader.symbols and name not in preferred_names
+        )
+        collect(preferred)
+
+        # Unnamed pointers require either a caller-supplied base or a primitive
+        # which explicitly tolerates invalid exploratory reads.
+        if not matches and (loader_base is not None or self.memory.traits.invalid_read_safe):
+            collect([(slot, None, "resolved libc GOT slot") for _name, slot in got_entries])
         if not matches:
             fallback_slots: list[int] = []
             for span in self._image_scan_spans(
@@ -1021,7 +1127,8 @@ class ExactProcessDiscovery:
                 writable_only=True,
             ):
                 fallback_slots.extend(item.address for item in self.scan_pointers(span))
-            collect(fallback_slots)
+            if loader_base is not None or self.memory.traits.invalid_read_safe:
+                collect([(slot, None, "exact libc writable PT_LOAD") for slot in fallback_slots])
         by_base: dict[int, list[DiscoveryCandidate]] = {}
         for item, base in matches:
             by_base.setdefault(base, []).append(item)
@@ -1029,11 +1136,15 @@ class ExactProcessDiscovery:
         chosen = self._one("libc-to-loader resolution", representatives)
         base = next(base for base, items in by_base.items() if chosen in items)
         corroboration = tuple(item.address for item in by_base[base])
+        leaked_symbol = next(
+            (name for name, slot in got_entries if slot == chosen.address and name in self.loader.symbols),
+            None,
+        )
         return ImageResolution(
             Image.LOADER,
             base,
             self.loader,
-            PointerLeak(chosen.value, chosen.address),
+            PointerLeak(chosen.value, chosen.address, leaked_symbol),
             chosen.evidence + (f"corroborating pointer slots: {', '.join(hex(item) for item in corroboration)}",),
         )
 
