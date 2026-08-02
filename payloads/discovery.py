@@ -110,6 +110,10 @@ class MemorySpan:
         return self.address <= address and address + size <= self.end
 
 
+def _same_span_bounds(left: MemorySpan, right: MemorySpan) -> bool:
+    return left.address == right.address and left.size == right.size
+
+
 @dataclass(frozen=True, slots=True)
 class PointerLeak:
     value: int
@@ -650,6 +654,14 @@ class ExactProcessDiscovery:
             raise ConstraintError("heap_to_libc requires an exact libc adapter")
         if isinstance(heap_leak, HeapResolution):
             origin = heap_leak.pointer
+            if heap_base is not None and heap_leak.base is not None and heap_base != heap_leak.base:
+                raise ConstraintError("heap_base override conflicts with HeapResolution.base")
+            if (
+                heap_span is not None
+                and heap_leak.span is not None
+                and not _same_span_bounds(heap_span, heap_leak.span)
+            ):
+                raise ConstraintError("heap_span override conflicts with HeapResolution.span")
             heap_base = heap_leak.base if heap_base is None else heap_base
             heap_span = heap_leak.span if heap_span is None else heap_span
         elif isinstance(heap_leak, PointerLeak):
@@ -1068,6 +1080,10 @@ class ExactProcessDiscovery:
             raise ConstraintError("environ_to_main_returns requires an exact main ELF adapter")
         if isinstance(stack, StackResolution):
             environ_pointer = stack.environ_pointer
+            if stack_base is not None and stack.base is not None and stack_base != stack.base:
+                raise ConstraintError("stack_base override conflicts with StackResolution.base")
+            if stack_span is not None and stack.span is not None and not _same_span_bounds(stack_span, stack.span):
+                raise ConstraintError("stack_span override conflicts with StackResolution.span")
             stack_base = stack.base if stack_base is None else stack_base
             stack_span = stack.span if stack_span is None else stack_span
         elif isinstance(stack, PointerLeak):

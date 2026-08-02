@@ -10,9 +10,11 @@ from payloads.discovery import (
     DiscoveryError,
     DiscoveryNotFoundError,
     ExactProcessDiscovery,
+    HeapResolution,
     ImageResolution,
     MemorySpan,
     PointerLeak,
+    StackResolution,
 )
 from payloads.elf import ELFImageKind
 from payloads.errors import ConstraintError, MemoryAccessError
@@ -197,6 +199,45 @@ class DiscoveryRegressionTests(unittest.TestCase):
                 heap_base=heap.address + 0x1000,
                 heap_span=heap,
                 libc_base=libc_base,
+            )
+
+    def test_composed_resolution_overrides_must_preserve_established_facts(self) -> None:
+        target = resolve_target("x86_64")
+        backend = SparseMemory()
+        libc = exact_adapter(self.root, target, "libc-composed-assertions.so.6")
+        libc_base = 0x700000
+        map_adapter(backend, libc, libc_base)
+        resolver = ExactProcessDiscovery(self.memory(target, backend), libc=libc)
+        heap = HeapResolution(0x500123, 0x500000, None, None)
+
+        with self.assertRaisesRegex(ConstraintError, "conflicts with HeapResolution"):
+            resolver.heap_to_libc(
+                heap,
+                heap_base=0x600000,
+                libc_base=libc_base,
+                libc_pointer=libc_base + 0x100,
+            )
+
+        main = exact_adapter(
+            self.root,
+            target,
+            "main-composed-assertions",
+            pie=True,
+            image_kind=ELFImageKind.PIE_EXECUTABLE,
+        )
+        main_base = 0x400000
+        map_adapter(backend, main, main_base)
+        established = MemorySpan(0x7FFF0000, 0x100, "established stack")
+        conflicting = MemorySpan(0x7FFE0000, 0x100, "unrelated stack")
+        stack = StackResolution(0x701000, established.address + 0x80, None, None, established)
+        main_resolver = ExactProcessDiscovery(self.memory(target, backend), main=main)
+
+        with self.assertRaisesRegex(ConstraintError, "conflicts with StackResolution"):
+            main_resolver.environ_to_main_returns(
+                stack,
+                stack_span=conflicting,
+                main_base=main_base,
+                return_slot=conflicting.address,
             )
 
     def test_unsafe_remote_reads_require_explicit_scan_spans(self) -> None:

@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import logging
 import warnings
+import weakref
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import InitVar, dataclass, replace
 from hashlib import sha256
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import mkdtemp
 from types import MappingProxyType
 
 from pwnlib.context import context
@@ -200,25 +201,67 @@ def _same_profile_facts(left: ELFProfile, right: ELFProfile) -> bool:
     return replace(left, path="") == replace(right, path="")
 
 
+def _cleanup_snapshot(mapping: object | None, file: object | None, path: Path) -> None:
+    for resource in (mapping, file):
+        close = getattr(resource, "close", None)
+        if close is not None:
+            try:
+                close()
+            except (BufferError, OSError, ValueError):
+                pass
+    directory = path.parent
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
 class _SnapshotELF(ELF):
-    """Pwntools ELF backed by a private immutable artifact snapshot."""
+    """Pwntools ELF backed by a private read-only artifact snapshot."""
 
     def __init__(self, raw: bytes, *, checksec: bool = False) -> None:
-        with NamedTemporaryFile(prefix="pwnc-exact-elf-", suffix=".elf", delete=False) as snapshot:
-            snapshot.write(raw)
-            snapshot_path = Path(snapshot.name)
+        snapshot_directory = Path(mkdtemp(prefix="pwnc-exact-elf-"))
+        snapshot_path = snapshot_directory / "artifact.elf"
         self._pwnc_snapshot_path = snapshot_path
         try:
+            snapshot_path.write_bytes(raw)
+            snapshot_path.chmod(0o400)
+            snapshot_directory.chmod(0o500)
+            # Preserve the inspector's stable domain errors and bind pwntools
+            # to the same private snapshot used for independent profiling.
+            self._pwnc_profile = inspect_elf(snapshot_path)
             super().__init__(str(snapshot_path), checksec=checksec)
+            self._pwnc_finalizer = weakref.finalize(
+                self,
+                _cleanup_snapshot,
+                self.mmap,
+                self.file,
+                snapshot_path,
+            )
         except Exception:
-            snapshot_path.unlink(missing_ok=True)
+            _cleanup_snapshot(getattr(self, "mmap", None), getattr(self, "file", None), snapshot_path)
             raise
 
     def close(self) -> None:
+        finalizer = getattr(self, "_pwnc_finalizer", None)
+        if finalizer is not None:
+            finalizer()
+
+    def verify_snapshot(self, expected_sha256: str) -> None:
         try:
-            super().close()
-        finally:
-            self._pwnc_snapshot_path.unlink(missing_ok=True)
+            raw = self._pwnc_snapshot_path.read_bytes()
+        except OSError as exc:
+            raise PwntoolsCompatibilityError("the private ELF snapshot disappeared") from exc
+        if sha256(raw).hexdigest() != expected_sha256:
+            raise PwntoolsCompatibilityError("the private ELF snapshot changed during pwntools processing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +295,7 @@ class ExactELFAdapter:
         with _suppress_missing_got_warning(), context.local(log_level="error"):
             elf = _SnapshotELF(raw, checksec=False)
             try:
-                independently_inspected = replace(inspect_elf(elf.path), path=str(artifact))
+                independently_inspected = replace(elf._pwnc_profile, path=str(artifact))
                 if profile is not None and not _same_profile_facts(profile, independently_inspected):
                     raise PwntoolsCompatibilityError(
                         "caller-supplied ELFProfile differs from an independent inspection of the artifact"
@@ -313,9 +356,6 @@ class ExactELFAdapter:
         if not _same_profile_facts(profile, self.profile):
             raise PwntoolsCompatibilityError("ELFProfile byte-derived facts differ from the adapter profile")
 
-    def _revalidate_bytes(self) -> None:
-        self.verified_artifact_bytes()
-
     def verified_artifact_bytes(self) -> bytes:
         """Return one digest-checked snapshot of the exact local artifact."""
 
@@ -344,6 +384,7 @@ class ExactELFAdapter:
             elf = _SnapshotELF(raw, checksec=False)
             try:
                 _crosscheck_pwntools_elf(elf, self.profile)
+                elf.verify_snapshot(self.identity.sha256)
             except Exception:
                 elf.close()
                 raise
@@ -411,6 +452,10 @@ class ExactELFAdapter:
                 ),
             ):
                 rop = ROP(images)
+            for adapter, image in zip((self, *(item[0] for item in normalized)), images, strict=True):
+                if not isinstance(image, _SnapshotELF):  # pragma: no cover - fresh_elf is fixed above
+                    raise PwntoolsCompatibilityError("pwntools ROP image is not backed by a private snapshot")
+                image.verify_snapshot(adapter.identity.sha256)
         except Exception:
             for image in images:
                 image.close()

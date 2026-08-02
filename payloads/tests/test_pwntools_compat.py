@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import gc
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -12,6 +15,7 @@ from pwnlib.context import context
 
 from payloads import (
     SUPPORTED_TARGETS,
+    ELFInspectionError,
     ELFRange,
     Relro,
     inspect_elf,
@@ -185,19 +189,68 @@ class ExactELFAdapterTests(unittest.TestCase):
         self.assertEqual(Path(adapter.path), self.artifact.resolve())
         adapter.crosscheck_profile(profile)
 
-    def test_fresh_elf_uses_a_digest_checked_immutable_snapshot(self) -> None:
+    def test_fresh_elf_uses_a_digest_checked_read_only_snapshot(self) -> None:
         adapter = ExactELFAdapter.from_file(self.artifact)
         original = self.artifact.read_bytes()
         elf = adapter.fresh_elf()
         snapshot = Path(elf.path)
         try:
             self.assertNotEqual(snapshot, self.artifact.resolve())
+            self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o400)
+            self.assertEqual(stat.S_IMODE(snapshot.parent.stat().st_mode), 0o500)
             self.artifact.write_bytes(original + b"changed")
             self.assertEqual(snapshot.read_bytes(), original)
             self.assertEqual(bytes(elf.mmap), original)
         finally:
             elf.close()
         self.assertFalse(snapshot.exists())
+
+    def test_snapshot_parse_failure_closes_resources_and_preserves_domain_error(self) -> None:
+        malformed = self.root / "not-an-elf"
+        malformed.write_bytes(b"not an ELF")
+        snapshot_directory = self.root / "malformed-snapshot"
+        snapshot_directory.mkdir()
+        with (
+            mock.patch("payloads.pwntools_compat.mkdtemp", return_value=str(snapshot_directory)),
+            warnings.catch_warnings(record=True) as observed,
+            self.assertRaises(ELFInspectionError),
+        ):
+            warnings.simplefilter("always", ResourceWarning)
+            ExactELFAdapter.from_file(malformed)
+        gc.collect()
+        self.assertFalse(snapshot_directory.exists())
+        self.assertFalse(any(item.category is ResourceWarning for item in observed))
+
+    def test_unclosed_snapshot_is_removed_by_finalizer(self) -> None:
+        adapter = ExactELFAdapter.from_file(self.artifact)
+        elf = adapter.fresh_elf()
+        snapshot = Path(elf.path)
+
+        del elf
+        gc.collect()
+
+        self.assertFalse(snapshot.exists())
+        self.assertFalse(snapshot.parent.exists())
+
+    def test_fresh_rop_rechecks_snapshot_after_path_based_consumers(self) -> None:
+        adapter = ExactELFAdapter.from_file(self.artifact)
+        snapshots: list[Path] = []
+
+        def mutate_snapshot(images):
+            snapshot = Path(images[0].path)
+            snapshots.append(snapshot)
+            snapshot.parent.chmod(0o700)
+            snapshot.chmod(0o600)
+            snapshot.write_bytes(b"changed during ROP scan")
+            return mock.Mock()
+
+        with (
+            mock.patch("payloads.pwntools_compat.ROP", side_effect=mutate_snapshot),
+            self.assertRaisesRegex(PwntoolsCompatibilityError, "snapshot changed"),
+        ):
+            adapter.fresh_rop()
+        self.assertEqual(len(snapshots), 1)
+        self.assertFalse(snapshots[0].parent.exists())
 
     def test_profile_crosscheck_rejects_mitigation_drift(self) -> None:
         adapter = ExactELFAdapter.from_file(self.artifact)
