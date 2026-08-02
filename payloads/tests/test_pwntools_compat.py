@@ -10,7 +10,13 @@ from unittest import mock
 
 from pwnlib.context import context
 
-from payloads import SUPPORTED_TARGETS, Relro, inspect_elf, resolve_target
+from payloads import (
+    SUPPORTED_TARGETS,
+    ELFRange,
+    Relro,
+    inspect_elf,
+    resolve_target,
+)
 from payloads.libc import LibcIdentity
 from payloads.pwntools_compat import (
     ExactELFAdapter,
@@ -136,9 +142,62 @@ class ExactELFAdapterTests(unittest.TestCase):
             ExactELFAdapter.from_file(self.artifact, expected_target=resolve_target("x86"))
 
         adapter = ExactELFAdapter.from_file(self.artifact)
+        self.assertEqual(adapter.verified_artifact_bytes(), self.artifact.read_bytes())
         self.artifact.write_bytes(self.artifact.read_bytes() + b"changed")
         with self.assertRaisesRegex(PwntoolsCompatibilityError, "changed after"):
+            adapter.verified_artifact_bytes()
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "changed after"):
             adapter.fresh_elf()
+
+    def test_caller_profile_cannot_forge_runtime_identity_ranges(self) -> None:
+        profile = inspect_elf(self.artifact)
+        load = next(item for item in profile.load_ranges if item.readable and item.file_size >= 0x20)
+        fake_dynamic = ELFRange(
+            load.start,
+            load.start + 0x10,
+            load.permissions,
+            load.file_offset,
+            0x10,
+            8,
+            "PT_DYNAMIC",
+        )
+        forged = replace(profile, dynamic_range=fake_dynamic)
+
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "independent inspection"):
+            ExactELFAdapter.from_file(self.artifact, profile=forged)
+
+        legitimate = ExactELFAdapter.from_file(self.artifact)
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "from_file"):
+            ExactELFAdapter(
+                legitimate.path,
+                legitimate.identity,
+                forged,
+                legitimate.symbols,
+                legitimate.mitigations,
+            )
+
+    def test_profile_path_alias_does_not_change_authenticated_facts(self) -> None:
+        alias = self.root / "libc-alias.so"
+        alias.symlink_to(self.artifact.name)
+        profile = inspect_elf(alias)
+        adapter = ExactELFAdapter.from_file(alias, profile=profile)
+
+        self.assertEqual(Path(adapter.path), self.artifact.resolve())
+        adapter.crosscheck_profile(profile)
+
+    def test_fresh_elf_uses_a_digest_checked_immutable_snapshot(self) -> None:
+        adapter = ExactELFAdapter.from_file(self.artifact)
+        original = self.artifact.read_bytes()
+        elf = adapter.fresh_elf()
+        snapshot = Path(elf.path)
+        try:
+            self.assertNotEqual(snapshot, self.artifact.resolve())
+            self.artifact.write_bytes(original + b"changed")
+            self.assertEqual(snapshot.read_bytes(), original)
+            self.assertEqual(bytes(elf.mmap), original)
+        finally:
+            elf.close()
+        self.assertFalse(snapshot.exists())
 
     def test_profile_crosscheck_rejects_mitigation_drift(self) -> None:
         adapter = ExactELFAdapter.from_file(self.artifact)

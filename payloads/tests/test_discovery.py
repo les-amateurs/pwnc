@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 
 from payloads.arbio import ArbitraryMemory, IOPrimitiveTraits
 from payloads.discovery import (
@@ -65,11 +66,13 @@ def exact_adapter(
     pie: bool = False,
     image_kind: ELFImageKind = ELFImageKind.SHARED_OBJECT,
     patches: dict[int, bytes] | None = None,
+    runtime_build_id: bool = True,
 ) -> ExactELFAdapter:
     data = bytearray(size)
     byteorder = target.endian.value
     header_size = 64 if target.bits == 64 else 52
     phentsize = 56 if target.bits == 64 else 32
+    build_id_bytes = hashlib.sha1(f"{target.name}:{name}".encode()).digest() if runtime_build_id else None
     machine = {
         "x86": 3,
         "x86_64": 62,
@@ -105,7 +108,7 @@ def exact_adapter(
         put(32, header_size, 8)
         put(52, header_size, 2)
         put(54, phentsize, 2)
-        put(56, 2, 2)
+        put(56, 3 if build_id_bytes is not None else 2, 2)
         phdr = header_size
         put(phdr, 1, 4)
         put(phdr + 4, segment_flags, 4)
@@ -124,11 +127,21 @@ def exact_adapter(
         put(dynamic_phdr + 32, 0x80, 8)
         put(dynamic_phdr + 40, 0x80, 8)
         put(dynamic_phdr + 48, target.word_size, 8)
+        if build_id_bytes is not None:
+            note_phdr = dynamic_phdr + phentsize
+            put(note_phdr, 4, 4)
+            put(note_phdr + 4, 4, 4)
+            put(note_phdr + 8, 0x400, 8)
+            put(note_phdr + 16, start + 0x400, 8)
+            put(note_phdr + 24, start + 0x400, 8)
+            put(note_phdr + 32, 0x24, 8)
+            put(note_phdr + 40, 0x24, 8)
+            put(note_phdr + 48, 4, 8)
     else:
         put(28, header_size, 4)
         put(40, header_size, 2)
         put(42, phentsize, 2)
-        put(44, 2, 2)
+        put(44, 3 if build_id_bytes is not None else 2, 2)
         phdr = header_size
         put(phdr, 1, 4)
         put(phdr + 4, 0, 4)
@@ -147,6 +160,22 @@ def exact_adapter(
         put(dynamic_phdr + 20, 0x80, 4)
         put(dynamic_phdr + 24, segment_flags, 4)
         put(dynamic_phdr + 28, target.word_size, 4)
+        if build_id_bytes is not None:
+            note_phdr = dynamic_phdr + phentsize
+            put(note_phdr, 4, 4)
+            put(note_phdr + 4, 0x400, 4)
+            put(note_phdr + 8, start + 0x400, 4)
+            put(note_phdr + 12, start + 0x400, 4)
+            put(note_phdr + 16, 0x24, 4)
+            put(note_phdr + 20, 0x24, 4)
+            put(note_phdr + 24, 4, 4)
+            put(note_phdr + 28, 4, 4)
+    if build_id_bytes is not None:
+        put(0x400, 4, 4)
+        put(0x404, len(build_id_bytes), 4)
+        put(0x408, 3, 4)
+        data[0x40C:0x410] = b"GNU\0"
+        data[0x410 : 0x410 + len(build_id_bytes)] = build_id_bytes
     for offset, value in (patches or {}).items():
         data[offset : offset + len(value)] = value
     path = root / name
@@ -167,11 +196,24 @@ def exact_adapter(
         target.word_size,
         "PT_DYNAMIC",
     )
+    build_id_range = (
+        ELFRange(
+            start + 0x410,
+            start + 0x410 + len(build_id_bytes),
+            Permission.READ,
+            0x410,
+            len(build_id_bytes),
+            4,
+            "NT_GNU_BUILD_ID",
+        )
+        if build_id_bytes is not None
+        else None
+    )
     loaded_symbols = symbols or {}
     profile = ELFProfile(
         path=str(path),
         sha256=digest,
-        build_id=None,
+        build_id=build_id_bytes.hex() if build_id_bytes is not None else None,
         target=target,
         osabi="ELFOSABI_SYSV",
         elf_type=elf_type,
@@ -189,16 +231,28 @@ def exact_adapter(
         load_ranges=(load,),
         relro_ranges=(),
         load_alignment_hint=0x1000,
+        build_id_ranges=(build_id_range,) if build_id_range is not None else (),
         dynamic_range=dynamic,
         symbol_offsets=loaded_symbols,
     )
-    return ExactELFAdapter(
-        str(path),
-        LibcIdentity(digest, source=str(path)),
-        profile,
-        loaded_symbols,
-        PwntoolsMitigations(pie, True, Relro.PARTIAL, False, False),
+    # These intentionally malformed/cross-architecture byte images cannot be
+    # parsed by pwntools. Bypass the production factory only in this synthetic
+    # fixture; public direct construction is regression-tested to fail.
+    adapter = object.__new__(ExactELFAdapter)
+    object.__setattr__(adapter, "path", str(path))
+    object.__setattr__(
+        adapter,
+        "identity",
+        LibcIdentity(
+            digest,
+            build_id=build_id_bytes.hex() if build_id_bytes is not None else None,
+            source=str(path),
+        ),
     )
+    object.__setattr__(adapter, "profile", profile)
+    object.__setattr__(adapter, "symbols", MappingProxyType(dict(loaded_symbols)))
+    object.__setattr__(adapter, "mitigations", PwntoolsMitigations(pie, True, Relro.PARTIAL, False, False))
+    return adapter
 
 
 def map_adapter(backend: SparseMemory, adapter: ExactELFAdapter, load_bias: int) -> None:

@@ -444,7 +444,8 @@ class ExactProcessDiscovery:
         if header_range is None:
             raise DiscoveryError("exact ELF has no file-offset-zero PT_LOAD suitable for runtime validation")
         runtime_address = base + header_range.start
-        expected = Path(adapter.path).read_bytes()[:header_size]
+        artifact = adapter.verified_artifact_bytes()
+        expected = artifact[:header_size]
         if len(expected) != header_size or not expected.startswith(b"\x7fELF"):
             raise PwntoolsCompatibilityError("exact adapter path no longer contains an ELF header")
         actual = self._read_bytes(runtime_address, header_size)
@@ -479,7 +480,6 @@ class ExactProcessDiscovery:
         if ehsize != header_size or phentsize != canonical_phentsize or not 0 < phnum < 0xFFFF:
             raise DiscoveryError("runtime ELF header/program-header dimensions are invalid")
         table_size = phentsize * phnum
-        artifact = Path(adapter.path).read_bytes()
         if phoff > len(artifact) or table_size > len(artifact) - phoff:
             raise PwntoolsCompatibilityError("exact ELF program-header table is outside the artifact")
         expected_table = artifact[phoff : phoff + table_size]
@@ -548,9 +548,8 @@ class ExactProcessDiscovery:
             if offset < 0 or offset + size > load.file_size:
                 continue
             artifact_offset = load.file_offset + offset
-            with Path(adapter.path).open("rb") as artifact:
-                artifact.seek(artifact_offset)
-                data = artifact.read(size)
+            artifact = adapter.verified_artifact_bytes()
+            data = artifact[artifact_offset : artifact_offset + size]
             return data if len(data) == size else None
         return None
 
@@ -575,7 +574,7 @@ class ExactProcessDiscovery:
             # Reject the overwhelmingly common non-image pointer before doing
             # any transport reads.  This keeps large heap/libc scans usable on
             # menu-driven primitives while the one surviving base is still
-            # authenticated against the exact runtime ELF below.
+            # checked against runtime ELF geometry and any mapped build ID.
             if not self._pointer_in_image(leak.value, adapter, base):
                 raise DiscoveryError(f"leak {leak.value:#x} is outside exact {image_name} runtime ranges")
         elif leak.symbol is not None:
@@ -657,12 +656,12 @@ class ExactProcessDiscovery:
             origin = heap_leak.value
         else:
             origin = _integer(heap_leak, "heap leak")
-        if heap_span is None:
-            start = heap_base if heap_base is not None else origin & -self.runtime_page_size
-            heap_span = MemorySpan(start, _integer(scan_size, "scan_size", positive=True), "heap scan")
-        self._check_span(heap_span)
-        if heap_base is not None and heap_span.address != heap_base:
-            raise ConstraintError("heap_base and heap_span.address disagree")
+        if heap_base is not None:
+            self._check_address(heap_base, "heap_base")
+        if heap_span is not None:
+            self._check_span(heap_span)
+            if heap_base is not None and heap_span.address != heap_base:
+                raise ConstraintError("heap_base and heap_span.address disagree")
 
         if libc_pointer_address is not None:
             address = self._check_address(libc_pointer_address, "libc_pointer_address")
@@ -676,6 +675,12 @@ class ExactProcessDiscovery:
             leak = PointerLeak(self._check_address(libc_pointer, "libc_pointer"))
             base = self._base_from_leak(leak, self.libc, libc_base, image_name="libc", search_pages=image_search_pages)
             return ImageResolution(Image.LIBC, base, self.libc, leak, ("explicit pointer",))
+
+        if heap_span is None:
+            if not self.memory.traits.invalid_read_safe:
+                raise ConstraintError("scanning from a heap leak requires an explicit heap_span or invalid_read_safe")
+            start = heap_base if heap_base is not None else origin & -self.runtime_page_size
+            heap_span = MemorySpan(start, _integer(scan_size, "scan_size", positive=True), "speculative heap scan")
 
         candidates: list[tuple[DiscoveryCandidate, int]] = []
         for item in self.scan_pointers(heap_span):
@@ -775,19 +780,23 @@ class ExactProcessDiscovery:
         if self.libc is None:
             raise ConstraintError("libc_to_heap requires an exact libc adapter")
         _leak, base = self._resolve_image_input(libc_leak, self.libc, libc_base, image_name="libc")
-        if heap_span is None and heap_base is not None:
-            heap_span = MemorySpan(heap_base, 0x100000, "hardcoded heap window")
-        if heap_span is None and validator is None:
-            raise ConstraintError("heap classification requires heap_base/heap_span or an explicit allocator validator")
+        if heap_base is not None:
+            self._check_address(heap_base, "heap_base")
         if heap_span is not None:
             self._check_span(heap_span)
             if heap_base is not None and heap_span.address != heap_base:
                 raise ConstraintError("heap_base and heap_span.address disagree")
 
+        explicit_pointer = heap_pointer is not None or heap_pointer_address is not None
+        if heap_span is None and validator is None and not explicit_pointer:
+            raise ConstraintError("automatic heap classification requires an explicit heap_span or allocator validator")
+
         def valid(pointer: int) -> bool:
             in_span = heap_span is not None and heap_span.contains(pointer)
             checked = validator is not None and bool(validator(self.memory, pointer))
-            return in_span or checked
+            explicit = explicit_pointer and heap_span is None and validator is None
+            above_base = heap_base is None or pointer >= heap_base
+            return (in_span or checked or explicit) and above_base
 
         if heap_pointer_address is not None:
             slot = self._check_address(heap_pointer_address, "heap_pointer_address")
@@ -861,14 +870,16 @@ class ExactProcessDiscovery:
         environ_pointer = self._read_pointer(symbol_address)
         if not environ_pointer:
             raise DiscoveryNotFoundError(f"resolved {environ_symbol} is NULL")
-        if stack_span is None and stack_base is not None:
-            stack_span = MemorySpan(stack_base, 0x1000000, "hardcoded stack window")
+        if stack_base is not None:
+            self._check_address(stack_base, "stack_base")
         if stack_span is not None:
             self._check_span(stack_span)
             if stack_base is not None and stack_span.address != stack_base:
                 raise ConstraintError("stack_base and stack_span.address disagree")
             if not stack_span.contains(environ_pointer, self.target.word_size):
                 raise DiscoveryError("environ does not point into the supplied stack span")
+        elif stack_base is not None and environ_pointer < stack_base:
+            raise DiscoveryError("environ points below the supplied stack base")
         # `environ` itself is the stack leak.  Its first string is only useful
         # corroboration and may legally point into heap storage after setenv()
         # or putenv().  Do not turn that optional read into a remote primitive
@@ -926,7 +937,9 @@ class ExactProcessDiscovery:
             exact = self._exact_runtime_bytes(adapter, base, call_site, 4)
             if exact is None:
                 return None
-            instruction = int.from_bytes(exact, target.endian.value)
+            # A64 instructions are always encoded little-endian, including
+            # big-endian data-mode ELF processes.
+            instruction = int.from_bytes(exact, "little")
             if instruction & 0xFC000000 != 0x94000000:
                 return None
             if exact_instruction(call_site, 4) is None:
@@ -1061,6 +1074,8 @@ class ExactProcessDiscovery:
             environ_pointer = stack.value
         else:
             environ_pointer = _integer(stack, "environ pointer")
+        if stack_base is not None:
+            self._check_address(stack_base, "stack_base")
         resolved_main_base = main_base if main_base is not None else self.layout.main_base
         if resolved_main_base is None:
             if not self.main.profile.pie:
@@ -1070,24 +1085,35 @@ class ExactProcessDiscovery:
         if resolved_main_base is not None:
             self._validate_runtime_image(self.main, resolved_main_base)
 
-        if stack_span is None:
-            before = _integer(scan_before, "scan_before")
-            after = _integer(scan_after, "scan_after")
-            start = environ_pointer - before
-            if start < 0:
-                raise ValueError("stack scan starts below zero")
-            stack_span = MemorySpan(start, before + after + self.target.word_size, "environ stack scan")
-        self._check_span(stack_span)
-        if stack_base is not None and stack_span.address != stack_base:
-            raise ConstraintError("stack_base and stack_span.address disagree")
+        if stack_span is not None:
+            self._check_span(stack_span)
+            if stack_base is not None and stack_span.address != stack_base:
+                raise ConstraintError("stack_base and stack_span.address disagree")
 
         slots: tuple[DiscoveryCandidate, ...]
         if return_slot is not None:
             slot = self._check_address(return_slot, "return_slot")
-            if not stack_span.contains(slot, self.target.word_size):
+            if stack_span is not None and not stack_span.contains(slot, self.target.word_size):
                 raise DiscoveryError("return_slot is outside the supplied stack span")
+            if stack_base is not None and slot < stack_base:
+                raise DiscoveryError("return_slot is below the supplied stack base")
             slots = (DiscoveryCandidate(slot, self._read_pointer(slot), "stack-pointer"),)
         else:
+            if stack_span is None:
+                if not self.memory.traits.invalid_read_safe:
+                    raise ConstraintError(
+                        "scanning from environ requires an explicit stack_span, return_slot, or invalid_read_safe"
+                    )
+                before = _integer(scan_before, "scan_before")
+                after = _integer(scan_after, "scan_after")
+                start = environ_pointer - before
+                if start < 0:
+                    raise ValueError("stack scan starts below zero")
+                stack_span = MemorySpan(
+                    start,
+                    before + after + self.target.word_size,
+                    "speculative environ stack scan",
+                )
             slots = self.scan_pointers(stack_span)
         candidates: list[MainReturnAddress] = []
         for item in slots:
@@ -1310,12 +1336,20 @@ class ExactProcessDiscovery:
         preferred = [
             (named[name], name, f"resolved libc GOT slot for {name}") for name in preferred_names if name in named
         ]
-        preferred.extend(
+        collect(preferred)
+
+        # Other same-named GOT entries may be lazy function relocations. A
+        # symbolic loader offset would derive a candidate load bias, but
+        # validating that bias probes an address which is not yet known to be
+        # mapped. Only consider those entries when the caller supplied the
+        # loader base or the primitive explicitly tolerates invalid reads.
+        extended_named = [
             (slot, name, f"resolved libc GOT slot for {name}")
             for name, slot in got_entries
             if name in self.loader.symbols and name not in preferred_names
-        )
-        collect(preferred)
+        ]
+        if not matches and (loader_base is not None or self.memory.traits.invalid_read_safe):
+            collect(extended_named)
 
         # Unnamed pointers require either a caller-supplied base or a primitive
         # which explicitly tolerates invalid exploratory reads.
@@ -1393,11 +1427,13 @@ class ExactProcessDiscovery:
         if not named:
             return None
 
-        # The name is target-controlled and only selects candidates.  Exact
-        # runtime ELF/build-ID validation plus link_map.l_ld decide which
-        # artifact, if any, is allowed to attach.
+        # The name is target-controlled and only selects candidates. Runtime
+        # ELF geometry, a mapped GNU build ID, and link_map.l_ld decide which
+        # artifact, if any, is allowed to attach. A structural match without a
+        # mapped build ID remains enumerated but deliberately unattached.
         deduplicated = {item.identity.sha256: item for item in named}
         matches: list[ExactELFAdapter] = []
+        structural_without_identity = False
         for item in deduplicated.values():
             dynamic = item.profile.dynamic_range
             if dynamic is None or dynamic_address != base + dynamic.start:
@@ -1406,8 +1442,13 @@ class ExactProcessDiscovery:
                 self._validate_runtime_image(item, base)
             except (DiscoveryError, MemoryAccessError):
                 continue
+            if not item.profile.build_id_ranges:
+                structural_without_identity = True
+                continue
             matches.append(item)
         if not matches:
+            if structural_without_identity:
+                return None
             raise DiscoveryError(
                 f"loaded object {basename!r} does not match any named exact artifact and PT_DYNAMIC address"
             )

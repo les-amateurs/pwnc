@@ -347,6 +347,9 @@ class CompilerELFFixtures(unittest.TestCase):
             profile.pie = True  # type: ignore[misc]
         self.assertEqual(load_elf_profile(path), profile)
 
+        with self.assertRaisesRegex(TypeError, "build_id_ranges must contain ELFRange"):
+            replace(profile, build_id_ranges=(object(),))  # type: ignore[arg-type]
+
     def test_program_header_metadata_survives_a_stripped_section_table(self) -> None:
         source = self.fixtures["nonpie_partial"]
         original = inspect_elf(source)

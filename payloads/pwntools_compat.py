@@ -14,9 +14,10 @@ import logging
 import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, replace
 from hashlib import sha256
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from types import MappingProxyType
 
 from pwnlib.context import context
@@ -36,6 +37,9 @@ class PwntoolsCompatibilityError(ValueError):
 
 class PwntoolsROPUnsupported(PwntoolsCompatibilityError):
     """Automatic pwntools ROP lowering is not claimed for this target."""
+
+
+_EXACT_ELF_FACTORY_TOKEN = object()
 
 
 class _MissingGOTFilter(logging.Filter):
@@ -190,6 +194,33 @@ def _crosscheck_pwntools_elf(elf: ELF, profile: ELFProfile) -> PwntoolsMitigatio
     return mitigations
 
 
+def _same_profile_facts(left: ELFProfile, right: ELFProfile) -> bool:
+    """Compare byte-derived profile facts while ignoring path spelling."""
+
+    return replace(left, path="") == replace(right, path="")
+
+
+class _SnapshotELF(ELF):
+    """Pwntools ELF backed by a private immutable artifact snapshot."""
+
+    def __init__(self, raw: bytes, *, checksec: bool = False) -> None:
+        with NamedTemporaryFile(prefix="pwnc-exact-elf-", suffix=".elf", delete=False) as snapshot:
+            snapshot.write(raw)
+            snapshot_path = Path(snapshot.name)
+        self._pwnc_snapshot_path = snapshot_path
+        try:
+            super().__init__(str(snapshot_path), checksec=checksec)
+        except Exception:
+            snapshot_path.unlink(missing_ok=True)
+            raise
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._pwnc_snapshot_path.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True, slots=True)
 class ExactELFAdapter:
     """Immutable facts for one ELF plus safe factories for fresh pwntools objects."""
@@ -199,8 +230,11 @@ class ExactELFAdapter:
     profile: ELFProfile
     symbols: Mapping[str, int]
     mitigations: PwntoolsMitigations
+    _factory_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _factory_token: object | None) -> None:
+        if _factory_token is not _EXACT_ELF_FACTORY_TOKEN:
+            raise PwntoolsCompatibilityError("ExactELFAdapter must be constructed with ExactELFAdapter.from_file()")
         object.__setattr__(self, "symbols", MappingProxyType(dict(self.symbols)))
 
     @classmethod
@@ -213,23 +247,28 @@ class ExactELFAdapter:
         expected_target: Target | None = None,
     ) -> ExactELFAdapter:
         artifact = Path(path).resolve(strict=True)
-        inspected = inspect_elf(artifact) if profile is None else profile
-        digest = sha256(artifact.read_bytes()).hexdigest()
-        if inspected.sha256 != digest:
-            raise PwntoolsCompatibilityError("ELFProfile does not describe the current artifact bytes")
-        if expected_identity is not None:
-            if expected_identity.sha256 != digest:
-                raise PwntoolsCompatibilityError("the artifact does not match the required exact identity")
-            if expected_identity.build_id is not None and expected_identity.build_id != inspected.build_id:
-                raise PwntoolsCompatibilityError("the artifact build ID does not match the required identity")
-        if expected_target is not None and _target_key(expected_target) != _target_key(inspected.target):
-            raise PwntoolsCompatibilityError(
-                f"artifact target {inspected.target.name} does not match required target {expected_target.name}"
-            )
-
+        raw = artifact.read_bytes()
+        digest = sha256(raw).hexdigest()
         with _suppress_missing_got_warning(), context.local(log_level="error"):
-            elf = ELF(str(artifact), checksec=False)
+            elf = _SnapshotELF(raw, checksec=False)
             try:
+                independently_inspected = replace(inspect_elf(elf.path), path=str(artifact))
+                if profile is not None and not _same_profile_facts(profile, independently_inspected):
+                    raise PwntoolsCompatibilityError(
+                        "caller-supplied ELFProfile differs from an independent inspection of the artifact"
+                    )
+                inspected = independently_inspected
+                if inspected.sha256 != digest:
+                    raise PwntoolsCompatibilityError("ELFProfile does not describe the current artifact bytes")
+                if expected_identity is not None:
+                    if expected_identity.sha256 != digest:
+                        raise PwntoolsCompatibilityError("the artifact does not match the required exact identity")
+                    if expected_identity.build_id is not None and expected_identity.build_id != inspected.build_id:
+                        raise PwntoolsCompatibilityError("the artifact build ID does not match the required identity")
+                if expected_target is not None and _target_key(expected_target) != _target_key(inspected.target):
+                    raise PwntoolsCompatibilityError(
+                        f"artifact target {inspected.target.name} does not match required target {expected_target.name}"
+                    )
                 mitigations = _crosscheck_pwntools_elf(elf, inspected)
                 symbols = dict(elf.symbols)
             finally:
@@ -245,6 +284,7 @@ class ExactELFAdapter:
             inspected,
             symbols,
             mitigations,
+            _factory_token=_EXACT_ELF_FACTORY_TOKEN,
         )
 
     @property
@@ -270,11 +310,20 @@ class ExactELFAdapter:
             raise PwntoolsCompatibilityError("ELFProfile target differs from the adapter target")
         if profile.pie != self.profile.pie or profile.nx != self.profile.nx or profile.relro is not self.profile.relro:
             raise PwntoolsCompatibilityError("ELFProfile mitigation facts differ from the adapter profile")
+        if not _same_profile_facts(profile, self.profile):
+            raise PwntoolsCompatibilityError("ELFProfile byte-derived facts differ from the adapter profile")
 
     def _revalidate_bytes(self) -> None:
-        observed = sha256(Path(self.path).read_bytes()).hexdigest()
+        self.verified_artifact_bytes()
+
+    def verified_artifact_bytes(self) -> bytes:
+        """Return one digest-checked snapshot of the exact local artifact."""
+
+        raw = Path(self.path).read_bytes()
+        observed = sha256(raw).hexdigest()
         if observed != self.identity.sha256:
             raise PwntoolsCompatibilityError("the ELF artifact changed after the adapter was created")
+        return raw
 
     def fresh_elf(self, *, runtime_base: int | None = None) -> ELF:
         """Return a newly loaded pwntools ELF after revalidating its digest.
@@ -290,9 +339,9 @@ class ExactELFAdapter:
             if not 0 <= runtime_base <= self.target.mask:
                 raise ValueError("runtime_base does not fit the target address width")
 
-        self._revalidate_bytes()
+        raw = self.verified_artifact_bytes()
         with _suppress_missing_got_warning(), context.local(log_level="error"):
-            elf = ELF(self.path, checksec=False)
+            elf = _SnapshotELF(raw, checksec=False)
             try:
                 _crosscheck_pwntools_elf(elf, self.profile)
             except Exception:

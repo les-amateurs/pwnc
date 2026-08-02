@@ -410,17 +410,18 @@ class LiveCTFDiscoveryTests(unittest.TestCase):
             self.assertIsNotNone(status, "ptrace-me-maybe did not terminate within five seconds")
             self.assertEqual(status, 0)
         finally:
-            if tube.poll() is None:
-                if not mutation_attempted or restoration_confirmed:
+            try:
+                if tube.poll() is None and (not mutation_attempted or restoration_confirmed):
                     try:
                         transport.finish()
                         _bounded_status(tube)
-                    except (EOFError, OSError):
+                    except (EOFError, OSError, TimeoutError, ValueError):
                         pass
+            finally:
                 # Never detach a child whose return stack may contain a
-                # partial chain.  Kill the dedicated parent/tracee group.
+                # partial chain. Cleanup failures cannot bypass group kill.
                 _kill_process_group(tube)
-            tube.close()
+                tube.close()
 
 
 if __name__ == "__main__":

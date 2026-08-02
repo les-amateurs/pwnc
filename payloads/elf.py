@@ -151,10 +151,13 @@ class ELFProfile:
         object.__setattr__(self, "needed_libraries", tuple(self.needed_libraries))
         object.__setattr__(self, "load_ranges", tuple(self.load_ranges))
         object.__setattr__(self, "relro_ranges", tuple(self.relro_ranges))
+        build_id_ranges = tuple(self.build_id_ranges)
+        if any(not isinstance(item, ELFRange) for item in build_id_ranges):
+            raise TypeError("build_id_ranges must contain ELFRange values")
         object.__setattr__(
             self,
             "build_id_ranges",
-            tuple(sorted(self.build_id_ranges, key=lambda item: (item.start, item.end, item.file_offset))),
+            tuple(sorted(build_id_ranges, key=lambda item: (item.start, item.end, item.file_offset))),
         )
         object.__setattr__(self, "evidence", tuple(self.evidence))
         if (

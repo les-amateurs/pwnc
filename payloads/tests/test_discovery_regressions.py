@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from payloads.arbio import ArbitraryMemory, IOPrimitiveTraits
 from payloads.discovery import (
@@ -16,6 +17,7 @@ from payloads.discovery import (
 from payloads.elf import ELFImageKind
 from payloads.errors import ConstraintError, MemoryAccessError
 from payloads.model import Image
+from payloads.pwntools_compat import PwntoolsCompatibilityError
 from payloads.target import resolve_target
 from payloads.tests.test_discovery import SparseMemory, exact_adapter, map_adapter
 
@@ -161,6 +163,24 @@ class DiscoveryRegressionTests(unittest.TestCase):
 
         self.assertEqual(result.base, libc_base)
 
+    def test_discovery_rehashes_local_exact_artifact_before_using_its_bytes(self) -> None:
+        target = resolve_target("x86_64")
+        backend = SparseMemory()
+        libc = exact_adapter(self.root, target, "libc-local-mutation.so.6")
+        libc_base = 0x700000
+        map_adapter(backend, libc, libc_base)
+        changed = bytearray(Path(libc.path).read_bytes())
+        changed[0x300] ^= 1
+        Path(libc.path).write_bytes(changed)
+        resolver = ExactProcessDiscovery(self.memory(target, backend), libc=libc)
+
+        with self.assertRaisesRegex(PwntoolsCompatibilityError, "artifact changed"):
+            resolver.heap_to_libc(
+                0x500000,
+                libc_pointer=libc_base + 0x100,
+                libc_base=libc_base,
+            )
+
     def test_heap_base_and_span_are_consistency_assertions(self) -> None:
         target = resolve_target("x86_64")
         backend = SparseMemory()
@@ -178,6 +198,64 @@ class DiscoveryRegressionTests(unittest.TestCase):
                 heap_span=heap,
                 libc_base=libc_base,
             )
+
+    def test_unsafe_remote_reads_require_explicit_scan_spans(self) -> None:
+        target = resolve_target("x86_64")
+        backend = SparseMemory()
+        libc = exact_adapter(self.root, target, "libc-no-speculative-scan.so.6")
+        libc_base = 0x700000
+        map_adapter(backend, libc, libc_base)
+        resolver = ExactProcessDiscovery(self.memory(target, backend), libc=libc)
+
+        with self.assertRaisesRegex(ConstraintError, "explicit heap_span"):
+            resolver.heap_to_libc(0x500123, libc_base=libc_base)
+
+        explicit = resolver.heap_to_libc(
+            0x500123,
+            libc_pointer=libc_base + 0x100,
+            libc_base=libc_base,
+        )
+        self.assertEqual(explicit.base, libc_base)
+
+        with self.assertRaisesRegex(ConstraintError, "explicit heap_span"):
+            resolver.libc_to_heap(explicit, heap_base=0x500000)
+
+        heap = resolver.libc_to_heap(
+            explicit,
+            heap_base=0x500000,
+            heap_pointer=0x500123,
+        )
+        self.assertEqual(heap.pointer, 0x500123)
+        self.assertIsNone(heap.span)
+        with self.assertRaisesRegex(ConstraintError, "explicit heap_span"):
+            resolver.heap_to_libc(heap, libc_base=libc_base)
+
+        main_base = 0x400000
+        main = exact_adapter(
+            self.root,
+            target,
+            "main-no-speculative-stack",
+            pie=True,
+            image_kind=ELFImageKind.PIE_EXECUTABLE,
+            patches={0x200: b"\xe8\0\0\0\0"},
+        )
+        map_adapter(backend, main, main_base)
+        return_slot = 0x7FFF0080
+        backend.map(return_slot, target.pack(main_base + 0x205))
+        main_resolver = ExactProcessDiscovery(self.memory(target, backend), main=main)
+
+        with self.assertRaisesRegex(ConstraintError, "explicit stack_span"):
+            main_resolver.environ_to_main_returns(
+                return_slot + 0x80,
+                main_base=main_base,
+            )
+
+        classified = main_resolver.environ_to_main_return(
+            return_slot + 0x80,
+            main_base=main_base,
+            return_slot=return_slot,
+        )
+        self.assertEqual(classified.slot_address, return_slot)
 
     def test_riscv_call_continuation_requires_the_abi_link_register(self) -> None:
         target = resolve_target("riscv64")
@@ -222,6 +300,7 @@ class DiscoveryRegressionTests(unittest.TestCase):
     def test_cross_arch_call_classifiers_require_linking_encodings(self) -> None:
         cases = (
             ("arm64", "little", 0x94000000, 0x14000000, 4, False),
+            ("arm64", "big", b"\x00\x00\x00\x94", b"\x00\x00\x00\x14", 4, False),
             ("arm", "little", 0xEB000000, 0xEA000000, 4, False),
             ("thumb", "little", b"\x00\xf0\x00\xf8", b"\x00\xf0\x00\xb8", 4, True),
             ("mips32", "big", 0x0C000000, 0x08000000, 8, False),
@@ -422,6 +501,24 @@ class DiscoveryRegressionTests(unittest.TestCase):
                 libc_base=libc_base,
             )
 
+    def test_unsafe_loader_discovery_does_not_probe_a_lazy_named_got_target(self) -> None:
+        target = resolve_target("x86_64")
+        backend = SparseMemory()
+        libc = exact_adapter(self.root, target, "libc-lazy-loader.so.6")
+        loader = exact_adapter(self.root, target, "ld-lazy-loader.so", symbols={"lazy_call": 0x180})
+        libc_base = 0x700000
+        map_adapter(backend, libc, libc_base)
+        slot = libc_base + 0x680
+        bogus_loader_base = 0xA00000
+        backend.map(slot, target.pack(bogus_loader_base + loader.symbol("lazy_call")))
+        resolver = ExactProcessDiscovery(self.memory(target, backend), libc=libc, loader=loader)
+
+        with (
+            mock.patch.object(resolver, "_pwntools_got_entries", return_value=(("lazy_call", slot),)),
+            self.assertRaisesRegex(ConstraintError, "invalid_read_safe"),
+        ):
+            resolver.libc_to_loader(PointerLeak(libc_base + 0x100), libc_base=libc_base)
+
     def test_explicit_image_scan_span_must_be_a_writable_libc_load(self) -> None:
         target = resolve_target("x86_64")
         backend = SparseMemory()
@@ -603,6 +700,54 @@ class DiscoveryRegressionTests(unittest.TestCase):
                 loader_base=loader_base,
                 known_images=(loader,),
             )
+
+    def test_structural_image_without_mapped_build_id_is_not_attached(self) -> None:
+        target = resolve_target("x86_64")
+        backend = SparseMemory()
+        loader = exact_adapter(
+            self.root,
+            target,
+            "ld-structural-list.so",
+            symbols={"_r_debug": 0x200},
+        )
+        candidate = exact_adapter(
+            self.root,
+            target,
+            "libstructural.so",
+            runtime_build_id=False,
+        )
+        loader_base = 0x700000
+        candidate_base = 0x900000
+        map_adapter(backend, loader, loader_base)
+        map_adapter(backend, candidate, candidate_base)
+        debug = loader_base + 0x200
+        node = 0x500000
+        name = node + 0x100
+        word = target.word_size
+        r_debug = bytearray(word * 5)
+        r_debug[:4] = (1).to_bytes(4, target.endian.value)
+        r_debug[word : word * 2] = target.pack(node)
+        r_debug[word * 4 : word * 5] = target.pack(loader_base)
+        backend.map(debug, r_debug)
+        assert candidate.profile.dynamic_range is not None
+        backend.map(
+            node,
+            target.pack(candidate_base)
+            + target.pack(name)
+            + target.pack(candidate_base + candidate.profile.dynamic_range.start)
+            + target.pack(0)
+            + target.pack(0),
+        )
+        backend.map(name, b"libstructural.so\0" + b"\0" * target.word_size)
+        resolver = ExactProcessDiscovery(self.memory(target, backend), loader=loader)
+
+        snapshot = resolver.loader_to_link_map(
+            PointerLeak(loader_base + 0x100),
+            loader_base=loader_base,
+            known_images=(candidate,),
+        )
+
+        self.assertIsNone(snapshot.objects[0].adapter)
 
     def test_et_exec_link_map_l_ld_uses_zero_load_bias(self) -> None:
         target = resolve_target("x86_64")

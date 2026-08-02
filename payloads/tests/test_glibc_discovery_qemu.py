@@ -143,7 +143,7 @@ def _selected_discovery_specs() -> tuple[SysrootSpec, ...]:
     if not raw_selector:
         by_id = {spec.id: spec for spec in selected}
         return tuple(by_id[spec_id] for spec_id in _DEFAULT_SPEC_IDS)
-    return tuple(
+    applicable = tuple(
         spec
         for spec in selected
         if any(
@@ -151,6 +151,9 @@ def _selected_discovery_specs() -> tuple[SysrootSpec, ...]:
             for target_name in spec.targets
         )
     )
+    if not applicable:
+        raise AssertionError("PWNC_GLIBC_QEMU_SPECS selects no non-x86/non-Thumb discovery target")
+    return applicable
 
 
 def _execution_target(spec: SysrootSpec) -> Target:
@@ -238,6 +241,20 @@ class GlibcDiscoveryQemuHarnessTests(unittest.TestCase):
         forbidden = "/proc" + "/self/mem"
         self.assertNotIn(forbidden, _ARBITRARY_READ_SOURCE)
         self.assertNotIn(forbidden, __doc__ or "")
+        package = Path(__file__).parents[1]
+        for module in sorted(package.glob("*.py")):
+            with self.subTest(module=module.name):
+                self.assertNotIn(forbidden, module.read_text(encoding="utf-8"))
+
+    def test_explicit_x86_only_selector_fails_closed(self) -> None:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"PWNC_GLIBC_QEMU_SPECS": "x86-64-glibc-2.39"},
+            ),
+            self.assertRaisesRegex(AssertionError, "no non-x86"),
+        ):
+            _selected_discovery_specs()
 
 
 @unittest.skipUnless(
@@ -254,8 +271,6 @@ class GlibcDiscoveryQemuTests(unittest.TestCase):
 
     def test_real_target_arbitrary_read_discovers_glibc_process(self) -> None:
         specs = _selected_discovery_specs()
-        if not specs:
-            self.skipTest("selected sysroot specs contain no non-x86 discovery target")
         for spec in specs:
             provisioned = provision_sysroot(spec, _cache_dir())
             target = _execution_target(spec)
@@ -352,12 +367,15 @@ class GlibcDiscoveryQemuTests(unittest.TestCase):
             loader_objects = [item for item in snapshot.objects if item.base == loader_result.base]
             self.assertEqual(len(libc_objects), 1)
             self.assertEqual(len(loader_objects), 1)
-            self.assertIsNotNone(libc_objects[0].adapter)
-            self.assertIsNotNone(loader_objects[0].adapter)
-            assert libc_objects[0].adapter is not None
-            assert loader_objects[0].adapter is not None
-            self.assertEqual(libc_objects[0].adapter.identity.sha256, exact_libc.identity.sha256)
-            self.assertEqual(loader_objects[0].adapter.identity.sha256, exact_loader.identity.sha256)
+            for loaded, exact in ((libc_objects[0], exact_libc), (loader_objects[0], exact_loader)):
+                if exact.profile.build_id_ranges:
+                    self.assertIsNotNone(loaded.adapter)
+                    assert loaded.adapter is not None
+                    self.assertEqual(loaded.adapter.identity.sha256, exact.identity.sha256)
+                else:
+                    # Structure and l_ld are still checked, but no conventional
+                    # mapped identity exists to justify exact adapter attachment.
+                    self.assertIsNone(loaded.adapter)
 
             transport.finish()
             return_code = process.wait(timeout=_IO_TIMEOUT_SECONDS)
