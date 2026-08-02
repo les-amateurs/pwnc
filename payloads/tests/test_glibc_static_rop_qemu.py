@@ -1,11 +1,12 @@
 """Opt-in ROP execution in binaries linked to every pinned static glibc.
 
-Enable with ``PWNC_GLIBC_STATIC_ROP_TESTS=1``.  The persistent sysroot cache
-and optional manifest selector are shared with :mod:`test_glibc_qemu` through
-``PWNC_GLIBC_SYSROOT_CACHE`` and ``PWNC_GLIBC_QEMU_SPECS``.  With no selector,
-every manifest spec and every mapped catalog target is mandatory: unavailable
-compilers, unsupported static linking, and missing qemu-user binaries are test
-failures rather than skips.
+Enable with either ``PWNC_GLIBC_QEMU_TESTS=1`` (the complete pinned-glibc
+contract) or the focused ``PWNC_GLIBC_STATIC_ROP_TESTS=1`` switch.  The
+persistent sysroot cache and optional manifest selector are shared with
+:mod:`test_glibc_qemu` through ``PWNC_GLIBC_SYSROOT_CACHE`` and
+``PWNC_GLIBC_QEMU_SPECS``.  With no selector, every manifest spec and every
+mapped catalog target is mandatory: unavailable compilers, unsupported static
+linking, and missing qemu-user binaries are test failures rather than skips.
 
 Each target is compiled as a real static C program.  A GNU ld map proves that
 the selected provisioned sysroot's exact ``libc.a`` supplied the program, and
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import re
 import select
 import shutil
@@ -47,13 +49,15 @@ from payloads import (
 )
 from payloads.tests.runtime_support import ProvisionedSysroot, SysrootSpec, load_manifest, provision_sysroot
 
-_OPT_IN = os.environ.get("PWNC_GLIBC_STATIC_ROP_TESTS") == "1"
+_OPT_IN = os.environ.get("PWNC_GLIBC_QEMU_TESTS") == "1" or os.environ.get("PWNC_GLIBC_STATIC_ROP_TESTS") == "1"
 _CACHE_ENV = "PWNC_GLIBC_SYSROOT_CACHE"
 _SELECTOR_ENV = "PWNC_GLIBC_QEMU_SPECS"
 _DEFAULT_CACHE = Path(tempfile.gettempdir()) / "pwnc-runtime-sysroot-cache"
 _CHAIN_CAPACITY = 0x10000
 _TARGETS_BY_NAME = {target.name: target for target in SUPPORTED_TARGETS}
 _LIBC_ARCHIVE_PATTERN = re.compile(r"(?m)^\s*(\S*libc\.a)\(")
+_EXIT_DEFINITION_PATTERN = re.compile(r"(?P<archive>/\S*libc\.a)\((?P<member>[^)]+)\): definition of exit")
+_NATIVE_X86_HOST = platform.machine().lower() in {"amd64", "x86_64"}
 
 
 _FIXTURE_C = r"""
@@ -68,6 +72,7 @@ _FIXTURE_C = r"""
 
 __attribute__((aligned(4096))) unsigned char pwnc_chain[PWNC_CHAIN_CAPACITY];
 extern void pwnc_pivot(void *chain) __attribute__((noreturn));
+static void (*volatile pwnc_exit_keepalive)(int) __attribute__((used)) = exit;
 
 static int read_exact(int fd, void *buffer, size_t size) {
     unsigned char *cursor = buffer;
@@ -103,7 +108,7 @@ int main(void) {
 
     /* A runtime-dependent reference keeps real static glibc exit in the ELF. */
     if (control[0] == UINT32_MAX)
-        exit(104);
+        pwnc_exit_keepalive(104);
     pwnc_pivot(pwnc_chain + control[0]);
 }
 """
@@ -234,6 +239,7 @@ pwnc_call_loader:
     if arch in {Architecture.ARM, Architecture.THUMB}:
         mode = ".thumb" if arch is Architecture.THUMB else ".arm"
         thumb = ".thumb_func\n" if arch is Architecture.THUMB else ""
+        arm_note = '\n.section .note.GNU-stack,"",%progbits\n'
         return f"""
 .syntax unified
 .arch armv7-a
@@ -256,7 +262,7 @@ pwnc_call_loader:
   pop {{r0, r3}}
   mov lr, r3
   pop {{pc}}
-{note}
+{arm_note}
 """
 
     if arch is Architecture.ARM64:
@@ -415,6 +421,7 @@ pwnc_call_loader:
     if arch in {Architecture.SPARC32, Architecture.SPARC64}:
         if arch is Architecture.SPARC64:
             return f"""
+.register %g2, #scratch
 .text
 .globl pwnc_pivot
 .type pwnc_pivot,#function
@@ -497,7 +504,7 @@ def _compile_fixture(
     provisioned: ProvisionedSysroot,
     target: Target,
     directory: Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, str]:
     source = directory / "fixture.c"
     assembly = directory / "gadgets.S"
     executable = directory / "fixture"
@@ -516,6 +523,7 @@ def _compile_fixture(
         "-fno-stack-protector",
         "-Wl,-z,noexecstack",
         "-static",
+        "-Wl,--trace-symbol=exit",
         f"-Wl,-Map,{linker_map}",
         "-o",
         str(executable),
@@ -528,7 +536,7 @@ def _compile_fixture(
         )
     if not linker_map.is_file():
         raise AssertionError(f"{provisioned.spec.id}/{target.name} compiler produced no GNU ld map")
-    return executable, linker_map
+    return executable, linker_map, compiled.stdout + compiled.stderr
 
 
 def _mapped_libc_archive(linker_map: Path, provisioned: ProvisionedSysroot) -> tuple[Path, str]:
@@ -553,6 +561,21 @@ def _mapped_libc_archive(linker_map: Path, provisioned: ProvisionedSysroot) -> t
     if len(digest) != 64:  # pragma: no cover - hashlib invariant
         raise AssertionError("invalid libc.a SHA-256")
     return archive, digest
+
+
+def _assert_exit_definition_trace(trace: str, archive: Path, provisioned: ProvisionedSysroot) -> None:
+    definitions = tuple(_EXIT_DEFINITION_PATTERN.finditer(trace))
+    if len(definitions) != 1:
+        raise AssertionError(
+            f"{provisioned.spec.id}: expected one traced static libc definition of exit, found {len(definitions)}:\n"
+            f"{trace}"
+        )
+    definition = definitions[0]
+    traced_archive = Path(definition.group("archive")).resolve(strict=True)
+    if traced_archive != archive:
+        raise AssertionError(f"{provisioned.spec.id}: exit came from {traced_archive}, not mapped archive {archive}")
+    if not definition.group("member"):
+        raise AssertionError(f"{provisioned.spec.id}: traced exit definition has no archive member")
 
 
 def _symbol(profile, name: str) -> int:
@@ -606,10 +629,15 @@ def _syscall_restore_gadget(target: Target, profile) -> SemanticGadget:
 
 
 def _direct_call_supported(target: Target) -> bool:
-    return target.abi is not ABI.POWERPC64_ELFV1 and target.arch not in {
-        Architecture.SPARC32,
-        Architecture.SPARC64,
-    }
+    return (
+        target.arch is not Architecture.THUMB
+        and target.abi is not ABI.POWERPC64_ELFV1
+        and target.arch
+        not in {
+            Architecture.SPARC32,
+            Architecture.SPARC64,
+        }
+    )
 
 
 def _call_restore_gadgets(target: Target, profile) -> tuple[SemanticGadget, ...]:
@@ -693,12 +721,17 @@ def _run_chain(
     chain: bytes,
     offset: int,
     expected_status: int,
+    *,
+    argv: tuple[str, ...] | None = None,
+    runner: str = "qemu-user",
 ) -> None:
-    qemu = shutil.which(provisioned.qemu)
-    if qemu is None:
-        raise AssertionError(f"required qemu-user binary is unavailable: {provisioned.qemu}")
+    if argv is None:
+        qemu = shutil.which(provisioned.qemu)
+        if qemu is None:
+            raise AssertionError(f"required qemu-user binary is unavailable: {provisioned.qemu}")
+        argv = (qemu, str(executable))
     process = subprocess.Popen(
-        (qemu, str(executable)),
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -706,7 +739,7 @@ def _run_chain(
     )
     try:
         expected_version = provisioned.spec.glibc_version.split("-", 1)[0].encode("ascii")
-        test.assertEqual(_read_version_line(process, provisioned.spec.id), expected_version)
+        test.assertEqual(_read_version_line(process, f"{provisioned.spec.id} {runner}"), expected_version)
         stdout, stderr = process.communicate(_protocol(target, offset, chain), timeout=30)
         test.assertEqual(process.returncode, expected_status, stderr.decode(errors="replace"))
         test.assertEqual(stdout, b"")
@@ -716,9 +749,41 @@ def _run_chain(
         process.communicate()
 
 
+class GlibcStaticRopHarnessUnitTests(unittest.TestCase):
+    def test_manifest_and_direct_call_exclusions_are_exact(self) -> None:
+        manifest = load_manifest()
+        mappings = tuple((spec, _catalog_target(name)) for spec in manifest.sysroots for name in spec.targets)
+        self.assertEqual(len(manifest.sysroots), 33)
+        self.assertEqual(len(mappings), 37)
+
+        excluded_targets = {target.name for _spec, target in mappings if not _direct_call_supported(target)}
+        self.assertEqual(
+            excluded_targets,
+            {
+                "thumb-le-arm-eabi",
+                "thumb-be-arm-eabi",
+                "powerpc64-be-powerpc64-elfv1",
+                "sparc32-be-sparc-sysv",
+                "sparc64-be-sparc64-sysv",
+            },
+        )
+        self.assertEqual(sum(_direct_call_supported(target) for _spec, target in mappings), 28)
+        self.assertEqual(sum(not _direct_call_supported(target) for _spec, target in mappings), 9)
+
+        for spec, target in mappings:
+            with self.subTest(spec=spec.id, target=target.name):
+                assembly = _fixture_assembly(target)
+                self.assertIn("pwnc_pivot", assembly)
+                self.assertIn("pwnc_syscall_loader", assembly)
+                self.assertIn("pwnc_syscall_terminal", assembly)
+                if _direct_call_supported(target) and target.arch is not Architecture.X86:
+                    self.assertIn("pwnc_call_loader", assembly)
+
+
 @unittest.skipUnless(
     _OPT_IN,
-    f"set PWNC_GLIBC_STATIC_ROP_TESTS=1 to run; cache: {_CACHE_ENV}, selector: {_SELECTOR_ENV}",
+    f"set PWNC_GLIBC_QEMU_TESTS=1 or PWNC_GLIBC_STATIC_ROP_TESTS=1 to run; "
+    f"cache: {_CACHE_ENV}, selector: {_SELECTOR_ENV}",
 )
 class GlibcStaticRopQemuTests(unittest.TestCase):
     def test_every_pinned_static_glibc_executes_syscall_and_supported_libc_call_rop(self) -> None:
@@ -735,8 +800,9 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
                     self._exercise_target(provisioned, target, Path(directory))
 
     def _exercise_target(self, provisioned: ProvisionedSysroot, target: Target, root: Path) -> None:
-        executable, linker_map = _compile_fixture(provisioned, target, root)
+        executable, linker_map, link_trace = _compile_fixture(provisioned, target, root)
         archive, archive_digest = _mapped_libc_archive(linker_map, provisioned)
+        _assert_exit_definition_trace(link_trace, archive, provisioned)
         profile = inspect_elf(executable)
         _assert_compiled_target(self, profile.target, target)
         self.assertIs(profile.linkage, Linkage.STATIC)
@@ -764,8 +830,26 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
         self.assertLessEqual(len(syscall_data), _CHAIN_CAPACITY)
         syscall_mapping = next(item for item in profile.load_ranges if item.contains(chain_symbol, len(syscall_data)))
         self.assertTrue(syscall_mapping.writable)
-        self.assertFalse(syscall_mapping.executable)
+        if target.arch is Architecture.SPARC64:
+            # This pinned GNU ld places the executable .iplt together with
+            # .data/.bss in one RWX PT_LOAD.  PT_GNU_STACK is still RW and the
+            # independent mitigation checks above therefore report NX.
+            self.assertTrue(syscall_mapping.executable)
+        else:
+            self.assertFalse(syscall_mapping.executable)
         _run_chain(self, provisioned, target, executable, syscall_data, 0, 41)
+        if _NATIVE_X86_HOST and target.arch in {Architecture.X86, Architecture.X86_64}:
+            _run_chain(
+                self,
+                provisioned,
+                target,
+                executable,
+                syscall_data,
+                0,
+                41,
+                argv=(str(executable),),
+                runner="native",
+            )
 
         if _direct_call_supported(target):
             call = build_static_call(
@@ -783,6 +867,26 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
             self.assertTrue(call_mapping.writable)
             self.assertFalse(call_mapping.executable)
             _run_chain(self, provisioned, target, executable, call_data, offset, 42)
+            if _NATIVE_X86_HOST and target.arch in {Architecture.X86, Architecture.X86_64}:
+                _run_chain(
+                    self,
+                    provisioned,
+                    target,
+                    executable,
+                    call_data,
+                    offset,
+                    42,
+                    argv=(str(executable),),
+                    runner="native",
+                )
+        elif target.arch is Architecture.THUMB:
+            # The ARM hard-float glibc archives contain ARM-state functions,
+            # even when the challenge fixture itself is compiled as Thumb.
+            # Target-wide Thumb conversion would set bit zero on this even
+            # symbol and incorrectly enter it as Thumb code.
+            exit_address = _symbol(profile, "exit")
+            self.assertEqual(exit_address & 1, 0)
+            self.assertNotEqual(target.function_pointer(exit_address), exit_address)
         else:
             with self.assertRaises(UnsupportedROPError):
                 build_static_call(target, _symbol(profile, "exit"), (42,), label="unsupported static libc exit")
