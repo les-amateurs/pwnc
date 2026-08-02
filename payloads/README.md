@@ -811,19 +811,21 @@ cases directly as part of the static contract, without qemu-user.
 With no selector, each invoked module makes its entire declared matrix
 mandatory: 37 mappings for the static and base pinned-glibc modules and 28 for
 the semantic direct-call module. A selected run is useful evidence only for
-those IDs. Live validation has completed those applicable matrices in the
-2.23, 2.24, 2.39, and 2.41 lanes across focused selector batches, including
-distinct ARM/Thumb static runs, both PPC64 ABIs, and SPARC32's
-bundled-GCC/pinned-glibc combination; this was not one no-selector invocation.
+those IDs. Live validation has completed the applicable dynamic matrices in
+the 2.23, 2.24, 2.39, and 2.41 lanes across focused selector batches. The
+static contract additionally passed one complete no-selector invocation:
+37 target builds and 79 successful ROP process executions, including distinct
+ARM/Thumb runs, both PPC64 ABIs, SPARC32's bundled-GCC/pinned-glibc
+combination, and 14 direct-host x86 executions.
 
 The completed real-libc ROP evidence is:
 
-| Fixture | qemu-user focused-batch evidence | Direct-host x86-64 mirror |
+| Fixture | qemu-user execution evidence | Direct-host x86-64 mirror |
 | --- | --- | --- |
 | Dynamic exact-libc semantic `write` | 28 mappings; 15 architecture/endian/ABI variants | All seven pinned i386/AMD64 mappings |
 | Dynamic composed ORW and sendfile | All seven pinned i386/AMD64 mappings | Not claimed by this pinned-libc fixture |
-| Static-glibc syscall ROP | All 37 mappings | All seven pinned i386/AMD64 mappings |
-| Static-glibc direct `exit` ROP | 28 mappings; 15 architecture/endian/ABI variants | All seven pinned i386/AMD64 mappings |
+| Static-glibc syscall ROP | All 37 mappings in one no-selector run | All seven pinned i386/AMD64 mappings |
+| Static-glibc direct `exit` ROP | 28 mappings in the same no-selector run; 15 architecture/endian/ABI variants | All seven pinned i386/AMD64 mappings |
 
 The nine excluded direct-call mappings are the Thumb mappings whose shared
 libcs expose ARM-state functions, PPC64 ELFv1 mappings needing descriptor/TOC

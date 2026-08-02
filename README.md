@@ -22,7 +22,9 @@ on 28 mappings across 15 ABI variants, composed ORW/sendfile chains on all
 seven x86 mappings, static-glibc syscall chains on all 37 mappings, and static
 glibc `exit` calls on the 28 supported direct-call mappings. The seven pinned
 x86 mappings also have direct native mirrors. These contracts have been
-completed in focused selector batches rather than one no-selector invocation.
+completed across focused selector batches, and the complete 37-mapping static
+contract additionally passed a single no-selector run with 79 ROP process
+executions.
 The suite also covers qemu-user FSOP and an exact QEMU 7.1.0/7.2.0 AArch64
 execute-permission boundary; the payload documentation distinguishes the real
 artifacts from test-owned exploit primitives.
