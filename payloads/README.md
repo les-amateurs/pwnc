@@ -725,7 +725,12 @@ big-endian, while the full 2.39 lane includes both AArch64 endians. PPC32
 little-endian is explicitly unsupported because there is no standardized
 upstream Linux/glibc ABI for it. The SPARC32 baseline uses the real Ubuntu
 SPARC V8+ multilib root and requires an external `sparc64-linux-gnu-gcc -m32`
-compiler; a missing compiler is an error in an enabled run.
+compiler; a missing compiler is an error in an enabled run. Its headers,
+glibc linker inputs, loader, and runtime libraries are pinned by the sysroot,
+while GCC's multilib CRT objects and `libgcc` come from that external compiler.
+Ubuntu stores the SPARC32 loader below its cross-package prefix even though
+guest binaries request the canonical `/lib/ld-linux.so.2` ABI path; the
+manifest records and validates those two paths separately.
 
 Provision one root through the checked API (there is deliberately no implicit
 download in the normal test suite):

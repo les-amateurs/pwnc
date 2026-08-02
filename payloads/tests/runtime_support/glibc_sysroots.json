@@ -342,12 +342,23 @@
           "noble-linux-libc-dev-sparc64"
         ]
       },
-      "sysroot_subdir": "usr/sparc64-linux-gnu",
-      "compiler": {"kind": "system", "argv": ["sparc64-linux-gnu-gcc", "-m32"]},
+      "sysroot_subdir": ".",
+      "compiler": {
+        "kind": "system",
+        "argv": [
+          "sparc64-linux-gnu-gcc",
+          "-m32",
+          "-isystem",
+          "{sysroot}/usr/sparc64-linux-gnu/include",
+          "-B{sysroot}/usr/sparc64-linux-gnu/lib32/",
+          "-L{sysroot}/usr/sparc64-linux-gnu/lib32"
+        ]
+      },
       "qemu": "qemu-sparc32plus",
-      "loader": "lib32/ld-linux.so.2",
-      "libc": "lib32/libc.so.6",
-      "elf": {"class": 32, "endian": "big", "machine": 2},
+      "interpreter": "lib/ld-linux.so.2",
+      "loader": "usr/sparc64-linux-gnu/lib32/ld-linux.so.2",
+      "libc": "usr/sparc64-linux-gnu/lib32/libc.so.6",
+      "elf": {"class": 32, "endian": "big", "machine": 18},
       "version_marker": "stable release version 2.39"
     },
     {

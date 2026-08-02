@@ -106,10 +106,39 @@ class GlibcSysrootManifestTests(unittest.TestCase):
     def test_sparc32_records_v8plus_emulator_and_real_multilib_root(self) -> None:
         spec = resolve_sysroot("sparc32")
         self.assertEqual(spec.qemu, "qemu-sparc32plus")
-        self.assertEqual(spec.loader, "lib32/ld-linux.so.2")
-        self.assertEqual(spec.libc, "lib32/libc.so.6")
-        self.assertEqual((spec.elf.elf_class, spec.elf.machine), (32, 2))
-        self.assertEqual(spec.compiler.argv, ("sparc64-linux-gnu-gcc", "-m32"))
+        self.assertEqual(spec.sysroot_subdir, ".")
+        self.assertEqual(spec.interpreter, "lib/ld-linux.so.2")
+        self.assertEqual(spec.loader, "usr/sparc64-linux-gnu/lib32/ld-linux.so.2")
+        self.assertEqual(spec.libc, "usr/sparc64-linux-gnu/lib32/libc.so.6")
+        # Ubuntu's V8+ multilib objects identify as EM_SPARC32PLUS (18), not
+        # the legacy EM_SPARC (2) machine used by plain V8 objects.
+        self.assertEqual((spec.elf.elf_class, spec.elf.machine), (32, 18))
+        self.assertEqual(
+            spec.compiler.argv,
+            (
+                "sparc64-linux-gnu-gcc",
+                "-m32",
+                "-isystem",
+                "{sysroot}/usr/sparc64-linux-gnu/include",
+                "-B{sysroot}/usr/sparc64-linux-gnu/lib32/",
+                "-L{sysroot}/usr/sparc64-linux-gnu/lib32",
+            ),
+        )
+
+    def test_interpreter_override_is_absent_by_default(self) -> None:
+        spec = resolve_sysroot("x86_64", lane="glibc-2.23")
+        self.assertIsNone(spec.interpreter)
+
+    def test_unknown_compiler_argv_template_is_rejected(self) -> None:
+        source = Path(__file__).with_name("runtime_support") / "glibc_sysroots.json"
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+        sparc = next(item for item in manifest["sysroots"] if item["id"].startswith("sparc32-"))
+        sparc["compiler"]["argv"].append("{unknown}/lib")
+        with tempfile.TemporaryDirectory(prefix="pwnc-manifest-unit-") as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(SysrootError, "unsupported compiler argv template"):
+                load_manifest(path)
 
     def test_ppc64_roots_attest_elfv1_and_elfv2_e_flags(self) -> None:
         big = resolve_sysroot(resolve_target("ppc64"))
@@ -165,6 +194,28 @@ class GlibcSysrootManifestTests(unittest.TestCase):
 
 
 class GlibcSysrootArtifactValidationTests(unittest.TestCase):
+    def test_system_compiler_expands_sysroot_templates(self) -> None:
+        spec = resolve_sysroot("sparc32")
+        sysroot = Path("/cache/root")
+        provisioned = ProvisionedSysroot(
+            spec,
+            sysroot,
+            sysroot,
+            sysroot / spec.libc,
+            sysroot / spec.loader,
+        )
+        with mock.patch(
+            "payloads.tests.runtime_support.sysroots.shutil.which",
+            return_value="/toolchain/bin/sparc64-linux-gnu-gcc",
+        ):
+            argv = provisioned.compiler_argv
+        self.assertEqual(argv[0:2], ("/toolchain/bin/sparc64-linux-gnu-gcc", "-m32"))
+        self.assertIn("/cache/root/usr/sparc64-linux-gnu/include", argv)
+        self.assertIn("-B/cache/root/usr/sparc64-linux-gnu/lib32/", argv)
+        self.assertIn("-L/cache/root/usr/sparc64-linux-gnu/lib32", argv)
+        self.assertEqual(argv[-1], "--sysroot=/cache/root")
+        self.assertFalse(any("{" in argument or "}" in argument for argument in argv))
+
     def test_guest_absolute_interpreter_symlink_resolves_inside_sysroot(self) -> None:
         spec = resolve_sysroot("x86_64", lane="glibc-2.23")
         with tempfile.TemporaryDirectory(prefix="pwnc-sysroot-guest-link-") as directory:

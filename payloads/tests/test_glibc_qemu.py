@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from collections.abc import Iterable
 from pathlib import Path
+from unittest import mock
 
 from payloads import (
     ABI,
@@ -185,7 +186,8 @@ int main(void) {
         return 101;
     if (read_exact(STDIN_FILENO, sizes, sizeof(sizes)) != 0)
         return 102;
-    if (sizes[0] > sizeof(pwnc_storage) || sizes[1] > 0x10000)
+    if (sizes[0] > sizeof(pwnc_storage) ||
+        sizes[1] > 0x10000 - (sizeof(void *) == 4 ? 8 : 0))
         return 103;
     if (read_exact(STDIN_FILENO, pwnc_storage, sizes[0]) != 0 ||
         read_exact(STDIN_FILENO, chain_base, sizes[1]) != 0)
@@ -341,9 +343,26 @@ def _assert_exact_interpreter(
 ) -> None:
     test.assertIsNotNone(profile.interpreter)
     assert profile.interpreter is not None
-    guest_interpreter = provisioned.resolve_guest_path(profile.interpreter)
-    test.assertTrue(guest_interpreter.is_file(), guest_interpreter)
-    test.assertTrue(os.path.samefile(guest_interpreter, provisioned.loader))
+    if provisioned.spec.interpreter is None:
+        guest_interpreter = provisioned.resolve_guest_path(profile.interpreter)
+        test.assertTrue(guest_interpreter.is_file(), guest_interpreter)
+        test.assertTrue(os.path.samefile(guest_interpreter, provisioned.loader))
+        return
+
+    expected = f"/{provisioned.spec.interpreter}"
+    test.assertEqual(profile.interpreter, expected)
+    if provisioned.spec.interpreter == provisioned.spec.loader:
+        guest_interpreter = provisioned.resolve_guest_path(profile.interpreter)
+        test.assertTrue(guest_interpreter.is_file(), guest_interpreter)
+        test.assertTrue(os.path.samefile(guest_interpreter, provisioned.loader))
+        return
+
+    # Debian-style cross packages can store a multilib loader below their
+    # target prefix even though every guest ELF requests its canonical ABI
+    # path.  The exact pinned libc records that ABI path too; qemu_argv then
+    # invokes the separately validated package-storage loader directly.
+    libc_profile = inspect_elf(provisioned.libc)
+    test.assertEqual(libc_profile.interpreter, expected)
 
 
 def _assert_runtime_libc(
@@ -449,6 +468,38 @@ def _auxiliary_image(test: unittest.TestCase, writes: Iterable[object], base: in
             result[index] = value
             occupied[index] = 1
     return bytes(result)
+
+
+class GlibcQemuHarnessUnitTests(unittest.TestCase):
+    def test_implicit_interpreter_follows_guest_absolute_symlink(self) -> None:
+        spec = load_manifest().resolve("ppc64", "glibc-2.24")
+        self.assertIsNone(spec.interpreter)
+        with tempfile.TemporaryDirectory(prefix="pwnc-interpreter-unit-") as directory:
+            sysroot = Path(directory)
+            loader = sysroot / spec.loader
+            loader.parent.mkdir(parents=True)
+            loader.write_bytes(b"loader")
+            alias = sysroot / "lib64/ld64.so.1"
+            alias.parent.mkdir()
+            alias.symlink_to("/lib/ld64.so.1")
+            provisioned = ProvisionedSysroot(spec, sysroot, sysroot, sysroot / spec.libc, loader)
+            profile = mock.Mock(interpreter="/lib64/ld64.so.1")
+            _assert_exact_interpreter(self, provisioned, profile)
+
+    def test_cross_package_loader_storage_is_distinct_from_guest_interpreter(self) -> None:
+        spec = load_manifest().resolve("sparc32")
+        provisioned = ProvisionedSysroot(
+            spec,
+            Path("/cache/root"),
+            Path("/cache/root"),
+            Path("/cache/root") / spec.libc,
+            Path("/cache/root") / spec.loader,
+        )
+        executable_profile = mock.Mock(interpreter="/lib/ld-linux.so.2")
+        libc_profile = mock.Mock(interpreter="/lib/ld-linux.so.2")
+        with mock.patch(f"{__name__}.inspect_elf", return_value=libc_profile) as inspect:
+            _assert_exact_interpreter(self, provisioned, executable_profile)
+        inspect.assert_called_once_with(provisioned.libc)
 
 
 @unittest.skipUnless(_OPT_IN, f"set PWNC_GLIBC_QEMU_TESTS=1 to run; cache: {_CACHE_ENV}, selector: {_SELECTOR_ENV}")
@@ -679,7 +730,12 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                 chain_base, profile.symbol_offsets["pwnc_chain"] + 0xF0000 + (8 if target.bits == 32 else 0)
             )
             self.assertEqual(storage_address, profile.symbol_offsets["pwnc_storage"])
-            chain_mapping = next(item for item in profile.load_ranges if item.contains(chain_base, 0x10000))
+            # i386 biases the pivot by eight bytes to satisfy its concrete
+            # function-entry alignment, leaving 0xfff8 bytes in the fixture's
+            # final 64 KiB chain window.  Do not claim the eight bytes beyond
+            # the actual BSS-backed PT_LOAD are writable.
+            chain_capacity = 0x10000 - (8 if target.bits == 32 else 0)
+            chain_mapping = next(item for item in profile.load_ranges if item.contains(chain_base, chain_capacity))
             self.assertTrue(chain_mapping.writable)
             self.assertFalse(chain_mapping.executable)
             builder = LibcROPBuilder.from_file(

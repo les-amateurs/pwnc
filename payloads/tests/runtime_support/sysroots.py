@@ -92,6 +92,7 @@ class SysrootSpec:
     sysroot_subdir: str | None
     compiler: CompilerSpec
     qemu: str
+    interpreter: str | None
     loader: str
     libc: str
     elf: ElfIdentity
@@ -129,6 +130,8 @@ class SysrootSpec:
             },
             "version_marker": self.version_marker,
         }
+        if self.interpreter is not None:
+            value["interpreter"] = self.interpreter
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()[:16]
 
@@ -240,7 +243,8 @@ class ProvisionedSysroot:
             executable = shutil.which(compiler.argv[0])
             if executable is None:
                 raise SysrootError(f"required cross compiler is unavailable: {compiler.argv[0]}")
-            return (executable, *compiler.argv[1:], f"--sysroot={self.sysroot}")
+            arguments = tuple(argument.replace("{sysroot}", str(self.sysroot)) for argument in compiler.argv[1:])
+            return (executable, *arguments, f"--sysroot={self.sysroot}")
         raise SysrootError(f"{self.spec.id}: unknown compiler kind {compiler.kind!r}")
 
 
@@ -468,6 +472,10 @@ def _parse_sysroot(
     argv_raw = compiler_raw.get("argv", [])
     if not isinstance(argv_raw, list) or not all(isinstance(item, str) for item in argv_raw):
         raise SysrootError(f"{spec_id}: compiler argv must be a string list")
+    for argument in argv_raw:
+        remainder = argument.replace("{sysroot}", "")
+        if "{" in remainder or "}" in remainder:
+            raise SysrootError(f"{spec_id}: unsupported compiler argv template {argument!r}")
 
     elf_raw = raw.get("elf")
     if not isinstance(elf_raw, dict):
@@ -485,6 +493,10 @@ def _parse_sysroot(
     sysroot_subdir = raw.get("sysroot_subdir")
     if sysroot_subdir is not None and not isinstance(sysroot_subdir, str):
         raise SysrootError(f"{spec_id}: sysroot_subdir must be a string")
+    loader = _normalize_guest_path(_required_string(raw, "loader"), spec_id)
+    interpreter_raw = raw.get("interpreter")
+    if interpreter_raw is not None and (not isinstance(interpreter_raw, str) or not interpreter_raw):
+        raise SysrootError(f"{spec_id}: interpreter must be a nonempty string when specified")
     return SysrootSpec(
         id=spec_id,
         lane=lane,
@@ -497,7 +509,8 @@ def _parse_sysroot(
         sysroot_subdir=sysroot_subdir,
         compiler=CompilerSpec(compiler_kind, target, tuple(argv_raw)),
         qemu=_required_string(raw, "qemu"),
-        loader=_normalize_guest_path(_required_string(raw, "loader"), spec_id),
+        interpreter=_normalize_guest_path(interpreter_raw, spec_id) if interpreter_raw is not None else None,
+        loader=loader,
         libc=_normalize_guest_path(_required_string(raw, "libc"), spec_id),
         elf=ElfIdentity(elf_class, endian, machine, flags_mask, flags_value),
         version_marker=_required_string(raw, "version_marker"),
