@@ -19,6 +19,7 @@ pivots through the materialized chain from writable non-executable BSS.
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,7 @@ from payloads.tests.test_glibc_qemu import (
 )
 
 _OPT_IN = os.environ.get("PWNC_GLIBC_QEMU_TESTS") == "1"
+_NATIVE_OPT_IN = os.environ.get("PWNC_NATIVE_TESTS") == "1"
 _MARKER = b"PWNC_GLIBC_SEMANTIC_ROP_OK"
 _CHAIN_CAPACITY = 0x10000
 
@@ -351,6 +353,18 @@ def _aligned_chain_base(chain, storage: int) -> tuple[int, int]:
     return chain_base, offset
 
 
+def _native_loader_argv(provisioned, executable: Path) -> tuple[str, ...]:
+    """Invoke an x86 guest through its exact loader without qemu-user."""
+
+    return (
+        str(provisioned.loader),
+        "--inhibit-cache",
+        "--library-path",
+        str(provisioned.libc.parent),
+        str(executable.resolve()),
+    )
+
+
 class GlibcSemanticRopMatrixUnitTests(unittest.TestCase):
     def test_honest_direct_call_matrix_is_exact(self) -> None:
         cases = [
@@ -365,6 +379,14 @@ class GlibcSemanticRopMatrixUnitTests(unittest.TestCase):
         self.assertEqual(len(cases), 28)
         self.assertEqual(len({spec for spec, _ in cases}), 28)
         self.assertEqual(len({target for _, target in cases}), 15)
+        native_x86 = [
+            (spec.id, target.name)
+            for spec in _selected_specs()
+            for name in spec.targets
+            if (target := _catalog_target(name)).arch in {Architecture.X86, Architecture.X86_64}
+        ]
+        self.assertEqual(len(native_x86), 7)
+        self.assertEqual(len({target for _, target in native_x86}), 2)
         excluded = {
             _catalog_target(name).name
             for spec in _selected_specs()
@@ -383,45 +405,10 @@ class GlibcSemanticRopMatrixUnitTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    _OPT_IN,
-    "set PWNC_GLIBC_QEMU_TESTS=1 to run exact-libc semantic ROP under qemu-user",
-)
-class GlibcQemuSemanticWriteROPTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        if not sys.platform.startswith("linux"):
-            raise AssertionError("live qemu-user glibc tests require a Linux host")
-
-    def test_exact_libc_semantic_write_matrix(self) -> None:
-        cases = [
-            (spec, _catalog_target(name))
-            for spec in _selected_specs()
-            for name in spec.targets
-            if _is_honest_direct_libc_target(_catalog_target(name))
-        ]
-        if not cases:
-            self.skipTest("selected sysroot specs contain no honestly modeled direct-call target")
-        for spec, target in cases:
-            provisioned = provision_sysroot(spec, _cache_dir())
-            with (
-                self.subTest(spec=spec.id, target=target.name),
-                tempfile.TemporaryDirectory(prefix="pwnc-glibc-semantic-rop-") as directory,
-            ):
-                executable = Path(directory, "fixture")
-                _compile(provisioned, _SEMANTIC_WRITE_SOURCE, executable, target=target)
-                profile = inspect_elf(executable)
-                _assert_compiled_target(self, profile.target, target)
-                self.assertFalse(profile.pie)
-                self.assertIs(profile.linkage, Linkage.DYNAMIC)
-                self.assertTrue(profile.nx, profile.nx_evidence)
-                _assert_exact_interpreter(self, provisioned, profile)
-                self._run_semantic_write(provisioned, executable, profile, target)
-
-    def _run_semantic_write(self, provisioned, executable, profile, target) -> None:
+class _SemanticWriteRunner:
+    def _run_semantic_write(self, provisioned, executable, profile, target, *, argv=None) -> None:
         process = subprocess.Popen(
-            provisioned.qemu_argv(executable),
+            provisioned.qemu_argv(executable) if argv is None else argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -501,6 +488,88 @@ class GlibcQemuSemanticWriteROPTests(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
             process.communicate()
+
+
+@unittest.skipUnless(
+    _OPT_IN,
+    "set PWNC_GLIBC_QEMU_TESTS=1 to run exact-libc semantic ROP under qemu-user",
+)
+class GlibcQemuSemanticWriteROPTests(_SemanticWriteRunner, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if not sys.platform.startswith("linux"):
+            raise AssertionError("live qemu-user glibc tests require a Linux host")
+
+    def test_exact_libc_semantic_write_matrix(self) -> None:
+        cases = [
+            (spec, _catalog_target(name))
+            for spec in _selected_specs()
+            for name in spec.targets
+            if _is_honest_direct_libc_target(_catalog_target(name))
+        ]
+        if not cases:
+            self.skipTest("selected sysroot specs contain no honestly modeled direct-call target")
+        for spec, target in cases:
+            provisioned = provision_sysroot(spec, _cache_dir())
+            with (
+                self.subTest(spec=spec.id, target=target.name),
+                tempfile.TemporaryDirectory(prefix="pwnc-glibc-semantic-rop-") as directory,
+            ):
+                executable = Path(directory, "fixture")
+                _compile(provisioned, _SEMANTIC_WRITE_SOURCE, executable, target=target)
+                profile = inspect_elf(executable)
+                _assert_compiled_target(self, profile.target, target)
+                self.assertFalse(profile.pie)
+                self.assertIs(profile.linkage, Linkage.DYNAMIC)
+                self.assertTrue(profile.nx, profile.nx_evidence)
+                _assert_exact_interpreter(self, provisioned, profile)
+                self._run_semantic_write(provisioned, executable, profile, target)
+
+
+@unittest.skipUnless(
+    _NATIVE_OPT_IN,
+    "set PWNC_NATIVE_TESTS=1 to run pinned-libc semantic ROP directly on native x86",
+)
+class GlibcNativeX86SemanticWriteROPTests(_SemanticWriteRunner, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if not sys.platform.startswith("linux"):
+            raise AssertionError("native pinned-libc ROP tests require a Linux host")
+        if platform.machine().lower() not in {"amd64", "x86_64"}:
+            raise AssertionError(f"native pinned-libc ROP requires an x86_64 host, not {platform.machine()!r}")
+
+    def test_every_pinned_i386_and_amd64_semantic_write_chain_executes_natively(self) -> None:
+        cases = [
+            (spec, _catalog_target(name))
+            for spec in _selected_specs()
+            for name in spec.targets
+            if _catalog_target(name).arch in {Architecture.X86, Architecture.X86_64}
+        ]
+        if not cases:
+            self.skipTest("selected sysroot specs contain no native x86 target")
+        for spec, target in cases:
+            provisioned = provision_sysroot(spec, _cache_dir())
+            with (
+                self.subTest(spec=spec.id, target=target.name),
+                tempfile.TemporaryDirectory(prefix="pwnc-glibc-native-rop-") as directory,
+            ):
+                executable = Path(directory, "fixture")
+                _compile(provisioned, _SEMANTIC_WRITE_SOURCE, executable, target=target)
+                profile = inspect_elf(executable)
+                _assert_compiled_target(self, profile.target, target)
+                self.assertFalse(profile.pie)
+                self.assertIs(profile.linkage, Linkage.DYNAMIC)
+                self.assertTrue(profile.nx, profile.nx_evidence)
+                _assert_exact_interpreter(self, provisioned, profile)
+                self._run_semantic_write(
+                    provisioned,
+                    executable,
+                    profile,
+                    target,
+                    argv=_native_loader_argv(provisioned, executable),
+                )
 
 
 if __name__ == "__main__":
