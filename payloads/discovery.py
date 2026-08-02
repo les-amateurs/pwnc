@@ -1,0 +1,1129 @@
+"""Strict, composable discovery over an arbitrary-memory read/write primitive.
+
+Discovery is deliberately separate from transport.  Every address in this
+module is an absolute target address, scans are bounded, ambiguous results are
+errors, and the only mutating operation is an explicit compare-before-write
+ROP insertion plan.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from enum import Enum, IntEnum
+from pathlib import Path
+
+from .arbio import ArbitraryMemory
+from .errors import ConstraintError, MemoryAccessError, PayloadError, UnsupportedTargetError
+from .model import Image, RuntimeLayout
+from .pwntools_compat import ExactELFAdapter, PwntoolsCompatibilityError
+from .rop import ROPChain
+from .target import ABI, Architecture, Target
+
+
+class DiscoveryError(PayloadError):
+    """A runtime address could not be discovered with strict evidence."""
+
+
+class DiscoveryNotFoundError(DiscoveryError):
+    """No candidate satisfied a requested discovery transition."""
+
+
+class DiscoveryAmbiguityError(DiscoveryError):
+    """More than one candidate satisfied a requested transition."""
+
+    def __init__(self, description: str, candidates: Sequence[DiscoveryCandidate]) -> None:
+        self.description = description
+        self.candidates = tuple(candidates)
+        rendered = ", ".join(f"{item.address:#x}->{item.value:#x}" for item in self.candidates)
+        super().__init__(f"ambiguous {description}: {len(self.candidates)} candidates ({rendered})")
+
+
+class StaleDiscoveryError(DiscoveryError):
+    """Memory changed after a mutation plan captured its expected bytes."""
+
+
+class InconsistentLinkMapError(DiscoveryError):
+    """The runtime loader list was malformed or changed during traversal."""
+
+
+def _integer(value: object, name: str, *, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int")
+    if value < (1 if positive else 0):
+        qualifier = "positive" if positive else "non-negative"
+        raise ValueError(f"{name} must be {qualifier}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySpan:
+    """One bounded half-open runtime memory interval."""
+
+    address: int
+    size: int
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        _integer(self.address, "span address")
+        _integer(self.size, "span size", positive=True)
+        if not isinstance(self.label, str):
+            raise TypeError("span label must be a str")
+
+    @property
+    def end(self) -> int:
+        return self.address + self.size
+
+    def contains(self, address: int, size: int = 1) -> bool:
+        return self.address <= address and address + size <= self.end
+
+
+@dataclass(frozen=True, slots=True)
+class PointerLeak:
+    value: int
+    address: int | None = None
+    symbol: str | None = None
+    addend: int = 0
+
+    def __post_init__(self) -> None:
+        _integer(self.value, "leaked pointer")
+        if self.address is not None:
+            _integer(self.address, "leak address")
+        if self.symbol is not None and (not isinstance(self.symbol, str) or not self.symbol):
+            raise ValueError("leak symbol must be a non-empty str or None")
+        if isinstance(self.addend, bool) or not isinstance(self.addend, int):
+            raise TypeError("leak addend must be an int")
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryCandidate:
+    address: int
+    value: int
+    classification: str
+    evidence: tuple[str, ...] = ()
+    image_offset: int | None = None
+
+    def __post_init__(self) -> None:
+        _integer(self.address, "candidate address")
+        _integer(self.value, "candidate value")
+        if not self.classification:
+            raise ValueError("candidate classification cannot be empty")
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+
+
+def _merge_layout(layout: RuntimeLayout | None, image: Image | str, base: int) -> RuntimeLayout:
+    current = layout or RuntimeLayout()
+    if image is Image.MAIN:
+        return replace(current, main_base=base)
+    if image is Image.LIBC:
+        return replace(current, libc_base=base)
+    if image is Image.LOADER:
+        return replace(current, loader_base=base)
+    if image is Image.STACK:
+        return replace(current, stack_base=base)
+    extra = dict(current.extra_bases)
+    extra[str(image)] = base
+    return replace(current, extra_bases=extra)
+
+
+@dataclass(frozen=True, slots=True)
+class ImageResolution:
+    image: Image
+    base: int
+    adapter: ExactELFAdapter
+    leak: PointerLeak
+    evidence: tuple[str, ...] = ()
+
+    def merged_layout(self, layout: RuntimeLayout | None = None) -> RuntimeLayout:
+        return _merge_layout(layout, self.image, self.base)
+
+
+@dataclass(frozen=True, slots=True)
+class HeapResolution:
+    pointer: int
+    base: int | None
+    span: MemorySpan | None
+    source_address: int | None
+    evidence: tuple[str, ...] = ()
+
+    def merged_layout(self, layout: RuntimeLayout | None = None) -> RuntimeLayout:
+        if self.base is None:
+            raise ConstraintError("cannot add an unresolved heap base to RuntimeLayout")
+        return _merge_layout(layout, "heap", self.base)
+
+
+@dataclass(frozen=True, slots=True)
+class StackResolution:
+    environ_symbol_address: int
+    environ_pointer: int
+    first_environment_pointer: int | None
+    base: int | None
+    span: MemorySpan | None
+    evidence: tuple[str, ...] = ()
+
+    def merged_layout(self, layout: RuntimeLayout | None = None) -> RuntimeLayout:
+        if self.base is None:
+            raise ConstraintError("cannot add an unresolved stack base to RuntimeLayout")
+        return _merge_layout(layout, Image.STACK, self.base)
+
+
+class ReturnClassification(str, Enum):
+    MAIN_EXECUTABLE_POINTER = "main-executable-pointer"
+    CALL_CONTINUATION = "call-continuation"
+    SYMBOLIZED_CALL_CONTINUATION = "symbolized-call-continuation"
+
+
+@dataclass(frozen=True, slots=True)
+class MainReturnAddress:
+    slot_address: int
+    return_address: int
+    main_base: int
+    main_offset: int
+    call_site: int | None
+    classification: ReturnClassification
+    symbol: str | None = None
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedMemoryWrite:
+    address: int
+    expected: bytes
+    replacement: bytes
+    purpose: str
+
+    def __post_init__(self) -> None:
+        if not self.replacement:
+            raise ValueError("planned replacement cannot be empty")
+        if len(self.expected) != len(self.replacement):
+            raise ValueError("planned expected and replacement byte counts must match")
+
+
+@dataclass(frozen=True, slots=True)
+class ROPInsertionPlan:
+    target: Target
+    return_site: MainReturnAddress
+    writes: tuple[PlannedMemoryWrite, ...]
+    chain: ROPChain
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "writes", tuple(self.writes))
+        if not self.writes:
+            raise ValueError("ROP insertion plan needs at least one write")
+
+    def apply(self, memory: ArbitraryMemory, *, verify: bool = True) -> int:
+        if memory.target != self.target:
+            raise ConstraintError("ROP insertion memory target differs from the planned target")
+        if not isinstance(verify, bool):
+            raise TypeError("verify must be bool")
+        # Check every expectation before making the first mutation.
+        for write in self.writes:
+            actual = memory.read(write.address, len(write.expected))
+            if actual != write.expected:
+                raise StaleDiscoveryError(f"memory at {write.address:#x} changed after ROP insertion was planned")
+        total = 0
+        for write in self.writes:
+            total += memory.write(write.address, write.replacement, verify=verify)
+        return total
+
+
+class RDebugState(IntEnum):
+    CONSISTENT = 0
+    ADDING = 1
+    DELETING = 2
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedObject:
+    link_map_address: int
+    base: int
+    name_address: int
+    name_bytes: bytes
+    dynamic_address: int
+    next_address: int
+    previous_address: int
+    adapter: ExactELFAdapter | None = None
+    evidence: tuple[str, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return self.name_bytes.decode(errors="surrogateescape")
+
+
+@dataclass(frozen=True, slots=True)
+class LinkMapSnapshot:
+    loader_base: int
+    r_debug_address: int
+    r_version: int
+    r_state: RDebugState
+    r_brk: int
+    r_ldbase: int
+    head_address: int
+    objects: tuple[LoadedObject, ...]
+
+
+HeapValidator = Callable[[ArbitraryMemory, int], bool]
+
+
+def _process_targets_compatible(left: Target, right: Target) -> bool:
+    if left == right:
+        return True
+    return (
+        {left.arch, right.arch} == {Architecture.ARM, Architecture.THUMB}
+        and left.bits == right.bits
+        and left.endian is right.endian
+        and left.abi is right.abi
+        and left.os == right.os
+    )
+
+
+class ExactProcessDiscovery:
+    """Resolve process layout facts from strict arbitrary-memory reads."""
+
+    def __init__(
+        self,
+        memory: ArbitraryMemory,
+        *,
+        main: ExactELFAdapter | None = None,
+        libc: ExactELFAdapter | None = None,
+        loader: ExactELFAdapter | None = None,
+        layout: RuntimeLayout | None = None,
+        runtime_page_size: int = 0x1000,
+    ) -> None:
+        if not isinstance(memory, ArbitraryMemory):
+            raise TypeError("memory must be ArbitraryMemory")
+        for name, adapter in (("main", main), ("libc", libc), ("loader", loader)):
+            if adapter is not None and not isinstance(adapter, ExactELFAdapter):
+                raise TypeError(f"{name} must be ExactELFAdapter or None")
+            if adapter is not None and not _process_targets_compatible(adapter.target, memory.target):
+                raise ConstraintError(f"{name} target differs from arbitrary-memory target")
+        _integer(runtime_page_size, "runtime_page_size", positive=True)
+        if runtime_page_size & (runtime_page_size - 1):
+            raise ValueError("runtime_page_size must be a power of two")
+        self.memory = memory
+        self.main = main
+        self.libc = libc
+        self.loader = loader
+        self.layout = layout or RuntimeLayout()
+        self.runtime_page_size = runtime_page_size
+
+    @property
+    def target(self) -> Target:
+        return self.memory.target
+
+    def _check_address(self, address: int, name: str) -> int:
+        _integer(address, name)
+        if address > self.target.mask:
+            raise ValueError(f"{name} does not fit the target address width")
+        return address
+
+    def _check_span(self, span: MemorySpan) -> MemorySpan:
+        if not isinstance(span, MemorySpan):
+            raise TypeError("span must be MemorySpan")
+        self._check_address(span.address, "span address")
+        if span.end - 1 > self.target.mask:
+            raise ValueError("span does not fit the target address width")
+        return span
+
+    def scan_pointers(
+        self,
+        span: MemorySpan,
+        *,
+        alignment: int | None = None,
+    ) -> tuple[DiscoveryCandidate, ...]:
+        span = self._check_span(span)
+        step = self.target.word_size if alignment is None else _integer(alignment, "alignment", positive=True)
+        if span.address % self.memory.traits.read_alignment:
+            raise MemoryAccessError("pointer-scan start does not satisfy primitive read alignment")
+        if span.size % self.memory.traits.read_width:
+            raise MemoryAccessError("pointer-scan size does not satisfy primitive read width")
+        raw = self.memory.read(span.address, span.size)
+        candidates: list[DiscoveryCandidate] = []
+        for offset in range(0, span.size - self.target.word_size + 1, step):
+            address = span.address + offset
+            if address % self.target.word_size:
+                continue
+            value = self.target.unpack(raw[offset : offset + self.target.word_size])
+            candidates.append(DiscoveryCandidate(address, value, "pointer-word"))
+        return tuple(candidates)
+
+    def _runtime_ranges(self, adapter: ExactELFAdapter, base: int):
+        """Return ranges rebased by ELF load bias, not ELF header address."""
+
+        return tuple((base + item.start, base + item.end, item) for item in adapter.profile.load_ranges)
+
+    def _pointer_in_image(self, pointer: int, adapter: ExactELFAdapter, base: int) -> bool:
+        normalized = pointer & ~1 if Architecture.THUMB in {adapter.target.arch, self.target.arch} else pointer
+        return any(start <= normalized < end for start, end, _item in self._runtime_ranges(adapter, base))
+
+    def _validate_runtime_image(self, adapter: ExactELFAdapter, base: int) -> None:
+        self._check_address(base, "image base")
+        if base % self.runtime_page_size:
+            raise DiscoveryError(f"image base {base:#x} is not page aligned")
+        header_size = 64 if adapter.target.bits == 64 else 52
+        header_range = next(
+            (item for item in adapter.profile.load_ranges if item.file_offset == 0 and item.file_size >= header_size),
+            None,
+        )
+        if header_range is None:
+            raise DiscoveryError("exact ELF has no file-offset-zero PT_LOAD suitable for runtime validation")
+        runtime_address = base + header_range.start
+        expected = Path(adapter.path).read_bytes()[:header_size]
+        if len(expected) != header_size or not expected.startswith(b"\x7fELF"):
+            raise PwntoolsCompatibilityError("exact adapter path no longer contains an ELF header")
+        actual = self.memory.read(runtime_address, header_size)
+        if actual != expected:
+            raise DiscoveryError(f"runtime ELF identity mismatch at {runtime_address:#x}")
+
+    def _exact_runtime_bytes(
+        self,
+        adapter: ExactELFAdapter,
+        base: int,
+        address: int,
+        size: int,
+    ) -> bytes | None:
+        """Read exact file bytes corresponding to one runtime-mapped range."""
+
+        for start, _end, load in self._runtime_ranges(adapter, base):
+            offset = address - start
+            if offset < 0 or offset + size > load.file_size:
+                continue
+            artifact_offset = load.file_offset + offset
+            with Path(adapter.path).open("rb") as artifact:
+                artifact.seek(artifact_offset)
+                data = artifact.read(size)
+            return data if len(data) == size else None
+        return None
+
+    def _base_from_leak(
+        self,
+        leak: PointerLeak,
+        adapter: ExactELFAdapter,
+        explicit_base: int | None,
+        *,
+        image_name: str,
+        search_pages: int,
+    ) -> int:
+        if explicit_base is not None:
+            base = self._check_address(explicit_base, f"{image_name}_base")
+        elif leak.symbol is not None:
+            base = leak.value - adapter.symbol(leak.symbol) - leak.addend
+            if base < 0:
+                raise DiscoveryError(f"{image_name} symbol leak produces a negative base")
+        else:
+            if not self.memory.traits.invalid_read_safe:
+                raise ConstraintError(
+                    f"inferring {image_name} base requires invalid_read_safe or an explicit "
+                    f"{image_name}_base/symbol leak"
+                )
+            page = leak.value & -self.runtime_page_size
+            matches: list[int] = []
+            for index in range(_integer(search_pages, "image_search_pages", positive=True)):
+                candidate = page - index * self.runtime_page_size
+                if candidate < 0:
+                    break
+                try:
+                    self._validate_runtime_image(adapter, candidate)
+                except (DiscoveryError, MemoryAccessError):
+                    continue
+                if self._pointer_in_image(leak.value, adapter, candidate):
+                    matches.append(candidate)
+            if not matches:
+                raise DiscoveryNotFoundError(f"no exact {image_name} image contains leak {leak.value:#x}")
+            if len(matches) != 1:
+                values = tuple(
+                    DiscoveryCandidate(leak.address or leak.value, value, f"{image_name}-base") for value in matches
+                )
+                raise DiscoveryAmbiguityError(f"{image_name} base", values)
+            base = matches[0]
+        self._validate_runtime_image(adapter, base)
+        if not self._pointer_in_image(leak.value, adapter, base):
+            raise DiscoveryError(f"leak {leak.value:#x} is outside exact {image_name} runtime ranges")
+        return base
+
+    @staticmethod
+    def _one(description: str, candidates: Sequence[DiscoveryCandidate]) -> DiscoveryCandidate:
+        if not candidates:
+            raise DiscoveryNotFoundError(f"no {description} candidate was found")
+        if len(candidates) != 1:
+            raise DiscoveryAmbiguityError(description, candidates)
+        return candidates[0]
+
+    @staticmethod
+    def _as_leak(value: PointerLeak | int, *, address: int | None = None) -> PointerLeak:
+        if isinstance(value, PointerLeak):
+            return value
+        return PointerLeak(_integer(value, "leaked pointer"), address)
+
+    def heap_to_libc(
+        self,
+        heap_leak: HeapResolution | PointerLeak | int,
+        *,
+        heap_base: int | None = None,
+        heap_span: MemorySpan | None = None,
+        libc_base: int | None = None,
+        libc_pointer: int | None = None,
+        libc_pointer_address: int | None = None,
+        scan_size: int = 0x10000,
+        image_search_pages: int = 0x400,
+    ) -> ImageResolution:
+        if self.libc is None:
+            raise ConstraintError("heap_to_libc requires an exact libc adapter")
+        if isinstance(heap_leak, HeapResolution):
+            origin = heap_leak.pointer
+            heap_base = heap_leak.base if heap_base is None else heap_base
+            heap_span = heap_leak.span if heap_span is None else heap_span
+        elif isinstance(heap_leak, PointerLeak):
+            origin = heap_leak.value
+        else:
+            origin = _integer(heap_leak, "heap leak")
+        if heap_span is None:
+            start = heap_base if heap_base is not None else origin & -self.runtime_page_size
+            heap_span = MemorySpan(start, _integer(scan_size, "scan_size", positive=True), "heap scan")
+        self._check_span(heap_span)
+
+        if libc_pointer_address is not None:
+            address = self._check_address(libc_pointer_address, "libc_pointer_address")
+            observed = self.memory.read_ptr(address)
+            if libc_pointer is not None and observed != libc_pointer:
+                raise DiscoveryError("hardcoded libc pointer does not match its supplied memory slot")
+            leak = PointerLeak(observed, address)
+            base = self._base_from_leak(leak, self.libc, libc_base, image_name="libc", search_pages=image_search_pages)
+            return ImageResolution(Image.LIBC, base, self.libc, leak, ("explicit pointer slot",))
+        if libc_pointer is not None:
+            leak = PointerLeak(self._check_address(libc_pointer, "libc_pointer"))
+            base = self._base_from_leak(leak, self.libc, libc_base, image_name="libc", search_pages=image_search_pages)
+            return ImageResolution(Image.LIBC, base, self.libc, leak, ("explicit pointer",))
+
+        candidates: list[tuple[DiscoveryCandidate, int]] = []
+        for item in self.scan_pointers(heap_span):
+            try:
+                base = self._base_from_leak(
+                    PointerLeak(item.value, item.address),
+                    self.libc,
+                    libc_base,
+                    image_name="libc",
+                    search_pages=image_search_pages,
+                )
+            except DiscoveryError:
+                continue
+            candidates.append(
+                (
+                    DiscoveryCandidate(
+                        item.address,
+                        item.value,
+                        "libc-pointer",
+                        ("points into exact libc PT_LOAD",),
+                        item.value - base,
+                    ),
+                    base,
+                )
+            )
+        by_base: dict[int, list[DiscoveryCandidate]] = {}
+        for item, base in candidates:
+            by_base.setdefault(base, []).append(item)
+        representatives = [items[0] for items in by_base.values()]
+        chosen = self._one("heap-to-libc resolution", representatives)
+        base = next(base for base, items in by_base.items() if chosen in items)
+        corroboration = tuple(item.address for item in by_base[base])
+        return ImageResolution(
+            Image.LIBC,
+            base,
+            self.libc,
+            PointerLeak(chosen.value, chosen.address),
+            chosen.evidence + (f"corroborating pointer slots: {', '.join(hex(item) for item in corroboration)}",),
+        )
+
+    def _resolve_image_input(
+        self,
+        value: ImageResolution | PointerLeak | int,
+        adapter: ExactELFAdapter,
+        explicit_base: int | None,
+        *,
+        image_name: str,
+    ) -> tuple[PointerLeak, int]:
+        if isinstance(value, ImageResolution):
+            if value.adapter.identity != adapter.identity:
+                raise ConstraintError(f"{image_name} resolution belongs to a different exact artifact")
+            base = value.base if explicit_base is None else explicit_base
+            leak = value.leak
+        else:
+            leak = self._as_leak(value)
+            base = explicit_base
+        resolved = self._base_from_leak(leak, adapter, base, image_name=image_name, search_pages=0x400)
+        return leak, resolved
+
+    def _image_scan_spans(
+        self,
+        adapter: ExactELFAdapter,
+        base: int,
+        explicit: MemorySpan | None,
+        *,
+        writable_only: bool,
+    ) -> tuple[MemorySpan, ...]:
+        if explicit is not None:
+            return (self._check_span(explicit),)
+        return tuple(
+            MemorySpan(base + item.start, item.size, "exact image scan")
+            for item in adapter.profile.load_ranges
+            if item.readable and (item.writable or not writable_only) and item.size >= self.target.word_size
+        )
+
+    def libc_to_heap(
+        self,
+        libc_leak: ImageResolution | PointerLeak | int,
+        *,
+        libc_base: int | None = None,
+        libc_span: MemorySpan | None = None,
+        heap_base: int | None = None,
+        heap_span: MemorySpan | None = None,
+        heap_pointer: int | None = None,
+        heap_pointer_address: int | None = None,
+        validator: HeapValidator | None = None,
+    ) -> HeapResolution:
+        if self.libc is None:
+            raise ConstraintError("libc_to_heap requires an exact libc adapter")
+        _leak, base = self._resolve_image_input(libc_leak, self.libc, libc_base, image_name="libc")
+        if heap_span is None and heap_base is not None:
+            heap_span = MemorySpan(heap_base, 0x100000, "hardcoded heap window")
+        if heap_span is None and validator is None:
+            raise ConstraintError("heap classification requires heap_base/heap_span or an explicit allocator validator")
+        if heap_span is not None:
+            self._check_span(heap_span)
+            if heap_base is not None and heap_span.address != heap_base:
+                raise ConstraintError("heap_base and heap_span.address disagree")
+
+        def valid(pointer: int) -> bool:
+            in_span = heap_span is not None and heap_span.contains(pointer)
+            checked = validator is not None and bool(validator(self.memory, pointer))
+            return in_span or checked
+
+        if heap_pointer_address is not None:
+            slot = self._check_address(heap_pointer_address, "heap_pointer_address")
+            observed = self.memory.read_ptr(slot)
+            if heap_pointer is not None and observed != heap_pointer:
+                raise DiscoveryError("hardcoded heap pointer does not match its supplied memory slot")
+            if not valid(observed):
+                raise DiscoveryError("hardcoded heap pointer fails heap classification")
+            return HeapResolution(observed, heap_base, heap_span, slot, ("explicit pointer slot",))
+        if heap_pointer is not None:
+            pointer = self._check_address(heap_pointer, "heap_pointer")
+            if not valid(pointer):
+                raise DiscoveryError("hardcoded heap pointer fails heap classification")
+            return HeapResolution(pointer, heap_base, heap_span, None, ("explicit pointer",))
+
+        candidates: list[DiscoveryCandidate] = []
+        for span in self._image_scan_spans(self.libc, base, libc_span, writable_only=True):
+            for item in self.scan_pointers(span):
+                if valid(item.value):
+                    candidates.append(
+                        DiscoveryCandidate(item.address, item.value, "heap-pointer", ("heap classifier accepted",))
+                    )
+        groups: dict[tuple[object, ...], list[DiscoveryCandidate]] = {}
+        for item in candidates:
+            key = (
+                ("span", heap_span.address, heap_span.size)
+                if heap_span is not None and heap_span.contains(item.value)
+                else ("validated-pointer", item.value)
+            )
+            groups.setdefault(key, []).append(item)
+        representative = self._one("libc-to-heap resolution", [items[0] for items in groups.values()])
+        group = next(items for items in groups.values() if representative in items)
+        corroboration = tuple(item.address for item in group)
+        return HeapResolution(
+            representative.value,
+            heap_base,
+            heap_span,
+            representative.address,
+            representative.evidence
+            + (f"corroborating pointer slots: {', '.join(hex(item) for item in corroboration)}",),
+        )
+
+    def libc_to_stack(
+        self,
+        libc_leak: ImageResolution | PointerLeak | int,
+        *,
+        libc_base: int | None = None,
+        environ_symbol: str = "environ",
+        environ_address: int | None = None,
+        stack_base: int | None = None,
+        stack_span: MemorySpan | None = None,
+    ) -> StackResolution:
+        if self.libc is None:
+            raise ConstraintError("libc_to_stack requires an exact libc adapter")
+        _leak, base = self._resolve_image_input(libc_leak, self.libc, libc_base, image_name="libc")
+        if not isinstance(environ_symbol, str) or not environ_symbol:
+            raise ValueError("environ_symbol must be a non-empty str")
+        symbol_address = (
+            self._check_address(environ_address, "environ_address")
+            if environ_address is not None
+            else base + self.libc.symbol(environ_symbol)
+        )
+        environ_pointer = self.memory.read_ptr(symbol_address)
+        if stack_span is None and stack_base is not None:
+            stack_span = MemorySpan(stack_base, 0x1000000, "hardcoded stack window")
+        if stack_span is not None:
+            self._check_span(stack_span)
+            if stack_base is not None and stack_span.address != stack_base:
+                raise ConstraintError("stack_base and stack_span.address disagree")
+            if not stack_span.contains(environ_pointer, self.target.word_size):
+                raise DiscoveryError("environ does not point into the supplied stack span")
+        first = self.memory.read_ptr(environ_pointer)
+        if stack_span is not None and first and not stack_span.contains(first):
+            raise DiscoveryError("the first environment string pointer is outside the supplied stack span")
+        return StackResolution(
+            symbol_address,
+            environ_pointer,
+            first or None,
+            stack_base,
+            stack_span,
+            (f"resolved exact {environ_symbol}",),
+        )
+
+    @staticmethod
+    def _normalize_code_pointer(target: Target, value: int) -> int:
+        return value & ~1 if target.arch is Architecture.THUMB else value
+
+    def _call_site(self, return_address: int, adapter: ExactELFAdapter, base: int) -> int | None:
+        target = self.target
+        if target.arch in {Architecture.X86, Architecture.X86_64}:
+            if return_address >= 5:
+                call_site = return_address - 5
+                runtime = self.memory.read(call_site, 5)
+                exact = self._exact_runtime_bytes(adapter, base, call_site, 5)
+                if runtime[:1] == b"\xe8" and exact == runtime:
+                    return call_site
+            return None
+        if target.arch is Architecture.ARM64 and return_address >= 4:
+            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
+            return return_address - 4 if instruction & 0xFC000000 == 0x94000000 else None
+        if target.arch is Architecture.ARM and return_address >= 4:
+            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
+            return return_address - 4 if instruction & 0x0F000000 == 0x0B000000 else None
+        if target.arch is Architecture.MIPS32 or target.arch is Architecture.MIPS64:
+            if return_address >= 8:
+                instruction = int.from_bytes(self.memory.read(return_address - 8, 4), target.endian.value)
+                return return_address - 8 if instruction >> 26 == 3 else None
+            return None
+        if target.arch in {Architecture.RISCV32, Architecture.RISCV64} and return_address >= 4:
+            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
+            return return_address - 4 if instruction & 0x7F == 0x6F else None
+        if target.arch in {Architecture.POWERPC32, Architecture.POWERPC64} and return_address >= 4:
+            instruction = int.from_bytes(self.memory.read(return_address - 4, 4), target.endian.value)
+            return return_address - 4 if instruction >> 26 == 18 and instruction & 1 else None
+        if target.arch in {Architecture.SPARC32, Architecture.SPARC64} and return_address >= 8:
+            instruction = int.from_bytes(self.memory.read(return_address - 8, 4), target.endian.value)
+            return return_address - 8 if instruction >> 30 == 1 else None
+        return None
+
+    def _nearest_symbol(self, adapter: ExactELFAdapter, offset: int) -> str | None:
+        eligible = [(value, name) for name, value in adapter.symbols.items() if value <= offset]
+        return max(eligible, default=(0, None))[1]
+
+    def environ_to_main_return(
+        self,
+        stack: StackResolution | PointerLeak | int,
+        *,
+        stack_base: int | None = None,
+        stack_span: MemorySpan | None = None,
+        main_base: int | None = None,
+        return_slot: int | None = None,
+        scan_before: int = 0x10000,
+        scan_after: int = 0,
+        require_call_continuation: bool = True,
+    ) -> MainReturnAddress:
+        if self.main is None:
+            raise ConstraintError("environ_to_main_return requires an exact main ELF adapter")
+        if isinstance(stack, StackResolution):
+            environ_pointer = stack.environ_pointer
+            stack_base = stack.base if stack_base is None else stack_base
+            stack_span = stack.span if stack_span is None else stack_span
+        elif isinstance(stack, PointerLeak):
+            environ_pointer = stack.value
+        else:
+            environ_pointer = _integer(stack, "environ pointer")
+        resolved_main_base = main_base if main_base is not None else self.layout.main_base
+        if resolved_main_base is None:
+            if not self.main.profile.pie:
+                resolved_main_base = 0
+            else:
+                raise ConstraintError("PIE return classification requires main_base")
+        self._validate_runtime_image(self.main, resolved_main_base)
+
+        if stack_span is None:
+            before = _integer(scan_before, "scan_before")
+            after = _integer(scan_after, "scan_after")
+            start = environ_pointer - before
+            if start < 0:
+                raise ValueError("stack scan starts below zero")
+            stack_span = MemorySpan(start, before + after + self.target.word_size, "environ stack scan")
+        self._check_span(stack_span)
+        if stack_base is not None and stack_span.address != stack_base:
+            raise ConstraintError("stack_base and stack_span.address disagree")
+
+        slots: tuple[DiscoveryCandidate, ...]
+        if return_slot is not None:
+            slot = self._check_address(return_slot, "return_slot")
+            if not stack_span.contains(slot, self.target.word_size):
+                raise DiscoveryError("return_slot is outside the supplied stack span")
+            slots = (DiscoveryCandidate(slot, self.memory.read_ptr(slot), "stack-pointer"),)
+        else:
+            slots = self.scan_pointers(stack_span)
+        candidates: list[tuple[DiscoveryCandidate, int | None, str | None]] = []
+        for item in slots:
+            normalized = self._normalize_code_pointer(self.target, item.value)
+            if not self._pointer_in_image(normalized, self.main, resolved_main_base):
+                continue
+            executable = any(
+                start <= normalized < end and load.executable
+                for start, end, load in self._runtime_ranges(self.main, resolved_main_base)
+            )
+            if not executable:
+                continue
+            call_site = self._call_site(normalized, self.main, resolved_main_base)
+            if require_call_continuation and call_site is None:
+                continue
+            offset = normalized - resolved_main_base
+            symbol = self._nearest_symbol(self.main, offset)
+            classification = (
+                ReturnClassification.SYMBOLIZED_CALL_CONTINUATION.value
+                if call_site is not None and symbol is not None
+                else ReturnClassification.CALL_CONTINUATION.value
+                if call_site is not None
+                else ReturnClassification.MAIN_EXECUTABLE_POINTER.value
+            )
+            candidates.append(
+                (
+                    DiscoveryCandidate(
+                        item.address,
+                        item.value,
+                        classification,
+                        ("points into exact main executable PT_LOAD",),
+                        offset,
+                    ),
+                    call_site,
+                    symbol,
+                )
+            )
+        chosen = self._one("main return address", [item for item, _site, _symbol in candidates])
+        call_site, symbol = next((site, symbol) for item, site, symbol in candidates if item == chosen)
+        return MainReturnAddress(
+            chosen.address,
+            chosen.value,
+            resolved_main_base,
+            chosen.image_offset or 0,
+            call_site,
+            ReturnClassification(chosen.classification),
+            symbol,
+            chosen.evidence,
+        )
+
+    def plan_rop_insertion(
+        self,
+        return_site: MainReturnAddress,
+        chain: ROPChain,
+        *,
+        layout: RuntimeLayout | None = None,
+        stack_base: int | None = None,
+        main_base: int | None = None,
+        return_slot: int | None = None,
+        post_return_sp: int | None = None,
+    ) -> ROPInsertionPlan:
+        if not isinstance(return_site, MainReturnAddress):
+            raise TypeError("return_site must be MainReturnAddress")
+        if not isinstance(chain, ROPChain):
+            raise TypeError("chain must be ROPChain")
+        if chain.target != self.target:
+            raise ConstraintError("ROP chain target differs from discovery target")
+        if self.target.abi not in {ABI.I386_SYSV, ABI.AMD64_SYSV}:
+            raise UnsupportedTargetError(
+                f"automatic flat return-slot ROP insertion is not supported for {self.target.name}"
+            )
+        slot = return_site.slot_address if return_slot is None else self._check_address(return_slot, "return_slot")
+        if slot != return_site.slot_address:
+            raise ConstraintError("return_slot override does not match the classified return site")
+        if main_base is not None and main_base != return_site.main_base:
+            raise ConstraintError("main_base override does not match the classified return site")
+        expected_sp = slot + self.target.word_size
+        if post_return_sp is not None and post_return_sp != expected_sp:
+            raise ConstraintError("flat x86 ROP insertion requires post_return_sp immediately after return_slot")
+        if stack_base is not None and slot < stack_base:
+            raise ConstraintError("return slot is below the hardcoded stack base")
+        active_layout = layout or self.layout
+        if chain.call_frame is None:
+            replacement = chain.materialize(active_layout)
+        else:
+            replacement = chain.materialize(active_layout, chain_base=slot)
+        expected = self.memory.read(slot, len(replacement))
+        if self.target.unpack(expected[: self.target.word_size]) != return_site.return_address:
+            raise StaleDiscoveryError("classified return address changed before ROP insertion was planned")
+        write = PlannedMemoryWrite(slot, expected, replacement, "replace saved return address with flat ROP chain")
+        return ROPInsertionPlan(self.target, return_site, (write,), chain)
+
+    def _pwntools_got_slots(self, adapter: ExactELFAdapter, base: int) -> tuple[int, ...]:
+        # ExactELFAdapter/pwntools ``ELF.address`` means the runtime address of
+        # the lowest PT_LOAD.  RuntimeLayout and link_map l_addr mean additive
+        # ELF load bias.  They differ for an ET_EXEC linked at e.g. 0x400000.
+        lowest_load = min(item.start for item in adapter.profile.load_ranges)
+        elf = adapter.fresh_elf(runtime_base=base + lowest_load)
+        try:
+            return tuple(sorted({int(value) for value in elf.got.values()}))
+        finally:
+            elf.close()
+
+    def libc_to_loader(
+        self,
+        libc_leak: ImageResolution | PointerLeak | int,
+        *,
+        libc_base: int | None = None,
+        libc_span: MemorySpan | None = None,
+        loader_base: int | None = None,
+        loader_pointer: int | None = None,
+        loader_pointer_address: int | None = None,
+        image_search_pages: int = 0x200,
+    ) -> ImageResolution:
+        """Resolve the exact loader, preferring rebased pwntools GOT slots.
+
+        This path uses the loader's exact ``_r_debug`` symbol later; it never
+        assumes a populated main ``DT_DEBUG``.  Consequently MIPS
+        ``DT_MIPS_RLD_MAP``/``DT_MIPS_RLD_MAP_REL`` do not need special cases.
+        """
+
+        if self.libc is None or self.loader is None:
+            raise ConstraintError("libc_to_loader requires exact libc and loader adapters")
+        _leak, resolved_libc = self._resolve_image_input(libc_leak, self.libc, libc_base, image_name="libc")
+        if loader_pointer_address is not None:
+            slot = self._check_address(loader_pointer_address, "loader_pointer_address")
+            observed = self.memory.read_ptr(slot)
+            if loader_pointer is not None and observed != loader_pointer:
+                raise DiscoveryError("hardcoded loader pointer does not match its supplied memory slot")
+            leak = PointerLeak(observed, slot)
+            base = self._base_from_leak(
+                leak, self.loader, loader_base, image_name="loader", search_pages=image_search_pages
+            )
+            return ImageResolution(Image.LOADER, base, self.loader, leak, ("explicit pointer slot",))
+        if loader_pointer is not None:
+            leak = PointerLeak(self._check_address(loader_pointer, "loader_pointer"))
+            base = self._base_from_leak(
+                leak, self.loader, loader_base, image_name="loader", search_pages=image_search_pages
+            )
+            return ImageResolution(Image.LOADER, base, self.loader, leak, ("explicit pointer",))
+
+        got_slots = self._pwntools_got_slots(self.libc, resolved_libc)
+        slots: list[int] = list(got_slots)
+        slot_sources = {slot: "resolved libc GOT slot" for slot in got_slots}
+        matches: list[tuple[DiscoveryCandidate, int]] = []
+
+        def collect(candidate_slots: Sequence[int]) -> None:
+            for slot in dict.fromkeys(candidate_slots):
+                pointer = self.memory.read_ptr(slot)
+                try:
+                    base = self._base_from_leak(
+                        PointerLeak(pointer, slot),
+                        self.loader,
+                        loader_base,
+                        image_name="loader",
+                        search_pages=image_search_pages,
+                    )
+                except DiscoveryError:
+                    continue
+                source = slot_sources.get(slot, "exact libc writable PT_LOAD")
+                matches.append(
+                    (
+                        DiscoveryCandidate(
+                            slot,
+                            pointer,
+                            "loader-pointer",
+                            (f"{source} points into exact loader PT_LOAD",),
+                            pointer - base,
+                        ),
+                        base,
+                    )
+                )
+
+        collect(slots)
+        if not matches:
+            fallback_slots: list[int] = []
+            for span in self._image_scan_spans(
+                self.libc,
+                resolved_libc,
+                libc_span,
+                writable_only=True,
+            ):
+                fallback_slots.extend(item.address for item in self.scan_pointers(span))
+            collect(fallback_slots)
+        by_base: dict[int, list[DiscoveryCandidate]] = {}
+        for item, base in matches:
+            by_base.setdefault(base, []).append(item)
+        representatives = [items[0] for items in by_base.values()]
+        chosen = self._one("libc-to-loader resolution", representatives)
+        base = next(base for base, items in by_base.items() if chosen in items)
+        corroboration = tuple(item.address for item in by_base[base])
+        return ImageResolution(
+            Image.LOADER,
+            base,
+            self.loader,
+            PointerLeak(chosen.value, chosen.address),
+            chosen.evidence + (f"corroborating pointer slots: {', '.join(hex(item) for item in corroboration)}",),
+        )
+
+    def _read_cstring(self, address: int, limit: int) -> bytes:
+        _integer(limit, "max_name_size", positive=True)
+        result = bytearray()
+        for offset in range(limit):
+            byte = self.memory.read(address + offset, 1)
+            if byte == b"\0":
+                return bytes(result)
+            result.extend(byte)
+        raise InconsistentLinkMapError(f"link_map name at {address:#x} is not NUL-terminated within {limit} bytes")
+
+    def _match_loaded_adapter(
+        self,
+        name: bytes,
+        base: int,
+        known_images: Sequence[ExactELFAdapter],
+    ) -> ExactELFAdapter | None:
+        basename = Path(name.decode(errors="surrogateescape")).name if name else ""
+        matches = [
+            item
+            for item in known_images
+            if basename
+            and basename
+            in {
+                Path(item.path).name,
+                item.profile.soname or "",
+            }
+        ]
+        if len(matches) > 1:
+            candidates = tuple(
+                DiscoveryCandidate(base, base, "loaded-object-artifact", (item.path,)) for item in matches
+            )
+            raise DiscoveryAmbiguityError(f"loaded object {basename!r}", candidates)
+        if matches:
+            self._validate_runtime_image(matches[0], base)
+            return matches[0]
+        return None
+
+    def loader_to_link_map(
+        self,
+        loader_leak: ImageResolution | PointerLeak | int,
+        *,
+        loader_base: int | None = None,
+        r_debug_address: int | None = None,
+        link_map_address: int | None = None,
+        known_images: Sequence[ExactELFAdapter] = (),
+        max_entries: int = 128,
+        max_name_size: int = 4096,
+    ) -> LinkMapSnapshot:
+        if self.loader is None:
+            raise ConstraintError("loader_to_link_map requires an exact loader adapter")
+        _leak, base = self._resolve_image_input(loader_leak, self.loader, loader_base, image_name="loader")
+        debug = (
+            self._check_address(r_debug_address, "r_debug_address")
+            if r_debug_address is not None
+            else base + self.loader.symbol("_r_debug")
+        )
+        word = self.target.word_size
+        r_map_offset = word
+        r_brk_offset = word * 2
+        r_state_offset = word * 3
+        r_ldbase_offset = word * 4
+
+        version_before = int.from_bytes(self.memory.read(debug, 4), self.target.endian.value)
+        if version_before not in {1, 2}:
+            raise InconsistentLinkMapError(f"unsupported r_debug version {version_before}")
+        head_before = self.memory.read_ptr(debug + r_map_offset)
+        r_brk = self.memory.read_ptr(debug + r_brk_offset)
+        state_before = int.from_bytes(self.memory.read(debug + r_state_offset, 4), self.target.endian.value)
+        r_ldbase = self.memory.read_ptr(debug + r_ldbase_offset)
+        try:
+            state = RDebugState(state_before)
+        except ValueError as exc:
+            raise InconsistentLinkMapError(f"unknown r_debug state {state_before}") from exc
+        if state is not RDebugState.CONSISTENT:
+            raise InconsistentLinkMapError(f"loader is not consistent: {state.name.lower()}")
+        if r_ldbase != base:
+            raise InconsistentLinkMapError(
+                f"r_debug loader base {r_ldbase:#x} differs from exact loader base {base:#x}"
+            )
+        head = head_before if link_map_address is None else self._check_address(link_map_address, "link_map_address")
+        if link_map_address is not None and head_before and head != head_before:
+            raise ConstraintError("link_map_address override disagrees with r_debug.r_map")
+
+        limit = _integer(max_entries, "max_entries", positive=True)
+        normalized_known = tuple(known_images)
+        for item in normalized_known:
+            if not isinstance(item, ExactELFAdapter):
+                raise TypeError("known_images must contain ExactELFAdapter values")
+            if not _process_targets_compatible(item.target, self.target):
+                raise ConstraintError("known image target differs from discovery target")
+        objects: list[LoadedObject] = []
+        seen: set[int] = set()
+        current = head
+        previous = 0
+        while current:
+            if current in seen:
+                raise InconsistentLinkMapError(f"link_map cycle detected at {current:#x}")
+            if len(objects) >= limit:
+                raise InconsistentLinkMapError(f"link_map exceeds max_entries={limit}")
+            seen.add(current)
+            values = tuple(self.memory.read_ptr(current + index * word) for index in range(5))
+            object_base, name_address, dynamic_address, next_address, previous_address = values
+            if previous_address != previous:
+                raise InconsistentLinkMapError(
+                    f"link_map backlink at {current:#x} is {previous_address:#x}, expected {previous:#x}"
+                )
+            name = b"" if name_address == 0 else self._read_cstring(name_address, max_name_size)
+            adapter = self._match_loaded_adapter(name, object_base, normalized_known)
+            objects.append(
+                LoadedObject(
+                    current,
+                    object_base,
+                    name_address,
+                    name,
+                    dynamic_address,
+                    next_address,
+                    previous_address,
+                    adapter,
+                    ("validated bidirectional link_map prefix",),
+                )
+            )
+            previous, current = current, next_address
+
+        state_after = int.from_bytes(self.memory.read(debug + r_state_offset, 4), self.target.endian.value)
+        head_after = self.memory.read_ptr(debug + r_map_offset)
+        if state_after != state_before or head_after != head_before:
+            raise InconsistentLinkMapError("r_debug changed while link_map was being traversed")
+        return LinkMapSnapshot(
+            base,
+            debug,
+            version_before,
+            state,
+            r_brk,
+            r_ldbase,
+            head,
+            tuple(objects),
+        )
+
+
+__all__ = [
+    "DiscoveryAmbiguityError",
+    "DiscoveryCandidate",
+    "DiscoveryError",
+    "DiscoveryNotFoundError",
+    "ExactProcessDiscovery",
+    "HeapResolution",
+    "ImageResolution",
+    "InconsistentLinkMapError",
+    "LinkMapSnapshot",
+    "LoadedObject",
+    "MainReturnAddress",
+    "MemorySpan",
+    "PlannedMemoryWrite",
+    "PointerLeak",
+    "RDebugState",
+    "ROPInsertionPlan",
+    "ReturnClassification",
+    "StackResolution",
+    "StaleDiscoveryError",
+]
