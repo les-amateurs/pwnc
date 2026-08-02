@@ -232,6 +232,45 @@ class ExactELFAdapterTests(unittest.TestCase):
         self.assertFalse(snapshot.exists())
         self.assertFalse(snapshot.parent.exists())
 
+    def test_snapshot_close_is_retryable_while_an_exported_view_exists(self) -> None:
+        adapter = ExactELFAdapter.from_file(self.artifact)
+        elf = adapter.fresh_elf()
+        snapshot = Path(elf.path)
+        view = memoryview(elf.mmap)
+
+        with self.assertRaises(BufferError):
+            elf.close()
+        self.assertTrue(elf._pwnc_finalizer.alive)
+        self.assertTrue(snapshot.exists())
+
+        view.release()
+        elf.close()
+        self.assertFalse(elf._pwnc_finalizer.alive)
+        self.assertFalse(snapshot.parent.exists())
+
+    def test_factory_rechecks_snapshot_after_pwntools_consumes_it(self) -> None:
+        from payloads import pwntools_compat
+
+        original_crosscheck = pwntools_compat._crosscheck_pwntools_elf
+        snapshots: list[Path] = []
+
+        def mutate_after_crosscheck(elf, profile):
+            mitigations = original_crosscheck(elf, profile)
+            snapshot = Path(elf.path)
+            snapshots.append(snapshot)
+            snapshot.parent.chmod(0o700)
+            snapshot.chmod(0o600)
+            snapshot.write_bytes(b"changed after pwntools parse")
+            return mitigations
+
+        with (
+            mock.patch("payloads.pwntools_compat._crosscheck_pwntools_elf", side_effect=mutate_after_crosscheck),
+            self.assertRaisesRegex(PwntoolsCompatibilityError, "snapshot changed"),
+        ):
+            ExactELFAdapter.from_file(self.artifact)
+        self.assertEqual(len(snapshots), 1)
+        self.assertFalse(snapshots[0].parent.exists())
+
     def test_fresh_rop_rechecks_snapshot_after_path_based_consumers(self) -> None:
         adapter = ExactELFAdapter.from_file(self.artifact)
         snapshots: list[Path] = []

@@ -230,6 +230,7 @@ class _SnapshotELF(ELF):
     def __init__(self, raw: bytes, *, checksec: bool = False) -> None:
         snapshot_directory = Path(mkdtemp(prefix="pwnc-exact-elf-"))
         snapshot_path = snapshot_directory / "artifact.elf"
+        expected_sha256 = sha256(raw).hexdigest()
         self._pwnc_snapshot_path = snapshot_path
         try:
             snapshot_path.write_bytes(raw)
@@ -239,6 +240,7 @@ class _SnapshotELF(ELF):
             # to the same private snapshot used for independent profiling.
             self._pwnc_profile = inspect_elf(snapshot_path)
             super().__init__(str(snapshot_path), checksec=checksec)
+            self.verify_snapshot(expected_sha256)
             self._pwnc_finalizer = weakref.finalize(
                 self,
                 _cleanup_snapshot,
@@ -252,7 +254,12 @@ class _SnapshotELF(ELF):
 
     def close(self) -> None:
         finalizer = getattr(self, "_pwnc_finalizer", None)
-        if finalizer is not None:
+        if finalizer is not None and finalizer.alive:
+            # Match the base ELF contract: an exported mmap view makes close
+            # raise BufferError. Keep the finalizer live so release+retry or
+            # eventual GC can still complete cleanup.
+            self.mmap.close()
+            self.file.close()
             finalizer()
 
     def verify_snapshot(self, expected_sha256: str) -> None:
@@ -314,6 +321,7 @@ class ExactELFAdapter:
                     )
                 mitigations = _crosscheck_pwntools_elf(elf, inspected)
                 symbols = dict(elf.symbols)
+                elf.verify_snapshot(digest)
             finally:
                 elf.close()
         identity = expected_identity or LibcIdentity(
