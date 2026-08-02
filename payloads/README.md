@@ -72,9 +72,12 @@ remain unit-tested; neither has QEMU execution evidence. Ret2libc
 `system(command)` has the same direct-call exclusions; exact-artifact,
 live-base chains execute under QEMU on i386 and AMD64, while every other
 implemented variant is covered by the exact-identity unit matrix.
-Target-generic arbitrary-memory adapters, explicit payload
-staging/triggering, and exact-libc call workflows are implemented for every
-catalog target and are unit-tested, not QEMU-tested.
+The target-generic arbitrary-memory API is unit-tested across the catalog and
+its discovery graph is additionally executed through real AArch64 LE and ARM
+BE guest reads. Exact-libc semantic-call builders are unit-tested on the 28
+directly modeled ABI mappings. Callback-owned staging/trigger primitives
+remain structural unit-test fixtures rather than claimed remote exploit
+primitives.
 
 On an x86-64 Linux host, a separate opt-in suite executes the command, ORW,
 RW-to-RX stager, static syscall ROP, static direct-call ROP, and exact-loaded-
@@ -262,8 +265,17 @@ uses pwntools' assembler or shellcraft. Pass
 `ZigAssembler("/absolute/path/to/zig")` when `zig` is not on `PATH`.
 
 `LLVMAssembler` remains an explicit backend and the fallback for big-endian
-PPC64 ELFv1, which current Zig/LLD cannot emit. On every other catalog target,
-the test suite requires Zig's bytes to match the LLVM reference bytes exactly.
+PPC64 ELFv1, which current Zig/LLD cannot emit. The catalog exit fixture checks
+Zig against LLVM, while the native and qemu-user command, ORW, sendfile,
+stager, and semihosting suites execute bytes returned by `ZigAssembler`
+itself. Exact byte equality is not a general correctness requirement: for
+example, Zig and LLVM validly lower some RISC-V `li` pseudo-instructions to
+different `addi`/`addiw` sequences. Set `verify_with_fallback=True` only when
+strict byte-for-byte reproducibility against LLVM is desired. Fallback is
+permitted only where Zig cannot assemble the declared target. After each call,
+`last_backend` is `"zig"` or `"fallback"`; `last_fallback_diagnostics` exposes
+the Zig failure when fallback was necessary. Runtime tests assert this
+provenance and permit fallback only for the known PPC64 ELFv1 limitation.
 Toolchain target support still varies by installation, so recognizing a target
 does not itself prove a local compiler can assemble it.
 
@@ -671,10 +683,13 @@ when distinct candidates survive; the latter retains its structured
 `candidates`. `environ_to_main_returns()` is the plural inspection API and
 therefore returns every candidate, while `environ_to_main_return()` enforces
 one result after its optional `symbol=` filter. Heap classification is not
-guessed from address shape: `libc_to_heap()` requires a `heap_base`/`heap_span`
-or a caller-supplied allocator `validator(memory, pointer)`. Multiple pointers
-which corroborate one exact image base or one supplied heap span are collapsed,
-but pointers to distinct images or heap classifications remain ambiguous.
+guessed from address shape: an automatic `libc_to_heap()` scan requires an
+explicit `heap_span` or caller-supplied allocator `validator(memory, pointer)`.
+An exact `heap_pointer`/`heap_pointer_address` bypass may instead carry a
+`heap_base` consistency assertion, but it does not invent a readable span.
+Multiple pointers which corroborate one exact image base or one supplied heap
+span are collapsed, but pointers to distinct images or heap classifications
+remain ambiguous.
 
 All automatic scans are bounded by `MemorySpan`, `scan_size`, `scan_before`,
 `scan_after`, `image_search_pages`, `max_entries`, or `max_name_size`, and obey
@@ -695,15 +710,21 @@ one-shot primitive where an unmapped read kills the process. Supply the exact
 base instead, or use a `PointerLeak(symbol=..., addend=...)` where that
 transition accepts a leak record.
 
+An unsafe primitive never receives a synthesized heap or stack scan window.
+Automatic `scan_size`/`scan_before` windows require
+`invalid_read_safe=True`; otherwise pass an exact `heap_span`/`stack_span`, or
+use the exact `libc_pointer`/`libc_pointer_address`/`return_slot` bypass for the
+single address the caller already knows is readable.
+
 Every hardcoded route is an assertion and is revalidated rather than trusted
 silently:
 
 - `heap_base`, `libc_base`, `stack_base`, `main_base`, and `loader_base` supply
-  known mapping starts or ELF load biases. Pair heap/stack bases with explicit
-  `heap_span`/`stack_span` when the real mapping size is known; the base-only
-  convenience windows are intentionally finite. A constructor `layout=` is
-  the default for main-return classification and ROP materialization; pass
-  bases to the individual discovery transition when it needs them.
+  known mapping starts or ELF load biases. A heap/stack base does not invent a
+  readable extent: pair it with `heap_span`/`stack_span` before scanning. A
+  constructor `layout=` is the default for main-return classification and ROP
+  materialization; pass bases to the individual discovery transition when it
+  needs them.
 - `libc_pointer`, `heap_pointer`, and `loader_pointer` bypass their respective
   pointer scan. Their `*_pointer_address` counterparts name an absolute slot
   to dereference. Supplying both makes the observed slot value prove the
@@ -724,9 +745,10 @@ silently:
   `link_map_address` asserts the list head. A nonzero `r_debug.r_map` must agree
   with that head, and the full inspected prefix must occupy writable loader
   data. `known_images` is optional and only attaches an adapter after basename
-  selection, exact runtime validation, and agreement between `link_map.l_ld`
-  and that artifact's load-biased `PT_DYNAMIC`; it is not DSO discovery by
-  pathname.
+  selection, structural runtime validation, a mapped GNU build-ID comparison,
+  and agreement between `link_map.l_ld` and that artifact's load-biased
+  `PT_DYNAMIC`; it is not DSO discovery by pathname. An artifact without a
+  runtime-mapped build ID remains enumerated with `adapter=None`.
 
 An explicit `PointerLeak(symbol=..., addend=...)` used together with an image
 base must equal that exact symbol expression. Explicit libc scan spans must be
@@ -739,15 +761,23 @@ An ELF `base` here means additive load bias, matching `link_map.l_addr` and
 an ordinary `ET_EXEC` mapped at `0x400000`, the usual load bias is `0`, whereas
 pwntools' rebased `ELF.address` denotes the runtime address of the lowest
 `PT_LOAD`. The discovery implementation performs that conversion internally
-when it asks pwntools for GOT slots. Exact adapters SHA-256-bind and recheck
-the local file. Runtime image validation compares the ELF header, complete
-program-header table, and `PT_LOAD` geometry against that artifact and checks
-that a candidate pointer lies in its mapped ranges. When the exact artifact's
-GNU build-ID descriptor is file-backed by a readable `PT_LOAD`, its runtime
-bytes are compared too. A section-only build ID cannot be authenticated from
-arbitrary runtime memory, so such an image is explicitly only a structural
-header/program-header match. An embedded page-aligned `\x7fELF` string is not
+when it asks pwntools for GOT slots. Exact adapters SHA-256-bind and rehash the
+local file before discovery consumes its bytes. Runtime image validation
+compares the ELF header, complete program-header table, and `PT_LOAD` geometry
+against that artifact and checks that a candidate pointer lies in its mapped
+ranges. When the exact artifact's GNU build-ID descriptor is file-backed by a
+readable `PT_LOAD`, its runtime bytes are compared too. A section-only build ID
+cannot be authenticated from arbitrary runtime memory, so such an image is
+explicitly only a structural header/program-header match. An embedded
+page-aligned `\x7fELF` string is not
 sufficient evidence.
+
+A matching GNU build ID is conventional image-identity evidence, not a digest
+of every mapped instruction byte. Discovery therefore does not claim that the
+remote mapping is byte-for-byte identical to the local SHA-256-bound artifact;
+if that stronger property matters, the caller must compare the desired mapped
+`PT_LOAD` bytes through its own bounded read primitive before using local
+gadgets or code bytes.
 
 Return classification recognizes a bounded set of exact-artifact-backed call
 encodings: x86 near `call`, AArch64 `BL`, ARM `BL`, Thumb-2 `BL`/immediate
@@ -1090,9 +1120,11 @@ cases directly as part of the static contract, without qemu-user.
 Without a selector it deliberately runs two glibc-2.39 representatives:
 AArch64 little-endian and 32-bit ARM EABI big-endian. Each guest allocates a
 real heap word containing a libc function pointer and exposes an ordinary
-target-side address/length read protocol. The host scans that heap word,
-derives exact libc, reads `environ`, checks a sentinel on the real initial
-stack, resolves the exact loader, and enumerates the real SVR4 `link_map`.
+target-side address/length read protocol. The host scans that heap word and
+validates its pointer against the reported exact libc base, independently
+derives the same base from a symbol-relative `write` leak, reads `environ`,
+checks a sentinel on the real initial stack, resolves the exact loader, and
+enumerates the real SVR4 `link_map`.
 There is no `/proc/self/mem`, `process_vm_readv`, host address-space access, or
 implicit invalid-page probing in this lane.
 
