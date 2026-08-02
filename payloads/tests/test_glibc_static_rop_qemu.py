@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from payloads import (
@@ -58,10 +59,11 @@ _TARGETS_BY_NAME = {target.name: target for target in SUPPORTED_TARGETS}
 _LIBC_ARCHIVE_PATTERN = re.compile(r"(?m)^\s*(\S*libc\.a)\(")
 _EXIT_DEFINITION_PATTERN = re.compile(r"(?P<archive>/\S*libc\.a)\((?P<member>[^)]+)\): definition of exit")
 _NATIVE_X86_HOST = platform.machine().lower() in {"amd64", "x86_64"}
+_XENIAL_SPEC_ID = "amd64-xenial-glibc-2.23"
+_XENIAL_STATIC_COMPILER_SPEC_ID = "x86-64-glibc-2.24"
 
 
 _FIXTURE_C = r"""
-#include <errno.h>
 #include <gnu/libc-version.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -81,8 +83,6 @@ static int read_exact(int fd, void *buffer, size_t size) {
         if (count > 0) {
             cursor += (size_t) count;
             size -= (size_t) count;
-        } else if (count < 0 && errno == EINTR) {
-            continue;
         } else {
             return -1;
         }
@@ -153,6 +153,99 @@ def _environment() -> dict[str, str]:
     ):
         environment.pop(name, None)
     return environment
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticCompilerInvocation:
+    argv: tuple[str, ...]
+    owner_spec_id: str
+    invoked_driver: Path
+    resolved_driver: Path
+    driver_sha256: str
+    borrowed: bool
+
+    def revalidate(self) -> None:
+        if self.invoked_driver.resolve(strict=True) != self.resolved_driver:
+            raise AssertionError(f"static compiler driver target changed: {self.invoked_driver}")
+        observed = hashlib.sha256(self.resolved_driver.read_bytes()).hexdigest()
+        if observed != self.driver_sha256:
+            raise AssertionError(f"static compiler driver bytes changed: {self.resolved_driver}")
+
+
+def _driver_argument(argv: tuple[str, ...]) -> Path:
+    if not argv:
+        raise AssertionError("static compiler argv is empty")
+    if argv[0] != "/usr/bin/env":
+        return Path(argv[0])
+    for argument in argv[1:]:
+        if "=" not in argument:
+            return Path(argument)
+    raise AssertionError("/usr/bin/env static compiler argv contains no driver")
+
+
+def _compiler_invocation(
+    argv: tuple[str, ...],
+    *,
+    owner_spec_id: str,
+    borrowed: bool,
+) -> _StaticCompilerInvocation:
+    driver = _driver_argument(argv)
+    resolved = driver.resolve(strict=True)
+    return _StaticCompilerInvocation(
+        argv,
+        owner_spec_id,
+        driver,
+        resolved,
+        hashlib.sha256(resolved.read_bytes()).hexdigest(),
+        borrowed,
+    )
+
+
+def _xenial_static_compiler_invocation(
+    provisioned: ProvisionedSysroot,
+    donor: ProvisionedSysroot,
+) -> _StaticCompilerInvocation:
+    if provisioned.spec.id != _XENIAL_SPEC_ID:
+        raise AssertionError("Xenial static compiler fallback was requested for the wrong sysroot")
+    if donor.spec.id != _XENIAL_STATIC_COMPILER_SPEC_ID:
+        raise AssertionError("Xenial static compiler fallback has the wrong pinned donor")
+    donor_argv = donor.compiler_argv
+    if len(donor_argv) != 1:
+        raise AssertionError("pinned Bootlin public compiler wrapper has unexpected arguments")
+    driver = Path(donor_argv[0])
+    if driver.name != "x86_64-linux-gcc" or ".br_real" in driver.name:
+        raise AssertionError(f"Xenial fallback must invoke the public Bootlin wrapper: {driver}")
+    include = provisioned.sysroot / "usr/include/x86_64-linux-gnu"
+    library = provisioned.sysroot / "usr/lib/x86_64-linux-gnu"
+    if not include.is_dir() or not library.is_dir():
+        raise AssertionError("Xenial multiarch static compiler paths are missing")
+    argv = (
+        str(driver),
+        f"--sysroot={provisioned.sysroot}",
+        "-isystem",
+        str(include),
+        f"-B{library}/",
+        f"-L{library}",
+    )
+    return _compiler_invocation(argv, owner_spec_id=donor.spec.id, borrowed=True)
+
+
+def _static_compiler_invocation(
+    provisioned: ProvisionedSysroot,
+    cache_dir: Path,
+) -> _StaticCompilerInvocation:
+    if provisioned.spec.id != _XENIAL_SPEC_ID:
+        return _compiler_invocation(
+            provisioned.compiler_argv,
+            owner_spec_id=provisioned.spec.id,
+            borrowed=False,
+        )
+    try:
+        donor_spec = next(spec for spec in load_manifest().sysroots if spec.id == _XENIAL_STATIC_COMPILER_SPEC_ID)
+    except StopIteration as exc:  # guarded by the exact matrix unit test
+        raise AssertionError("pinned Xenial static compiler donor is absent") from exc
+    donor = provision_sysroot(donor_spec, cache_dir)
+    return _xenial_static_compiler_invocation(provisioned, donor)
 
 
 def _catalog_target(name: str) -> Target:
@@ -504,7 +597,8 @@ def _compile_fixture(
     provisioned: ProvisionedSysroot,
     target: Target,
     directory: Path,
-) -> tuple[Path, Path, str]:
+    cache_dir: Path,
+) -> tuple[Path, Path, str, _StaticCompilerInvocation]:
     source = directory / "fixture.c"
     assembly = directory / "gadgets.S"
     executable = directory / "fixture"
@@ -512,8 +606,9 @@ def _compile_fixture(
     source.write_text(_FIXTURE_C, encoding="utf-8")
     assembly.write_text(_fixture_assembly(target), encoding="utf-8")
     target_flags = ("-mthumb",) if target.arch is Architecture.THUMB else ()
+    compiler = _static_compiler_invocation(provisioned, cache_dir)
     command = (
-        *provisioned.compiler_argv,
+        *compiler.argv,
         *target_flags,
         str(source),
         str(assembly),
@@ -536,7 +631,8 @@ def _compile_fixture(
         )
     if not linker_map.is_file():
         raise AssertionError(f"{provisioned.spec.id}/{target.name} compiler produced no GNU ld map")
-    return executable, linker_map, compiled.stdout + compiled.stderr
+    compiler.revalidate()
+    return executable, linker_map, compiled.stdout + compiled.stderr, compiler
 
 
 def _mapped_libc_archive(linker_map: Path, provisioned: ProvisionedSysroot) -> tuple[Path, str]:
@@ -557,6 +653,11 @@ def _mapped_libc_archive(linker_map: Path, provisioned: ProvisionedSysroot) -> t
         archive.relative_to(provisioned.sysroot.resolve(strict=True))
     except ValueError as exc:
         raise AssertionError(f"{provisioned.spec.id}: mapped libc.a escaped the selected sysroot: {archive}") from exc
+    if not os.path.samefile(archive, provisioned.static_libc):
+        raise AssertionError(
+            f"{provisioned.spec.id}: mapped libc.a {archive} is not the manifest-selected "
+            f"archive {provisioned.static_libc}"
+        )
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if len(digest) != 64:  # pragma: no cover - hashlib invariant
         raise AssertionError("invalid libc.a SHA-256")
@@ -779,6 +880,61 @@ class GlibcStaticRopHarnessUnitTests(unittest.TestCase):
                 if _direct_call_supported(target) and target.arch is not Architecture.X86:
                     self.assertIn("pwnc_call_loader", assembly)
 
+    def test_xenial_fallback_uses_pinned_public_bootlin_wrapper_and_exact_paths(self) -> None:
+        manifest = load_manifest()
+        xenial_spec = next(spec for spec in manifest.sysroots if spec.id == _XENIAL_SPEC_ID)
+        donor_spec = next(spec for spec in manifest.sysroots if spec.id == _XENIAL_STATIC_COMPILER_SPEC_ID)
+        with tempfile.TemporaryDirectory(prefix="pwnc-xenial-static-compiler-") as directory:
+            root = Path(directory)
+            xenial_root = root / "xenial"
+            include = xenial_root / "usr/include/x86_64-linux-gnu"
+            library = xenial_root / "usr/lib/x86_64-linux-gnu"
+            include.mkdir(parents=True)
+            library.mkdir(parents=True)
+            donor_root = root / "donor"
+            donor_sysroot = donor_root / "sysroot"
+            donor_sysroot.mkdir(parents=True)
+            donor_bin = donor_root / "bin"
+            donor_bin.mkdir()
+            wrapper_target = donor_bin / "toolchain-wrapper"
+            wrapper_target.write_bytes(b"pinned public wrapper bytes\n")
+            wrapper = donor_bin / "x86_64-linux-gcc"
+            wrapper.symlink_to(wrapper_target.name)
+            xenial = ProvisionedSysroot(
+                xenial_spec,
+                xenial_root,
+                xenial_root,
+                xenial_root / xenial_spec.libc,
+                xenial_root / xenial_spec.loader,
+            )
+            donor = ProvisionedSysroot(
+                donor_spec,
+                donor_root,
+                donor_sysroot,
+                donor_sysroot / donor_spec.libc,
+                donor_sysroot / donor_spec.loader,
+                bootlin_compiler=wrapper,
+            )
+
+            invocation = _xenial_static_compiler_invocation(xenial, donor)
+
+            self.assertEqual(
+                invocation.argv,
+                (
+                    str(wrapper),
+                    f"--sysroot={xenial_root}",
+                    "-isystem",
+                    str(include),
+                    f"-B{library}/",
+                    f"-L{library}",
+                ),
+            )
+            self.assertEqual(invocation.owner_spec_id, _XENIAL_STATIC_COMPILER_SPEC_ID)
+            self.assertTrue(invocation.borrowed)
+            self.assertEqual(invocation.invoked_driver, wrapper)
+            self.assertEqual(invocation.resolved_driver, wrapper_target)
+            invocation.revalidate()
+
 
 @unittest.skipUnless(
     _OPT_IN,
@@ -800,7 +956,20 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
                     self._exercise_target(provisioned, target, Path(directory))
 
     def _exercise_target(self, provisioned: ProvisionedSysroot, target: Target, root: Path) -> None:
-        executable, linker_map, link_trace = _compile_fixture(provisioned, target, root)
+        executable, linker_map, link_trace, compiler = _compile_fixture(
+            provisioned,
+            target,
+            root,
+            _cache_dir(),
+        )
+        if provisioned.spec.id == _XENIAL_SPEC_ID:
+            self.assertTrue(compiler.borrowed)
+            self.assertEqual(compiler.owner_spec_id, _XENIAL_STATIC_COMPILER_SPEC_ID)
+            self.assertEqual(compiler.invoked_driver.name, "x86_64-linux-gcc")
+            self.assertNotIn(".br_real", os.fspath(compiler.invoked_driver))
+        else:
+            self.assertFalse(compiler.borrowed)
+            self.assertEqual(compiler.owner_spec_id, provisioned.spec.id)
         archive, archive_digest = _mapped_libc_archive(linker_map, provisioned)
         _assert_exit_definition_trace(link_trace, archive, provisioned)
         profile = inspect_elf(executable)
@@ -830,10 +999,10 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
         self.assertLessEqual(len(syscall_data), _CHAIN_CAPACITY)
         syscall_mapping = next(item for item in profile.load_ranges if item.contains(chain_symbol, len(syscall_data)))
         self.assertTrue(syscall_mapping.writable)
-        if target.arch is Architecture.SPARC64:
-            # This pinned GNU ld places the executable .iplt together with
-            # .data/.bss in one RWX PT_LOAD.  PT_GNU_STACK is still RW and the
-            # independent mitigation checks above therefore report NX.
+        if target.arch in {Architecture.SPARC32, Architecture.SPARC64}:
+            # These pinned GNU ld variants place the executable .iplt together
+            # with .data/.bss in one RWX PT_LOAD.  PT_GNU_STACK is still RW and
+            # the independent mitigation checks above therefore report NX.
             self.assertTrue(syscall_mapping.executable)
         else:
             self.assertFalse(syscall_mapping.executable)
@@ -893,6 +1062,7 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
 
         self.assertTrue(archive.is_file())
         self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), archive_digest)
+        compiler.revalidate()
 
 
 if __name__ == "__main__":
