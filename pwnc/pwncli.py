@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
-import argcomplete
+import sys
 from argparse import ArgumentParser, ArgumentTypeError
 from pathlib import Path
+
+import argcomplete
+
 from pwnc import util
 
 usage = """\
@@ -12,6 +15,29 @@ pwnc (options) [command]
 description = """\
 
 """
+
+
+class PwncArgumentParser(ArgumentParser):
+    """Preserve a sandbox target argv after the conventional ``--`` marker."""
+
+    def parse_known_args(self, args=None, namespace=None):
+        values = list(sys.argv[1:] if args is None else args)
+        sandbox_start = values[:2] == ["sandbox", "start"]
+        target_command = None
+        if sandbox_start:
+            try:
+                separator = values.index("--", 2)
+            except ValueError:
+                pass
+            else:
+                target_command = values[separator + 1 :]
+                values = values[:separator]
+
+        parsed, extra = super().parse_known_args(values, namespace)
+        if sandbox_start:
+            parsed.target_command = target_command
+            parsed.sandbox_unparsed = tuple(extra)
+        return parsed, extra
 
 
 def PathArg(file):
@@ -45,7 +71,7 @@ def PositiveInteger(arg):
 
 
 def get_main_parser():
-    parser = ArgumentParser(
+    parser = PwncArgumentParser(
         prog="pwnc",
         usage=usage,
         description=description,
@@ -244,6 +270,145 @@ def get_main_parser():
     subparser = swarm.add_parser("signal", help="signal swarm")
     subparser.add_argument("signal", type=str, nargs="?")
 
+    """
+    Command: gdb
+    """
+    gdb = subparsers.add_parser("gdb", help="GDB session tools").add_subparsers()
+    gdb.required = True
+    gdb.dest = "subcommand.gdb"
+
+    subparser = gdb.add_parser("view", help="connect this terminal to a prepared GDB pool")
+    subparser.add_argument("--socket", type=PathArg, dest="socket_path")
+    subparser.add_argument("--config", type=PathArg, dest="config_path")
+    subparser.add_argument("--name", default="default", help="logical pool name")
+    subparser.add_argument("--keep-open", action="store_true")
+    subparser.add_argument(
+        "--reconnect",
+        action="store_true",
+        help="switch to a warm pooled GDB when the selected GDB exits",
+    )
+    subparser.add_argument("--tty", type=PathArg, help="display in this TTY instead of the current terminal")
+
+    """
+    Command: sandbox
+    """
+    sandbox = subparsers.add_parser("sandbox", help="run isolated local challenges").add_subparsers()
+    sandbox.required = True
+    sandbox.dest = "subcommand.sandbox"
+
+    def sandbox_client_options(command_parser, *, json_output=True):
+        command_parser.add_argument("--socket", type=PathArg, dest="socket_path")
+        command_parser.add_argument("--config", type=PathArg, dest="config_path")
+        command_parser.add_argument("--name", default="default", help="logical sandbox manager name")
+        if json_output:
+            command_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    subparser = sandbox.add_parser("manager", help="run the persistent sandbox manager")
+    subparser.add_argument("--socket", type=PathArg, dest="socket_path")
+    subparser.add_argument("--config", type=PathArg, dest="config_path")
+    subparser.add_argument("--name", default="default", help="logical sandbox manager name")
+    subparser.add_argument(
+        "--gdb-pool-size",
+        type=PositiveInteger,
+        default=0,
+        help="number of prepared GDB processes (zero disables the pool)",
+    )
+    subparser.add_argument("--gdb-name", default="default", help="logical prepared GDB pool name")
+    subparser.add_argument("--gdb-path", default="gdb", help="GDB executable used for every prepared process")
+    subparser.add_argument(
+        "--gdb-execute",
+        action="append",
+        metavar="COMMAND",
+        help="GDB command run on every prepared process before publication (repeatable)",
+    )
+    subparser.add_argument(
+        "--no-gdb-init",
+        action="store_false",
+        dest="gdb_init",
+        default=True,
+        help="do not source the normal GDB init files",
+    )
+
+    subparser = sandbox.add_parser("start", help="start a configured challenge")
+    sandbox_client_options(subparser)
+    subparser.add_argument(
+        "--profile",
+        dest="profile_override",
+        help="profile to use (also disambiguates a default-profile command override)",
+    )
+    state = subparser.add_mutually_exclusive_group()
+    state.set_defaults(paused=None)
+    state.add_argument("--paused", action="store_true", dest="paused", help="stop at the target exec boundary")
+    state.add_argument("--running", action="store_false", dest="paused", help="start without an exec stop")
+    stdio = subparser.add_mutually_exclusive_group()
+    stdio.set_defaults(stdio=None)
+    stdio.add_argument("--pipe", action="store_const", const="pipe", dest="stdio")
+    stdio.add_argument("--pty", action="store_const", const="pty", dest="stdio")
+    stdio.add_argument("--no-stdio", action="store_const", const="none", dest="stdio")
+    subparser.add_argument(
+        "--timeout",
+        type=float,
+        help="maximum seconds to wait for the startup reply (default: no deadline)",
+    )
+    subparser.add_argument(
+        "--env",
+        action="append",
+        metavar="KEY=VALUE",
+        help="override an environment variable (repeatable)",
+    )
+    subparser.add_argument("profile", nargs="?", help="configured profile name")
+    subparser.set_defaults(target_command=None, sandbox_unparsed=())
+
+    subparser = sandbox.add_parser("list", help="list manager-owned challenges")
+    sandbox_client_options(subparser)
+
+    subparser = sandbox.add_parser("show", help="show one challenge")
+    sandbox_client_options(subparser)
+    subparser.add_argument("sandbox_id")
+
+    subparser = sandbox.add_parser("connect", help="interact with an exposed network service")
+    sandbox_client_options(subparser, json_output=False)
+    subparser.add_argument("sandbox_id")
+    subparser.add_argument("port", nargs="?", help="configured port name; optional for a single port")
+    subparser.add_argument("--timeout", type=float)
+
+    subparser = sandbox.add_parser("stdio", help="interact with challenge stdio")
+    sandbox_client_options(subparser, json_output=False)
+    subparser.add_argument("sandbox_id")
+    subparser.add_argument("--timeout", type=float)
+
+    subparser = sandbox.add_parser("attach", help="attach the selected prepared GDB")
+    sandbox_client_options(subparser)
+    subparser.add_argument("sandbox_id")
+
+    for action, help_text in (
+        ("resume", "continue a challenge paused at exec"),
+        ("kill", "send SIGKILL to a challenge"),
+    ):
+        subparser = sandbox.add_parser(action, help=help_text)
+        sandbox_client_options(subparser)
+        subparser.add_argument("sandbox_id")
+
+    subparser = sandbox.add_parser("signal", help="send a signal to a challenge")
+    sandbox_client_options(subparser)
+    subparser.add_argument("sandbox_id")
+    subparser.add_argument("signal", help="signal number or name, such as TERM")
+
+    subparser = sandbox.add_parser("stop", aliases=["close"], help="stop and remove one challenge")
+    sandbox_client_options(subparser)
+    subparser.add_argument("sandbox_id")
+
+    subparser = sandbox.add_parser("wait", help="wait for one challenge to exit")
+    sandbox_client_options(subparser)
+    subparser.add_argument("sandbox_id")
+    subparser.add_argument("--timeout", type=float)
+
+    subparser = sandbox.add_parser("shutdown", help="stop the manager and all of its challenges")
+    sandbox_client_options(subparser)
+
+    subparser = sandbox.add_parser("check", help="check manager discovery and connectivity")
+    sandbox_client_options(subparser)
+
     return parser
 
 
@@ -315,9 +480,22 @@ def main():
             case "swarm":
                 import pwnc.commands.swarm
                 pwnc.commands.swarm.command(args)
+            case "gdb":
+                from pwnc.commands.gdb_view import command as gdb_view
+
+                match command.get("subcommand.gdb"):
+                    case "view":
+                        return gdb_view(args)
+            case "sandbox":
+                if extra:
+                    parser.error(f"unrecognized arguments: {' '.join(extra)}")
+                from pwnc.commands.sandbox import command as sandbox_command
+
+                return sandbox_command(args)
     except RuntimeError as e:
         print(e)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

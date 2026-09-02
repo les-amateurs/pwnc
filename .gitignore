@@ -14,6 +14,9 @@ __pycache__/
 .ruff_cache
 .ropeproject
 _cache
+/.gdb_history
+/imgui.ini
+/uv.lock
 
 # ignore this, random testing files
 log.txt
@@ -27,4 +30,14 @@ tests/
 tests/*
 !tests/profiling/
 !tests/profiling/**
+!tests/dap/
+!tests/dap/**
+!tests/sandbox/
+!tests/sandbox/**
+tests/dap/**/__pycache__/
+tests/dap/**/*.py[co]
+tests/dap/**/.pytest_cache/
+tests/sandbox/**/__pycache__/
+tests/sandbox/**/*.py[co]
+tests/sandbox/**/.pytest_cache/
 scripts/
