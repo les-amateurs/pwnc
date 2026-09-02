@@ -136,13 +136,17 @@ def _accepted_pwntools_elf_arches(target: Target) -> tuple[str, ...]:
 
     Pwntools' public context spelling for s390x is ``s390``, while its ELF
     parser can expose pyelftools' machine name ``em_s390`` for a real s390x
-    artifact.  Keep the context/backend spelling strict and admit the parser
-    alias only at the byte-backed ELF cross-check boundary.
+    artifact.  Likewise, ELF has no separate Thumb machine value, so pwntools
+    reports ``arm`` for an EM_ARM image whose entry-state bit is Thumb.  Keep
+    context/backend spellings strict and admit parser aliases only at the
+    byte-backed ELF cross-check boundary.
     """
 
     expected = _expected_pwntools_arch(target)
     if target.arch is Architecture.S390X:
         return (expected, "em_s390")
+    if target.arch is Architecture.THUMB:
+        return (expected, "arm")
     return (expected,)
 
 

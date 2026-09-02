@@ -374,7 +374,7 @@ explicit, so an exploit can lower `open` independently and hardcode the
 observed descriptor in a later exfiltration stage:
 
 ```python
-from payloads import LibcROPBuilder, RuntimeLayout
+from payloads import AngropImageSpec, LibcROPBuilder, RuntimeLayout
 
 builder = LibcROPBuilder.from_file("./libc.so.6", b"/flag")
 program = builder.compose(
@@ -382,22 +382,93 @@ program = builder.compose(
     builder.sendfile(1, 3, 0x400),
     builder.exit(),
 )
-payload = program.lower_pwntools(
+main = AngropImageSpec.from_file(
+    "./challenge",
+    load_bias=0,  # explicit additive bias for a linked ET_EXEC image
+)
+payload = program.lower(
     RuntimeLayout(libc_base=leaked_libc_base),
     chain_base=known_chain_address,
+    extra_images=(main,),
+    scan_libc_gadgets=False,
 ).as_payload()
 ```
 
-Automatic linked lowering deliberately uses pwntools' `ELF`, mitigation, and
-`ROP` support only on the live-tested i386 and AMD64 ABIs. Every other direct-
-call ABI exposes independently composable `LibcROPStage` objects which lower
-through caller-supplied `SemanticGadget` records; no unsupported stack
-transition is guessed. `ExactELFAdapter` rechecks the artifact digest before
-creating a fresh pwntools object and never accesses process-backed helpers such
-as `ELF.libs`, `ELF.maps`, or `ELF.libc`. Pwntools reads a private, read-only
-snapshot; linked ROP lowering rehashes it after pathname-based gadget scanning.
-Callers using `fresh_elf()` directly should close the returned object when
-finished (a finalizer also removes abandoned snapshots).
+For a staged exploit, compose just `builder.open()` and pass
+`continuation=Address(..., Image.MAIN)` to `lower()`. The generated open call
+returns, then performs an aligned argument-less transfer to that exact code
+address; an `exit` stage cannot have a continuation. A later program can contain
+only `sendfile(1, observed_fd, ...)` or `read(observed_fd, ...)`/`write(...)`, so
+it carries no unused path bytes or placement. Several variants can share one
+public `PreparedAngropSession` and its discovered gadget cache by passing
+`session=session` to `lower()`, `lower_angrop()`, or `materialize()`; the caller
+retains ownership and closes it after the last variant. For lower-level control,
+`program.angrop_calls(...)` exposes the resolved call records for direct use
+with `session.synthesize_calls(...)`. Every call and continuation must lie in an
+executable `PT_LOAD` from that exact prepared image set.
+
+Automatic linked lowering uses pwnc's embedded snapshot of upstream angrop at
+commit `e7c3c1edfc4c25887f5017544f7dd46505795cce`; no separately installed
+`angrop` package is imported. Install the optional `rop` extra to supply the
+matching angr analysis runtime. Pwntools remains responsible for exact ELF and
+mitigation facts, symbol access, and target-aware packing, but its ROP builder
+is only available through the explicitly named `lower_pwntools()` compatibility
+path.
+
+The entire upstream Python source snapshot, BSD-2-Clause license, exact commit
+and tree identities, and the small pwnc patch ledger live under
+`payloads/_vendor/angrop/`. Wheels therefore use the same reviewed source as a
+checkout; they do not clone a repository or resolve an `angrop` distribution at
+install or run time. The optional runtime is pinned by interpreter because the
+compatible angr dependency sets differ:
+
+| Python | angr runtime installed by `pwnc[rop]` | Embedded angrop source |
+| --- | --- | --- |
+| 3.11 | 9.2.175 | commit `e7c3c1e`, version `9.2.13.dev0` |
+| 3.12+ | 9.2.196 | commit `e7c3c1e`, version `9.2.13.dev0` |
+
+Every `AngropImageSpec` carries an explicit additive `load_bias`, including a
+literal zero for a linked non-PIE executable. A signed negative delta is valid
+when rebasing an image downward, provided every resulting target mapping still
+fits the address space. The backend snapshots and hashes every image, disables
+CLE's automatic dependency loading and simulated procedures, discovers gadgets
+in each selected image, then synthesizes over one merged address space. Results
+retain per-image, per-call, and per-gadget provenance. Overlapping mappings,
+duplicate artifacts, unsupported ABIs, and bad bytes in the complete serialized
+chain are errors. Signed direct-call arguments in the target's representable
+range are normalized to target words. Generation never uses `/proc/self/mem`
+or other process-backed helpers such as `ELF.libs`, `ELF.maps`, or `ELF.libc`.
+
+The embedded automatic adapter deliberately accepts only little-endian i386
+SysV, AMD64 SysV, ARM EABI, and AArch64 AAPCS. The source snapshot contains
+additional upstream architecture code, but pwnc rejects automatic Thumb, MIPS,
+RISC-V, and big-endian lowering because current angrop call-frame behavior and
+angr's ARM BE8 lifting are not sound enough for these public contracts.
+Composed ORW is executed against real libcs on the live-tested i386 and AMD64
+lanes; ARM LE and AArch64 LE each execute a returning `write` followed by a
+terminal `exit` under qemu-user with independent ABI entry-SP checks. Other
+direct-call ABIs continue to expose independently composable `LibcROPStage`
+objects that lower through
+caller-supplied `SemanticGadget` records; no unsupported stack transition is
+guessed. Callers using `fresh_elf()` directly should close the returned object
+when finished (a finalizer also removes abandoned snapshots).
+
+`chain_base` is a synthesis input, not advisory metadata: automatic alignment
+padding can depend on it. `AngropSynthesisResult.as_rop_chain()` and
+`.as_payload()` therefore produce placement-bound objects which reject
+materialization or entry at a different address. Each call's provenance records
+its exact entry SP, offset, ABI alignment/bias, and inserted padding.
+
+`timeout=` on `lower()`/`lower_angrop()` is one total budget for synthesis and
+any inline-path fixed-point retries. Gadget discovery is prepared first and is
+controlled independently by `AngropDiscoveryOptions.timeout`. Synthesis uses a
+hard, non-polling `ITIMER_REAL` deadline and consequently rejects a requested
+timeout from a non-main Python thread or while another real-time timer is
+active. Embedded gadget discovery uses callback notification rather than sleep
+polling. When the minimal aligned inline-path pointer contains a forbidden byte,
+lowering searches up to 64 KiB of harmless aligned post-chain padding for an
+encodable pointer; it reports that the caller must choose another `chain_base`
+or an external `path_address` if none exists.
 
 Every function-call chain carries a `CallFrame` describing the function-entry
 SP offset, required ABI alignment/bias, and emitted mandatory caller area.
@@ -446,8 +517,11 @@ TOC setup are not modeled, and SPARC32/64 remain excluded because register
 windows and their return frames are not modeled.
 
 All seven pinned i386/AMD64 mappings additionally execute the fully composed
-pwntools ORW and sendfile programs described above. Their semantic `write`
-chains are also run directly through the pinned loaders on an x86-64 host when
+embedded-angrop ORW and sendfile programs described above. Static x86 fixtures
+use the exact pinned `libc.a` and exercise a returning embedded-angrop
+`write(1, marker, length)` followed by terminal `exit(44)`, under qemu-user and
+directly on this x86-64 host. The dynamic semantic `write` chains and composed
+ORW/sendfile programs also have direct native mirrors when
 `PWNC_NATIVE_TESTS=1`. This is live-base and exact-artifact evidence, not
 ASLR-variance evidence: a tested qemu-user version may choose a repeatable
 guest libc base.
@@ -959,6 +1033,13 @@ origin as `external:behavior-attested`.
 
 ## Tests
 
+The angrop sources are part of pwnc itself. Install the optional analysis
+runtime before exercising automatic gadget synthesis:
+
+```sh
+poetry install -E rop
+```
+
 Run the normal foundation, lowering, assembly, and matrix tests with:
 
 ```sh
@@ -1011,7 +1092,7 @@ their real challenge protocols. `seek-and-destroy` supplies byte-granular
 `/proc/self/mem` reads and writes as a local payload-debugging transport: the
 test composes heap -> libc, libc -> heap, libc -> `environ`/stack,
 saved-main-return classification, libc -> loader, and `r_debug` -> `link_map`,
-then executes a pwntools-selected exact-libc `exit(73)` ROP chain through the
+then executes an embedded-angrop exact-libc `exit(73)` ROP chain through the
 classified return slot. This is deliberately not a production or remote
 transport assumption; payload generation sees only caller-supplied
 `read_at`/`write_at` callbacks, and no production workflow opens
@@ -1027,6 +1108,32 @@ finds the stack through `environ`, classifies the main-image continuation,
 enumerates the loader list, materializes and writes an exact-libc ROP chain,
 verifies it, restores every original word, and also exercises the live
 pwntools `MemLeak` bridge before detaching cleanly.
+
+An audited local rebuild of DEF CON 32's i386 `printf-plus-plus` can be tested
+without promoting it to an immutable corpus artifact. Point the dedicated
+variable at the extracted directory containing `challenge`, `libc.so.6`,
+`ld-linux.so.2`, and the shipped dependent libraries:
+
+```sh
+PWNC_LIVECTF_PRINTF_PLUS_PLUS_ROOT=/path/to/audited/handout \
+python3 -m unittest payloads.tests.test_livectf_printf_plus_plus -v
+```
+
+On an x86-64 Linux host, the native case directly `execve`s the i386
+`challenge` binary and lets the kernel follow its `/lib/ld-linux.so.2`
+interpreter. It sets `LD_LIBRARY_PATH` only to select the audited handout
+libraries; neither qemu nor an explicitly invoked loader appears in its argv.
+The separately named qemu-i386 case remains independent cross-emulator
+coverage.
+
+That opt-in test cross-checks pwntools mitigation/ELF facts, lowers composable
+exact-libc open/sendfile and open/read/write programs with an explicit fd 3,
+and executes a leak-derived return chain both as native i386 and under
+`qemu-i386`. It uses only bytes disclosed by the challenge to recover stack
+and libc bases. The target's line/brace/NUL format-string transport cannot
+carry the generated libc ORW frames, so the executable lane uses an honest
+bad-byte-safe `system("/bin/sh")` adaptation and records the ORW frames as
+lowering evidence rather than falsely claiming they ran through this bug.
 
 Historical source is not the same thing as a reproducible historical runtime.
 The DEF CON 30 Dockerfile now encounters archived Debian Buster package
@@ -1143,6 +1250,11 @@ static contract additionally passed one complete no-selector invocation:
 37 target builds and 79 successful ROP process executions, including distinct
 ARM/Thumb runs, both PPC64 ABIs, SPARC32's bundled-GCC/pinned-glibc
 combination, and 14 direct-host x86 executions.
+After the embedded-angrop static lane was strengthened from terminal `exit` to
+returning `write` followed by `exit`, all seven pinned x86 specs passed focused
+selector runs under both qemu-user and the native x86-64 host. Those newer runs
+are stated separately rather than retroactively changing the historical
+79-execution no-selector count.
 
 The completed real-libc ROP evidence is:
 
@@ -1152,6 +1264,7 @@ The completed real-libc ROP evidence is:
 | Dynamic composed ORW and sendfile | All seven pinned i386/AMD64 mappings | Not claimed by this pinned-libc fixture |
 | Static-glibc syscall ROP | All 37 mappings in one no-selector run | All seven pinned i386/AMD64 mappings |
 | Static-glibc direct `exit` ROP | 28 mappings in the same no-selector run; 15 architecture/endian/ABI variants | All seven pinned i386/AMD64 mappings |
+| Static-glibc embedded-angrop returning `write` + terminal `exit` | All seven pinned i386/AMD64 mappings in focused runs | All seven pinned i386/AMD64 mappings |
 
 The nine excluded direct-call mappings are the Thumb mappings whose shared
 libcs expose ARM-state functions, PPC64 ELFv1 mappings needing descriptor/TOC
@@ -1164,10 +1277,10 @@ Each static case is a real C program linked with `-static`. It reports
 identity, absence of a dynamic interpreter and `DT_NEEDED` entries, plus the
 expected stack-NX evidence. A GNU ld map must identify exactly one `libc.a`
 under the selected provisioned sysroot, its SHA-256 is checked again after
-execution, and `--trace-symbol=exit` must identify an archive member from that
-same file as the definition used by the direct-call chain. The pivot and
-register-loading/syscall gadgets remain explicit test-owned exploit
-primitives.
+execution, and both `--trace-symbol=write` and `--trace-symbol=exit` must
+identify archive members from that same file as the definitions used by the
+automatic chain. The pivot and register-loading/syscall gadgets remain
+explicit test-owned exploit primitives.
 
 The pinned SPARC32 and SPARC64 GNU ld layouts are one documented exception to
 the writable-non-executable chain-storage assertion: their executable `.iplt`
@@ -1225,18 +1338,19 @@ is an explicit, less isolated compatibility path.
 
 | Suite | Real runtime evidence | Test-owned or not established |
 | --- | --- | --- |
-| Native i386/AMD64 | Direct host-kernel execution and exact loaded host libc for FSOP/live-base ret2libc; seven pinned-libc semantic-write mirrors; seven static-glibc syscall/`exit` mirrors | Compiled fixtures, supplied control transfer, and challenge preconditions |
+| Native i386/AMD64 | Direct host-kernel execution and exact loaded host libc for FSOP/live-base ret2libc and composed embedded-angrop ORW/sendfile; seven pinned-libc semantic-write mirrors; seven static-glibc syscall/direct-call mirrors, with embedded-angrop returning `write` + terminal `exit` on x86 | Compiled fixtures, supplied control transfer, and challenge preconditions |
 | Pinned LiveCTF | Exact release challenge/libc/loader identities; test-only local `/proc/self/mem` debugging and real challenge ptrace transport; complete discovery graph; one executed and one verified/restored exact-libc ROP chain | Payloads never assume `/proc/self/mem`; runtime execution is AMD64-only; DEF CON 32/33 have source provenance but no exact handout execution claim |
-| General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, and materialized ROP control flow | Minimal static ELF envelopes and semantic ROP gadgets are test-owned; shellcode cases use no foreign libc |
-| Pinned glibc qemu-user | Real dynamic programs and exact loader/libc identity; direct guest arbitrary-read discovery on AArch64 LE and ARM BE; target-endian FSOP dispatch; exact-libc semantic `write` on 28 mappings; x86 ORW/sendfile on seven; real static-glibc syscall ROP on 37 and libc `exit` ROP on 28 | Heap FILE placement, activation call, callbacks, challenge ELF, pivot/gadgets, and static ROP input protocol are test fixtures; the discovery read protocol is test-owned; the host QEMU version is not pinned |
+| General qemu-user | Exact builder shellcode bytes, automatic semihosting escape, materialized semantic ROP control flow, and embedded-angrop returning `write` + terminal `exit` on ARM LE and AArch64 LE | Minimal static ELF envelopes and semantic/automatic ROP gadgets are test-owned; shellcode cases use no foreign libc |
+| Pinned glibc qemu-user | Real dynamic programs and exact loader/libc identity; direct guest arbitrary-read discovery on AArch64 LE and ARM BE; target-endian FSOP dispatch; exact-libc semantic `write` on 28 mappings; x86 ORW/sendfile on seven; real static-glibc syscall ROP on 37 and libc direct-call ROP on 28, including embedded-angrop returning `write` + terminal `exit` on x86 | Heap FILE placement, activation call, callbacks, challenge ELF, pivot/gadgets, and static ROP input protocol are test fixtures; the discovery read protocol is test-owned; the host QEMU version is not pinned |
 | QEMU 7.1/7.2 boundary | Provisioned roots bind observed banners, output hashes, source trees, configure arguments, and build identity; both origins test RW-versus-RX AArch64 fetch | Explicit binary overrides attest only banner/hash/behavior; the static probe makes no libc, payload-exploit, non-AArch64, or native-hardware claim |
 
 The x86 pinned-libc ROP fixture supplies the file path in writable main-image
 storage, composes `open` with either `read`/`write` or `sendfile`, deliberately
-hardcodes the observed next descriptor as fd 3, and lowers through pwntools
-using the exact challenge ELF as the extra gadget image. It verifies binary
-file output and the intended exit code. That is a real chain against the pinned
-libc and real fixture gadgets, but the fixture is not an arbitrary challenge.
+hardcodes the observed next descriptor as fd 3, and lowers through the embedded
+angrop backend using the exact challenge ELF at explicit bias zero as the sole
+gadget image. It verifies binary file output, intended exit code, and exact
+image/call/gadget provenance. That is a real chain against the pinned libc and
+real fixture gadgets, but the fixture is not an arbitrary challenge.
 
 PPC32 little-endian remains covered by source and relocation-free assembly
 tests but is intentionally absent from QEMU/glibc execution evidence. With an
@@ -1248,10 +1362,12 @@ instead of silently becoming evidence-free success.
 
 - Linux syscall numbers and ABIs are fixed to the exact catalog entries; other
   OSes, ARM OABI, MIPS n32, RISC-V big endian, and x32 are not represented.
-- ROP builders need exact caller-supplied gadget semantics and offsets. They do
-  not find gadgets, solve bad bytes, or select a stack pivot. The opt-in QEMU
-  fixtures validate chains against their supplied synthetic gadgets, not
-  arbitrary challenge gadgets or binaries.
+- Semantic ROP builders need exact caller-supplied gadget semantics and
+  offsets. The optional embedded-angrop backend does discover direct-call
+  gadgets and solve complete-chain bad-byte constraints in exact supplied
+  images, but it does not select an exploit-specific stack pivot. The opt-in
+  QEMU fixtures still use deliberately small challenge binaries; they are not
+  a claim that arbitrary binaries always contain a satisfiable gadget set.
 - Process discovery composes strict reads against caller-supplied exact ELF
   artifacts, bounded mappings, and classification evidence. It is not a
   remote-libc identification service, an unbounded mapping finder, a live

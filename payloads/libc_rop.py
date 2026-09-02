@@ -6,19 +6,23 @@ programs such as ``open(path); sendfile(1, 3, NULL, n)`` honest and easy to
 rearrange.  Each stage can also be lowered independently with concrete
 ``SemanticGadget`` records.
 
-Automatic multi-call lowering uses pwntools only for i386 and AMD64.  Other
-ABIs need target-specific stack-transition semantics, so their stages remain
-fully described and independently lowerable rather than being advertised as
-executable chains without evidence.
+Automatic multi-call lowering uses the repository's vendored angrop source
+against digest-checked ELF snapshots and explicit runtime load biases.
+Pwntools remains the source of ELF, mitigation, symbol, and packing facts; its
+ROP builder is retained only as an explicitly named compatibility path.
 """
 
 from __future__ import annotations
 
+import math
 import os
+import time
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pwnlib.context import context
 from pwnlib.exception import PwnlibException
@@ -38,6 +42,15 @@ from .rop import (
     build_call,
 )
 from .target import Target
+
+if TYPE_CHECKING:
+    from .angrop_backend import (
+        AngropDirectCall,
+        AngropDiscoveryOptions,
+        AngropImageSpec,
+        AngropSynthesisResult,
+        PreparedAngropSession,
+    )
 
 
 class LibcROPError(ROPBuildError):
@@ -127,6 +140,40 @@ def _checked_word(target: Target, value: int, description: str, *, positive: boo
 
 def _align_up(value: int, alignment: int) -> int:
     return (value + alignment - 1) & -alignment
+
+
+def _normalized_bad_bytes(values: Sequence[int]) -> frozenset[int]:
+    if isinstance(values, str):
+        raise TypeError("bad_bytes must be bytes or a sequence of byte integers")
+    try:
+        normalized = tuple(values)
+    except TypeError as exc:
+        raise TypeError("bad_bytes must be bytes or a sequence of byte integers") from exc
+    for value in normalized:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFF:
+            raise ValueError("bad_bytes entries must be integers in range(256)")
+    return frozenset(normalized)
+
+
+def _next_safe_inline_offset(
+    target: Target,
+    chain_base: int,
+    minimum: int,
+    alignment: int,
+    forbidden: frozenset[int],
+) -> int:
+    """Find nearby aligned padding whose concrete inline pointer is encodable."""
+
+    candidate = _align_up(minimum, alignment)
+    search_end = min(target.mask - chain_base, candidate + 0x10000)
+    while candidate <= search_end:
+        if not forbidden.intersection(target.pack(chain_base + candidate)):
+            return candidate
+        candidate += alignment
+    raise LibcROPError(
+        "no bad-byte-free inline path pointer exists within 64 KiB of the minimal aligned placement; "
+        "choose another chain_base or an external path_address"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +305,8 @@ class LoweredLibcROP:
     data: bytes
     chain_base: int
     inline_path_offset: int | None
+    backend: str = "angrop"
+    backend_result: AngropSynthesisResult | None = None
 
     @property
     def inline_path_address(self) -> int | None:
@@ -269,9 +318,11 @@ class LoweredLibcROP:
     def inline_path_reference(self) -> Address | None:
         if self.inline_path_offset is None:
             return None
-        return Address(self.inline_path_offset, Image.STACK, "inline libc ORW path")
+        assert self.inline_path_address is not None
+        return Address(self.inline_path_address, Image.ABSOLUTE, "placement-bound inline libc ORW path")
 
     def as_payload(self) -> Payload:
+        backend_metadata = None if self.backend_result is None else dict(self.backend_result.as_payload().metadata)
         return Payload(
             self.data,
             self.program.target,
@@ -281,6 +332,8 @@ class LoweredLibcROP:
                 "libc_sha256": self.program.libc.identity.sha256,
                 "libc_build_id": self.program.libc.identity.build_id,
                 "operations": tuple(stage.operation.value for stage in self.program.stages),
+                "rop_backend": self.backend,
+                "rop_backend_metadata": backend_metadata,
                 "chain_size": len(self.chain),
                 "inline_path_offset": self.inline_path_offset,
                 "external_placements": tuple(
@@ -292,6 +345,7 @@ class LoweredLibcROP:
                     for placement in self.program.external_placements
                 ),
             },
+            required_load_address=self.chain_base,
         )
 
 
@@ -357,6 +411,324 @@ class LibcROPProgram:
             return_to=return_to,
             inline_addresses=inline,
             filler=filler,
+        )
+
+    def angrop_calls(
+        self,
+        layout: RuntimeLayout,
+        inline_path_address: int | None,
+        *,
+        continuation: AddressValue | None = None,
+    ) -> tuple[AngropDirectCall, ...]:
+        """Resolve the stage IR for direct use with a prepared angrop session.
+
+        ``continuation`` adds a final argument-less direct transfer after the
+        last stage returns.  This makes a standalone ``open`` payload useful
+        when a challenge needs to regain control before a separately generated
+        exfiltration payload hardcodes the observed descriptor.
+        """
+
+        from .angrop_backend import AngropDirectCall
+
+        if not isinstance(layout, RuntimeLayout):
+            raise TypeError("layout must be a RuntimeLayout")
+        if continuation is not None:
+            _require_exact_value(self.libc, continuation, "angrop continuation")
+            if self.stages[-1].operation is LibcROPStageKind.EXIT:
+                raise LibcROPError("an exit stage cannot return to an angrop continuation")
+        inline = {"path": inline_path_address} if inline_path_address is not None else {}
+        calls: list[AngropDirectCall] = []
+        final_index = len(self.stages) - 1
+        for index, stage in enumerate(self.stages):
+            function = stage.function.resolve(layout)
+            arguments = tuple(
+                _resolve_address(value, layout) for value in stage.resolve_arguments(inline_addresses=inline)
+            )
+            calls.append(
+                AngropDirectCall(
+                    function,
+                    arguments=arguments,
+                    name=f"{index}:{stage.operation.value}:{stage.symbol}",
+                    needs_return=index != final_index or continuation is not None,
+                )
+            )
+        if continuation is not None:
+            calls.append(
+                AngropDirectCall(
+                    _resolve_address(continuation, layout),
+                    name="continuation",
+                    needs_return=False,
+                )
+            )
+        return tuple(calls)
+
+    def _angrop_calls(
+        self,
+        layout: RuntimeLayout,
+        inline_path_address: int | None,
+        *,
+        continuation: AddressValue | None = None,
+    ) -> tuple[AngropDirectCall, ...]:
+        """Compatibility alias for the now-public :meth:`angrop_calls`."""
+
+        return self.angrop_calls(layout, inline_path_address, continuation=continuation)
+
+    def lower_angrop(
+        self,
+        layout: RuntimeLayout,
+        *,
+        chain_base: int,
+        inline_alignment: int | None = None,
+        extra_images: Sequence[AngropImageSpec] = (),
+        scan_libc_gadgets: bool = True,
+        bad_bytes: Sequence[int] = (),
+        options: AngropDiscoveryOptions | None = None,
+        timeout: float | None = None,
+        continuation: AddressValue | None = None,
+        session: PreparedAngropSession | None = None,
+    ) -> LoweredLibcROP:
+        """Synthesize all calls with vendored angrop over exact runtime images.
+
+        The program's libc is always included using ``layout.libc_base``.
+        Every supplemental image is an :class:`AngropImageSpec` carrying its
+        own explicit additive load bias; a zero bias is still explicit for a
+        linked non-PIE executable.  Set ``scan_libc_gadgets=False`` when the
+        supplied challenge image is the intended gadget source.
+
+        ``timeout`` is one shared deadline for call synthesis and inline-data
+        fixed-point retries only.  Gadget discovery has its own independent
+        :attr:`AngropDiscoveryOptions.timeout` budget.
+
+        ``continuation`` makes the final program stage return and appends one
+        terminal direct transfer to the resolved address.  It is invalid after
+        an ``exit`` stage.  Repeated variants can pass the same public
+        :class:`PreparedAngropSession` as ``session=``; the caller retains
+        ownership.  :meth:`angrop_calls` remains available for direct use with
+        the session's lower-level ``synthesize_calls()`` method.
+        """
+
+        from .angrop_backend import (
+            AngropBackendError,
+            AngropDiscoveryOptions,
+            AngropImageSpec,
+            PreparedAngropSession,
+            prepare_angrop,
+        )
+
+        if not isinstance(layout, RuntimeLayout):
+            raise TypeError("layout must be a RuntimeLayout")
+        if layout.libc_base is None:
+            raise LibcROPError("angrop lowering needs the exact runtime libc base (its additive load bias)")
+        if isinstance(chain_base, bool) or not isinstance(chain_base, int):
+            raise TypeError("chain_base must be an int")
+        if not 0 <= chain_base <= self.target.mask:
+            raise ValueError("chain_base does not fit the target address width")
+        if not isinstance(scan_libc_gadgets, bool):
+            raise TypeError("scan_libc_gadgets must be bool")
+        alignment = self.target.word_size if inline_alignment is None else inline_alignment
+        if (
+            isinstance(alignment, bool)
+            or not isinstance(alignment, int)
+            or alignment <= 0
+            or alignment & (alignment - 1)
+        ):
+            raise ValueError("inline_alignment must be a positive power of two")
+        forbidden = _normalized_bad_bytes(bad_bytes)
+        if self.inline_path:
+            path_conflict = next((index for index, value in enumerate(self.path_data) if value in forbidden), None)
+            if path_conflict is not None:
+                raise LibcROPError(
+                    f"bad byte {self.path_data[path_conflict]:#04x} occurs in inline path data at offset "
+                    f"{path_conflict:#x}"
+                )
+        normalized_images = tuple(extra_images)
+        for index, image in enumerate(normalized_images):
+            if not isinstance(image, AngropImageSpec):
+                raise TypeError(f"extra image {index} must be an AngropImageSpec with an explicit load_bias")
+        if options is not None and not isinstance(options, AngropDiscoveryOptions):
+            raise TypeError("options must be an AngropDiscoveryOptions or None")
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout <= 0
+            or not math.isfinite(timeout)
+        ):
+            raise ValueError("timeout must be a positive finite number or None")
+        if continuation is not None:
+            _require_exact_value(self.libc, continuation, "angrop continuation")
+            if self.stages[-1].operation is LibcROPStageKind.EXIT:
+                raise LibcROPError("an exit stage cannot return to an angrop continuation")
+
+        synthesis_deadline: float | None = None
+
+        def remaining_timeout() -> float | None:
+            if synthesis_deadline is None:
+                return None
+            remaining = synthesis_deadline - time.monotonic()
+            if remaining <= 0:
+                raise LibcROPError(f"angrop synthesis exceeded its {timeout:g}-second deadline")
+            return remaining
+
+        primary = AngropImageSpec.from_adapter(
+            self.adapter,
+            load_bias=layout.libc_base,
+            name="libc",
+            scan_gadgets=scan_libc_gadgets,
+        )
+        requested_images = (primary, *normalized_images)
+        if session is None:
+            try:
+                session_context = prepare_angrop(
+                    requested_images,
+                    target=self.target,
+                    options=options or AngropDiscoveryOptions(),
+                )
+            except AngropBackendError as exc:
+                raise LibcROPError(f"angrop cannot prepare the composed program: {exc}") from exc
+        else:
+            if not isinstance(session, PreparedAngropSession):
+                raise TypeError("session must be a PreparedAngropSession or None")
+            if session.closed:
+                raise LibcROPError("the supplied angrop session is closed")
+            if _target_key(session.target) != _target_key(self.target):
+                raise LibcROPError("the supplied angrop session targets a different ABI")
+
+            def image_key(image: AngropImageSpec) -> tuple[object, ...]:
+                return (
+                    image.identity.sha256,
+                    image.identity.build_id,
+                    image.load_bias,
+                    image.scan_gadgets,
+                    _target_key(image.target),
+                )
+
+            if tuple(map(image_key, session.images)) != tuple(map(image_key, requested_images)):
+                raise LibcROPError("the supplied angrop session does not contain the requested exact runtime images")
+            if options is not None and session.options != options:
+                raise LibcROPError("the supplied angrop session uses different discovery options")
+            session_context = nullcontext(session)
+        try:
+            with session_context as prepared:
+                # Discovery has its own AngropDiscoveryOptions timeout.  This
+                # budget covers every fixed-point synthesis attempt together.
+                synthesis_deadline = None if timeout is None else time.monotonic() + timeout
+                if not self.inline_path:
+                    result = prepared.synthesize_calls(
+                        self.angrop_calls(layout, None, continuation=continuation),
+                        chain_base=chain_base,
+                        bad_bytes=forbidden,
+                        timeout=remaining_timeout(),
+                    )
+                    chain = result.data
+                    if chain_base + len(chain) > self.target.mask + 1:
+                        raise LibcROPError("ROP chain exceeds the target address space")
+                    return LoweredLibcROP(
+                        self,
+                        chain,
+                        chain,
+                        chain_base,
+                        None,
+                        backend="angrop",
+                        backend_result=result,
+                    )
+
+                # Bad-byte-aware gadget selection can change the chain length.
+                # Seed placement without those constraints so a forbidden byte
+                # in the temporary pointer cannot prevent finding the fixed
+                # point that would have avoided it.
+                inline_offset = 0
+                if forbidden:
+                    seed = prepared.synthesize_calls(
+                        self.angrop_calls(layout, chain_base, continuation=continuation),
+                        chain_base=chain_base,
+                        bad_bytes=(),
+                        timeout=remaining_timeout(),
+                    )
+                    inline_offset = _next_safe_inline_offset(
+                        self.target,
+                        chain_base,
+                        len(seed.data),
+                        alignment,
+                        forbidden,
+                    )
+
+                seen_offsets: set[int] = set()
+                result = None
+                chain = b""
+                for _ in range(8):
+                    pointer = chain_base + inline_offset
+                    if pointer > self.target.mask:
+                        raise LibcROPError("inline path address exceeds the target address space")
+                    result = prepared.synthesize_calls(
+                        self.angrop_calls(layout, pointer, continuation=continuation),
+                        chain_base=chain_base,
+                        bad_bytes=forbidden,
+                        timeout=remaining_timeout(),
+                    )
+                    chain = result.data
+                    updated = _next_safe_inline_offset(
+                        self.target,
+                        chain_base,
+                        len(chain),
+                        alignment,
+                        forbidden,
+                    )
+                    if updated == inline_offset:
+                        break
+                    if updated in seen_offsets:
+                        raise LibcROPError("angrop inline-data placement entered a length cycle")
+                    seen_offsets.add(inline_offset)
+                    inline_offset = updated
+                else:
+                    raise LibcROPError("angrop inline-data placement did not converge")
+
+                assert result is not None  # every valid program executes at least one iteration
+                padding = bytes(inline_offset - len(chain))
+                data = chain + padding + self.path_data
+                if chain_base + len(data) > self.target.mask + 1:
+                    raise LibcROPError("ROP chain and inline path exceed the target address space")
+                conflict = next((index for index, value in enumerate(data) if value in forbidden), None)
+                if conflict is not None:
+                    raise LibcROPError(f"bad byte {data[conflict]:#04x} occurs at linked payload offset {conflict:#x}")
+                return LoweredLibcROP(
+                    self,
+                    chain,
+                    data,
+                    chain_base,
+                    inline_offset,
+                    backend="angrop",
+                    backend_result=result,
+                )
+        except AngropBackendError as exc:
+            raise LibcROPError(f"angrop cannot lower the composed program: {exc}") from exc
+
+    def lower(
+        self,
+        layout: RuntimeLayout,
+        *,
+        chain_base: int,
+        inline_alignment: int | None = None,
+        extra_images: Sequence[AngropImageSpec] = (),
+        scan_libc_gadgets: bool = True,
+        bad_bytes: Sequence[int] = (),
+        options: AngropDiscoveryOptions | None = None,
+        timeout: float | None = None,
+        continuation: AddressValue | None = None,
+        session: PreparedAngropSession | None = None,
+    ) -> LoweredLibcROP:
+        """Use the primary automatic ROP backend (vendored angrop)."""
+
+        return self.lower_angrop(
+            layout,
+            chain_base=chain_base,
+            inline_alignment=inline_alignment,
+            extra_images=extra_images,
+            scan_libc_gadgets=scan_libc_gadgets,
+            bad_bytes=bad_bytes,
+            options=options,
+            timeout=timeout,
+            continuation=continuation,
+            session=session,
         )
 
     def _pwntools_chain(
@@ -445,7 +817,7 @@ class LibcROPProgram:
 
         if not self.inline_path:
             chain = self._pwntools_chain(layout, chain_base, None, normalized_images)
-            return LoweredLibcROP(self, chain, chain, chain_base, None)
+            return LoweredLibcROP(self, chain, chain, chain_base, None, backend="pwntools-compat")
 
         # Gadget selection depends on the register set, not the pointer value,
         # but use a bounded fixed point so that a backend change cannot silently
@@ -466,7 +838,7 @@ class LibcROPProgram:
 
         padding = bytes(inline_offset - len(chain))
         data = chain + padding + self.path_data
-        return LoweredLibcROP(self, chain, data, chain_base, inline_offset)
+        return LoweredLibcROP(self, chain, data, chain_base, inline_offset, backend="pwntools-compat")
 
     def materialize(
         self,
@@ -474,13 +846,25 @@ class LibcROPProgram:
         *,
         chain_base: int,
         inline_alignment: int | None = None,
-        extra_images: Sequence[tuple[ExactELFAdapter, int | None]] = (),
+        extra_images: Sequence[AngropImageSpec] = (),
+        scan_libc_gadgets: bool = True,
+        bad_bytes: Sequence[int] = (),
+        options: AngropDiscoveryOptions | None = None,
+        timeout: float | None = None,
+        continuation: AddressValue | None = None,
+        session: PreparedAngropSession | None = None,
     ) -> bytes:
-        return self.lower_pwntools(
+        return self.lower(
             layout,
             chain_base=chain_base,
             inline_alignment=inline_alignment,
             extra_images=extra_images,
+            scan_libc_gadgets=scan_libc_gadgets,
+            bad_bytes=bad_bytes,
+            options=options,
+            timeout=timeout,
+            continuation=continuation,
+            session=session,
         ).data
 
 
@@ -686,13 +1070,29 @@ class LibcROPBuilder:
             normalized = tuple(stages)  # type: ignore[arg-type]
         if any(not isinstance(stage, LibcROPStage) for stage in normalized):
             raise TypeError("compose expects LibcROPStage records")
+
+        open_path_arguments = tuple(
+            stage.arguments[0] for stage in normalized if stage.operation is LibcROPStageKind.OPEN and stage.arguments
+        )
+        inline_path = any(
+            isinstance(argument, InlineDataReference) and argument.tag == "path" for argument in open_path_arguments
+        )
+        external_path_addresses = tuple(
+            argument for argument in open_path_arguments if not isinstance(argument, InlineDataReference)
+        )
+        external_placements = tuple(
+            placement
+            for placement in self.external_placements
+            if any(_same_address(placement.address, address) for address in external_path_addresses)
+        )
+        needs_path_data = inline_path or bool(external_placements)
         return LibcROPProgram(
             self.libc,
             self.adapter,
             normalized,
-            self.path_data,
-            isinstance(self.path_address, InlineDataReference),
-            self.external_placements,
+            self.path_data if needs_path_data else b"",
+            inline_path,
+            external_placements,
         )
 
 

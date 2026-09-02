@@ -18,10 +18,11 @@ from pathlib import Path
 from pwnlib.context import context
 from pwnlib.tubes.process import process
 
+from payloads.angrop_backend import AngropDirectCall, AngropDiscoveryOptions, AngropImageSpec, prepare_angrop
 from payloads.arbio import ArbitraryMemory, IOPrimitiveTraits
 from payloads.discovery import DiscoveryNotFoundError, ExactProcessDiscovery, MemorySpan
 from payloads.pwntools_compat import ExactELFAdapter
-from payloads.rop import ChainWord, PointerKind, ROPChain
+from payloads.rop import ROPChain
 from payloads.tests.runtime_support.livectf import load_manifest, provision_handout
 
 _OPT_IN = os.environ.get("PWNC_LIVECTF_TESTS") == "1"
@@ -204,29 +205,17 @@ def _read_maps_prefix(transport: _SeekAndDestroyMemory) -> bytes:
 
 
 def _exit_chain(libc: ExactELFAdapter, libc_base: int, slot: int, status: int) -> ROPChain:
-    lowest_load = min(item.start for item in libc.profile.load_ranges)
-    elf, rop = libc.fresh_rop(runtime_base=libc_base + lowest_load)
-    try:
-        ret = int(rop.find_gadget(["ret"]).address)
-        pop_rdi = int(rop.find_gadget(["pop rdi", "ret"]).address)
-        exit_address = int(elf.symbols["exit"])
-    finally:
-        elf.close()
-
-    words: list[ChainWord] = [
-        ChainWord(pop_rdi, "load exit status", PointerKind.CODE),
-        ChainWord(status, "exit status"),
-        ChainWord(exit_address, "exact libc exit", PointerKind.FUNCTION),
-    ]
-    exit_entry_sp = slot + len(words) * libc.target.word_size
-    if exit_entry_sp % 16 != 8:
-        words.insert(0, ChainWord(ret, "AMD64 SysV stack alignment", PointerKind.CODE))
-    return ROPChain(
-        libc.target,
-        tuple(words),
-        "pwntools-selected exact-libc exit chain",
-        steps=("align stack", "set rdi", "call exact libc exit"),
-    )
+    image = AngropImageSpec.from_adapter(libc, load_bias=libc_base, name="LiveCTF libc")
+    exit_address = image.runtime_symbol("exit")
+    with prepare_angrop((image,), options=AngropDiscoveryOptions(processes=1)) as session:
+        result = session.synthesize_calls(
+            (AngropDirectCall(exit_address, (status,), name="exit", needs_return=False),),
+            chain_base=slot,
+            timeout=30,
+        )
+    if not result.gadgets or any(item.image_sha256 != libc.identity.sha256 for item in result.gadgets):
+        raise AssertionError("angrop exit chain did not retain exact-libc gadget provenance")
+    return result.as_rop_chain(description="vendored-angrop exact-libc exit chain")
 
 
 @unittest.skipUnless(_OPT_IN, "set PWNC_LIVECTF_TESTS=1 to run historical LiveCTF process tests")

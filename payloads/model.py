@@ -54,6 +54,7 @@ class Payload:
     memory: tuple[MemoryRequirement, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
     data_requirement_index: int | None = None
+    required_load_address: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, bytes):
@@ -69,6 +70,11 @@ class Payload:
                 raise ValueError("data_requirement_index must select an existing memory requirement")
             if self.memory[self.data_requirement_index].size < len(self.data):
                 raise ValueError("payload-data memory requirement is smaller than payload.data")
+        if self.required_load_address is not None:
+            if isinstance(self.required_load_address, bool) or not isinstance(self.required_load_address, int):
+                raise TypeError("required_load_address must be int or None")
+            if not 0 <= self.required_load_address <= self.target.mask:
+                raise ValueError("required_load_address does not fit the target pointer width")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     @property
@@ -80,6 +86,12 @@ class Payload:
         return self.memory[self.data_requirement_index]
 
     def entry(self, load_address: int) -> int:
+        if isinstance(load_address, bool) or not isinstance(load_address, int):
+            raise TypeError("load_address must be an int")
+        if self.required_load_address is not None and load_address != self.required_load_address:
+            raise ConstraintError(
+                f"payload requires load address {self.required_load_address:#x}, got {load_address:#x}"
+            )
         return self.target.entry_address(load_address + self.entry_offset)
 
 

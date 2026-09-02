@@ -1249,7 +1249,7 @@ class ExactProcessDiscovery:
         if stack_base is not None and slot < stack_base:
             raise ConstraintError("return slot is below the hardcoded stack base")
         active_layout = layout or self.layout
-        if chain.call_frame is None:
+        if chain.call_frame is None and chain.required_chain_base is None:
             replacement = chain.materialize(active_layout)
         else:
             replacement = chain.materialize(active_layout, chain_base=slot)

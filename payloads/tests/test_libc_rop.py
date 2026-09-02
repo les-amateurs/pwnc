@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
+from payloads.angrop_backend import AngropDiscoveryOptions, AngropImageSpec, prepare_angrop
 from payloads.libc import LibcIdentity, LibcImage
 from payloads.libc_rop import (
     InlineDataReference,
@@ -57,6 +61,9 @@ exit: ret
 """,
 }
 
+_ANGR_AVAILABLE = importlib.util.find_spec("angr") is not None
+_ANGROP_TEST_OPTIONS = AngropDiscoveryOptions(processes=1, optimize=True)
+
 
 @unittest.skipUnless(shutil.which("cc"), "a C compiler/linker is required for exact libc ROP fixtures")
 class LibcROPBuilderTests(unittest.TestCase):
@@ -94,6 +101,153 @@ class LibcROPBuilderTests(unittest.TestCase):
             builder.read(3, 0x100)
         with self.assertRaisesRegex(LibcROPError, "require a writable area"):
             builder.write(1, 0x100)
+
+    def test_composition_only_carries_path_data_referenced_by_selected_stages(self) -> None:
+        inline = LibcROPBuilder.from_file(self.libc_path, b"/inline-secret")
+        inline_exfil = inline.compose(inline.sendfile(1, 3, 0x100), inline.exit())
+
+        self.assertFalse(inline_exfil.inline_path)
+        self.assertEqual(inline_exfil.path_data, b"")
+        self.assertEqual(inline_exfil.external_placements, ())
+
+        external = LibcROPBuilder.from_file(
+            self.libc_path,
+            b"/external-secret",
+            path_address=Address(0xB000, Image.MAIN, "preplaced path"),
+        )
+        external_exfil = external.compose(external.sendfile(1, 3, 0x100), external.exit())
+        external_open = external.compose(external.open(), external.exit())
+
+        self.assertEqual(external_exfil.path_data, b"")
+        self.assertEqual(external_exfil.external_placements, ())
+        self.assertEqual(external_open.path_data, b"/external-secret\0")
+        self.assertEqual(external_open.external_placements, external.external_placements)
+
+    def test_non_open_numeric_argument_cannot_select_an_external_path_placement(self) -> None:
+        external = LibcROPBuilder.from_file(
+            self.libc_path,
+            b"/external-secret",
+            path_address=0x100,
+        )
+
+        exfil = external.compose(external.sendfile(1, 3, 0x100), external.exit())
+
+        self.assertFalse(exfil.inline_path)
+        self.assertEqual(exfil.path_data, b"")
+        self.assertEqual(exfil.external_placements, ())
+
+    def test_inline_fixed_point_shares_one_synthesis_deadline(self) -> None:
+        builder = LibcROPBuilder.from_file(self.libc_path, b"/deadline")
+        program = builder.compose(builder.open(), builder.exit())
+        observed_timeouts: list[float] = []
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def synthesize_calls(self, _calls, *, chain_base, bad_bytes, timeout):
+                del chain_base, bad_bytes
+                observed_timeouts.append(timeout)
+                return SimpleNamespace(data=b"A" * 16)
+
+        with (
+            mock.patch("payloads.angrop_backend.prepare_angrop", return_value=FakeSession()),
+            mock.patch("payloads.libc_rop.time.monotonic", side_effect=(100.0, 101.0, 103.5)),
+        ):
+            lowered = program.lower_angrop(
+                RuntimeLayout(libc_base=0x700000000000),
+                chain_base=0x404000,
+                timeout=10,
+            )
+
+        self.assertEqual(observed_timeouts, [9.0, 6.5])
+        self.assertEqual(lowered.inline_path_address, 0x404010)
+        self.assertEqual(lowered.inline_path_reference.image, Image.ABSOLUTE)
+        self.assertEqual(lowered.inline_path_reference.resolve(), 0x404010)
+
+        for invalid_timeout in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(timeout=invalid_timeout), self.assertRaisesRegex(ValueError, "finite"):
+                program.lower_angrop(
+                    RuntimeLayout(libc_base=0x700000000000),
+                    chain_base=0x404000,
+                    timeout=invalid_timeout,
+                )
+
+    def test_inline_bad_bytes_search_harmless_padding_for_an_encodable_pointer(self) -> None:
+        builder = LibcROPBuilder.from_file(self.libc_path, b"/safe-path")
+        program = builder.compose(builder.open(), builder.exit())
+        observed_path_pointers: list[int] = []
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def synthesize_calls(self, calls, *, chain_base, bad_bytes, timeout):
+                del chain_base, timeout
+                if bad_bytes:
+                    observed_path_pointers.append(calls[0].arguments[0])
+                return SimpleNamespace(data=b"A" * 16)
+
+        chain_base = 0x400FFA
+        with mock.patch("payloads.angrop_backend.prepare_angrop", return_value=FakeSession()):
+            lowered = program.lower_angrop(
+                RuntimeLayout(libc_base=0x700000000000),
+                chain_base=chain_base,
+                bad_bytes=(0x0A,),
+            )
+
+        self.assertEqual(lowered.inline_path_offset, 24)
+        self.assertEqual(observed_path_pointers, [chain_base + 24])
+        self.assertNotIn(0x0A, lowered.data)
+
+        with self.assertRaisesRegex(LibcROPError, "inline path data"):
+            program.lower_angrop(
+                RuntimeLayout(libc_base=0x700000000000),
+                chain_base=0x404000,
+                bad_bytes=(0,),
+            )
+
+    def test_standalone_open_can_return_to_an_explicit_angrop_continuation(self) -> None:
+        builder = LibcROPBuilder.from_file(
+            self.libc_path,
+            b"/flag",
+            path_address=Address(0x2000, Image.MAIN, "preplaced path"),
+        )
+        program = builder.compose(builder.open())
+        layout = RuntimeLayout(libc_base=0x700000000000, main_base=0x400000)
+        continuation = Address(0x1234, Image.MAIN, "challenge continuation")
+        observed_calls = []
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def synthesize_calls(self, calls, **_kwargs):
+                observed_calls.extend(calls)
+                return SimpleNamespace(data=b"A" * 16)
+
+        direct_calls = program.angrop_calls(layout, None, continuation=continuation)
+        self.assertEqual([call.needs_return for call in direct_calls], [True, False])
+        self.assertEqual(direct_calls[0].arguments[0], 0x402000)
+        self.assertEqual(direct_calls[1].function, 0x401234)
+        self.assertEqual(direct_calls[1].name, "continuation")
+
+        with mock.patch("payloads.angrop_backend.prepare_angrop", return_value=FakeSession()):
+            program.lower_angrop(layout, chain_base=0x404000, continuation=continuation)
+        self.assertEqual(observed_calls, list(direct_calls))
+
+        exited = builder.compose(builder.exit())
+        with self.assertRaisesRegex(LibcROPError, "exit stage cannot return"):
+            exited.lower_angrop(layout, chain_base=0x404000, continuation=continuation)
 
     def test_writable_area_places_path_then_exposes_shared_read_write_buffer(self) -> None:
         area = WritableArea(Address(0x9000, Image.MAIN, "fixture scratch"), 0x1000)
@@ -172,6 +326,16 @@ class LibcROPBuilderTests(unittest.TestCase):
         other = LibcROPBuilder.from_file(other_path, b"/other")
         with self.assertRaisesRegex(LibcROPError, "different libc artifacts"):
             first.compose(first.open(), other.exit())
+
+    def test_independent_sendfile_stage_does_not_need_the_inline_open_path(self) -> None:
+        libc32 = _compile_exact_rop_fixture(self.root, 32, name="independent-sendfile")
+        builder = LibcROPBuilder.from_file(libc32, b"/flag")
+        program = builder.compose(builder.open(), builder.sendfile(1, 7, 0x100))
+
+        chain = program.lower_stage(1, return_to=0x8049000)
+
+        resolved = chain.resolved_words(RuntimeLayout(libc_base=0xF7000000))
+        self.assertEqual(resolved[2:6], (1, 7, 0, 0x100))
 
 
 class SemanticLibcROPStageTests(unittest.TestCase):
@@ -264,7 +428,8 @@ class SemanticLibcROPStageTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("cc"), "a C compiler/linker is required for exact libc ROP fixtures")
-class PwntoolsComposedProgramTests(unittest.TestCase):
+@unittest.skipUnless(_ANGR_AVAILABLE, "install pwnc with the 'rop' extra for automatic angrop lowering")
+class AngropComposedProgramTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
@@ -277,7 +442,7 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
         cls.temporary.cleanup()
         super().tearDownClass()
 
-    def test_pwntools_links_open_sendfile_exit_with_inline_path_on_both_x86_abis(self) -> None:
+    def test_angrop_links_open_sendfile_exit_with_inline_path_on_both_x86_abis(self) -> None:
         configurations = {
             32: (0xF7000000, 0x804C000),
             64: (0x700000000000, 0x404000),
@@ -285,9 +450,13 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
         for bits, (libc_base, chain_base) in configurations.items():
             with self.subTest(bits=bits):
                 builder = LibcROPBuilder.from_file(self.fixtures[bits], b"/flag")
-                program = builder.compose(builder.open(), builder.sendfile(1, 3, 0x100), builder.exit())
+                program = builder.compose(builder.open(), builder.sendfile(1, 3, 0x100), builder.exit(37))
                 layout = RuntimeLayout(libc_base=libc_base)
-                lowered = program.lower_pwntools(layout, chain_base=chain_base)
+                lowered = program.lower(
+                    layout,
+                    chain_base=chain_base,
+                    options=_ANGROP_TEST_OPTIONS,
+                )
 
                 self.assertEqual(lowered.data[-6:], b"/flag\0")
                 self.assertEqual(lowered.inline_path_address, chain_base + lowered.inline_path_offset)
@@ -302,8 +471,17 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
                 self.assertEqual(payload.data, lowered.data)
                 self.assertEqual(payload.metadata["libc_sha256"], builder.libc.identity.sha256)
                 self.assertEqual(payload.metadata["operations"], ("open", "sendfile", "exit"))
+                self.assertEqual(payload.metadata["rop_backend"], "angrop")
+                self.assertEqual(lowered.backend_result.calls[-1].needs_return, False)
+                self.assertTrue(lowered.backend_result.discovery_options.optimize)
+                if bits == 32:
+                    exit_address = libc_base + builder.libc.offset("exit")
+                    exit_index = max(
+                        index for index, word in enumerate(lowered.backend_result.words) if word == exit_address
+                    )
+                    self.assertEqual(lowered.backend_result.words[exit_index + 2], 37)
 
-    def test_pwntools_links_shared_buffer_orw_without_appending_path(self) -> None:
+    def test_angrop_links_shared_buffer_orw_without_appending_path(self) -> None:
         configurations = {
             32: (0xF7000000, 0x804C000, 0x804E000),
             64: (0x700000000000, 0x404000, 0x406000),
@@ -318,9 +496,10 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
                 )
                 read = builder.read(3, 0x80)
                 program = builder.compose(builder.open(), read, builder.write(1, 0x80), builder.exit())
-                lowered = program.lower_pwntools(
+                lowered = program.lower(
                     RuntimeLayout(libc_base=libc_base),
                     chain_base=chain_base,
+                    options=_ANGROP_TEST_OPTIONS,
                 )
 
                 self.assertIsNone(lowered.inline_path_offset)
@@ -330,12 +509,42 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
                 self.assertIsInstance(buffer, int)
                 self.assertIn(builder.target.pack(buffer), lowered.chain)
 
-    def test_pwntools_can_take_missing_gadgets_from_an_exact_challenge_image(self) -> None:
+    def test_prepared_session_is_reused_without_being_closed_by_high_level_lowering(self) -> None:
+        libc_base = 0x700000000000
+        builder = LibcROPBuilder.from_file(self.fixtures[64], b"/unused")
+        first = builder.compose(builder.sendfile(1, 3, 0x40), builder.exit(31))
+        second = builder.compose(builder.sendfile(1, 4, 0x80), builder.exit(32))
+        image = AngropImageSpec.from_adapter(
+            builder.adapter,
+            load_bias=libc_base,
+            name="libc",
+        )
+
+        with prepare_angrop((image,), options=_ANGROP_TEST_OPTIONS) as session:
+            first_result = first.lower(
+                RuntimeLayout(libc_base=libc_base),
+                chain_base=0x404000,
+                session=session,
+            )
+            second_result = second.lower(
+                RuntimeLayout(libc_base=libc_base),
+                chain_base=0x405000,
+                session=session,
+            )
+            self.assertFalse(session.closed)
+            self.assertEqual(len(session._analysis_cache), 1)
+
+        self.assertTrue(session.closed)
+        self.assertEqual(first_result.backend_result.images, second_result.backend_result.images)
+        self.assertEqual(first_result.backend_result.calls[0].arguments[1], 3)
+        self.assertEqual(second_result.backend_result.calls[0].arguments[1], 4)
+
+    def test_angrop_can_take_missing_gadgets_from_an_exact_challenge_image_at_an_explicit_bias(self) -> None:
         configurations = {
-            32: (0xF7000000, 0x804C000),
-            64: (0x700000000000, 0x404000),
+            32: (0xF7000000, 0x56550000, 0x804C000),
+            64: (0x700000000000, 0x555500000000, 0x404000),
         }
-        for bits, (libc_base, chain_base) in configurations.items():
+        for bits, (libc_base, challenge_bias, chain_base) in configurations.items():
             with self.subTest(bits=bits):
                 function_only = _compile_exact_rop_fixture(
                     self.root,
@@ -350,6 +559,11 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
                     extra_source="\n.globl challenge_marker\nchallenge_marker: nop; ret\n",
                 )
                 supplemental = ExactELFAdapter.from_file(supplemental_path)
+                supplemental_spec = AngropImageSpec.from_adapter(
+                    supplemental,
+                    load_bias=challenge_bias,
+                    name="challenge-gadgets",
+                )
                 builder = LibcROPBuilder.from_file(
                     function_only,
                     b"/flag",
@@ -363,30 +577,30 @@ class PwntoolsComposedProgramTests(unittest.TestCase):
                     builder.exit(42),
                 )
 
-                lowered = program.lower_pwntools(
+                lowered = program.lower(
                     RuntimeLayout(libc_base=libc_base),
                     chain_base=chain_base,
-                    extra_images=((supplemental, None),),
+                    extra_images=(supplemental_spec,),
+                    scan_libc_gadgets=False,
+                    options=_ANGROP_TEST_OPTIONS,
                 )
 
                 self.assertTrue(lowered.chain)
-                gadget_symbol = "gadget_rdi" if bits == 64 else "cleanup12"
-                self.assertIn(builder.target.pack(supplemental.symbol(gadget_symbol)), lowered.chain)
+                synthesis = lowered.backend_result
+                self.assertEqual(tuple(item.load_bias for item in synthesis.images), (libc_base, challenge_bias))
+                self.assertEqual(tuple(item.scan_gadgets for item in synthesis.images), (False, True))
+                call_targets = [item for item in synthesis.gadgets if item.call_target]
+                selected_gadgets = [item for item in synthesis.gadgets if not item.call_target]
+                self.assertTrue(call_targets)
+                self.assertTrue(selected_gadgets)
+                self.assertEqual({item.image_sha256 for item in call_targets}, {builder.libc.identity.sha256})
+                self.assertEqual({item.image_sha256 for item in selected_gadgets}, {supplemental.identity.sha256})
 
     def test_materialization_requires_a_runtime_libc_base(self) -> None:
         builder = LibcROPBuilder.from_file(self.fixtures[64], b"/flag")
         program = builder.compose(builder.open(), builder.exit())
         with self.assertRaisesRegex(LibcROPError, "runtime libc base"):
             program.materialize(RuntimeLayout(), chain_base=0x404000)
-
-    def test_independent_sendfile_stage_does_not_need_the_inline_open_path(self) -> None:
-        builder = LibcROPBuilder.from_file(self.fixtures[32], b"/flag")
-        program = builder.compose(builder.open(), builder.sendfile(1, 7, 0x100))
-
-        chain = program.lower_stage(1, return_to=0x8049000)
-
-        resolved = chain.resolved_words(RuntimeLayout(libc_base=0xF7000000))
-        self.assertEqual(resolved[2:6], (1, 7, 0, 0x100))
 
 
 if __name__ == "__main__":

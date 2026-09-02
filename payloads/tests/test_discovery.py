@@ -25,7 +25,7 @@ from payloads.errors import ConstraintError, MemoryAccessError, UnsupportedTarge
 from payloads.libc import LibcIdentity
 from payloads.model import Address, Image, Linkage, Permission, Relro, RuntimeLayout
 from payloads.pwntools_compat import ExactELFAdapter, PwntoolsMitigations
-from payloads.rop import ChainWord, ROPChain
+from payloads.rop import ChainWord, ROPBuildError, ROPChain
 from payloads.target import Target, resolve_target
 
 
@@ -478,6 +478,24 @@ class DiscoveryTests(unittest.TestCase):
             backend.read(slot, chain.byte_length),
             target.pack(libc_base + 0x440) + target.pack(main_base + 0x550),
         )
+
+    def test_flat_rop_insertion_rejects_a_chain_bound_to_another_stack_slot(self) -> None:
+        target, _backend, resolver, _libc_base, main_base, stack, slot, _return_address = self._return_fixture()
+        stack_result = resolver.libc_to_stack(
+            PointerLeak(_libc_base + 0x100),
+            libc_base=_libc_base,
+            stack_base=stack.address,
+            stack_span=stack,
+        )
+        return_site = resolver.environ_to_main_return(stack_result, main_base=main_base, return_slot=slot)
+        chain = ROPChain(
+            target,
+            (ChainWord(0x4141414142424242),),
+            required_chain_base=slot + target.word_size,
+        )
+
+        with self.assertRaisesRegex(ROPBuildError, "requires base"):
+            resolver.plan_rop_insertion(return_site, chain)
 
     def test_environ_classifies_returns_and_infers_pie_base_automatically(self) -> None:
         target, backend, resolver, libc_base, main_base, stack, slot, return_address = self._return_fixture()

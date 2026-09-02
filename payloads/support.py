@@ -224,7 +224,7 @@ _IMPLEMENTATION_EVIDENCE: Mapping[Capability, tuple[str, ...]] = MappingProxyTyp
             "payloads.libc_rop.LibcROPBuilder",
             "payloads/tests/test_rop.py::RopTargetMatrixTests.test_exact_identity_ret2libc_matrix_is_complete",
             "payloads/tests/test_libc_rop.py::SemanticLibcROPStageTests",
-            "payloads/tests/test_libc_rop.py::PwntoolsComposedProgramTests",
+            "payloads/tests/test_libc_rop.py::AngropComposedProgramTests",
         ),
         Capability.STATIC_ROP: (
             "payloads.rop.build_static_call",
@@ -316,7 +316,7 @@ _NATIVE_EVIDENCE: Mapping[Capability, str] = MappingProxyType(
         ),
         Capability.RET2LIBC: (
             "payloads/tests/test_native_x86.py::"
-            "NativeRet2libcTests.test_exact_loaded_libc_system_chain_executes_from_native_live_bases"
+            "NativeAngropLibcROPTests.test_real_host_libc_orw_and_sendfile_use_only_exact_main_gadgets"
         ),
         Capability.STATIC_ROP: (
             "payloads/tests/test_native_x86.py::"

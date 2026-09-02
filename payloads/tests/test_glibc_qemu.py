@@ -31,6 +31,8 @@ from payloads import (
     FSOP,
     SUPPORTED_TARGETS,
     Address,
+    AngropDiscoveryOptions,
+    AngropImageSpec,
     Architecture,
     ELFProfile,
     ExactELFAdapter,
@@ -63,6 +65,8 @@ _SELECTOR_ENV = "PWNC_GLIBC_QEMU_SPECS"
 _DEFAULT_CACHE = Path(tempfile.gettempdir()) / "pwnc-runtime-sysroot-cache"
 _PROTOCOL_LIMIT = 0x100000
 _TARGETS_BY_NAME = {target.name: target for target in SUPPORTED_TARGETS}
+_ANGROP_OPTIONS = AngropDiscoveryOptions(processes=min(4, os.cpu_count() or 1), timeout=60)
+_ANGROP_SYNTHESIS_TIMEOUT = 30
 
 
 _FSOP_SOURCE = r"""
@@ -671,7 +675,11 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                 self.assertIs(profile.linkage, Linkage.DYNAMIC)
                 self.assertTrue(profile.nx, profile.nx_evidence)
                 _assert_exact_interpreter(self, provisioned, profile)
-                main_adapter = ExactELFAdapter.from_file(executable, expected_target=target)
+                main_image = AngropImageSpec.from_adapter(
+                    ExactELFAdapter.from_file(executable, expected_target=target),
+                    load_bias=0,
+                    name="non-PIE fixture",
+                )
                 expected = bytes(range(256)) + b"\0PWNC libc ROP\n"
                 input_file = root / "orw-input"
                 input_file.write_bytes(expected)
@@ -681,7 +689,7 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                             provisioned,
                             executable,
                             profile,
-                            main_adapter,
+                            main_image,
                             target,
                             input_file,
                             expected,
@@ -693,7 +701,7 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
         provisioned: ProvisionedSysroot,
         executable: Path,
         profile: ELFProfile,
-        main_adapter: ExactELFAdapter,
+        main_image: AngropImageSpec,
         target: Target,
         input_file: Path,
         expected: bytes,
@@ -783,14 +791,49 @@ class GlibcQemuX86LibcROPTests(unittest.TestCase):
                     argument for stage in program.stages for argument in stage.arguments if isinstance(argument, int)
                 ),
             )
-            lowered = program.lower_pwntools(
+            lowered = program.lower(
                 RuntimeLayout(main_base=0, libc_base=owner_base),
                 chain_base=chain_base,
-                extra_images=((main_adapter, None),),
+                extra_images=(main_image,),
+                scan_libc_gadgets=False,
+                options=_ANGROP_OPTIONS,
+                timeout=_ANGROP_SYNTHESIS_TIMEOUT,
             )
+            self.assertEqual(lowered.backend, "angrop")
+            self.assertIsNotNone(lowered.backend_result)
+            synthesis = lowered.backend_result
+            assert synthesis is not None
+            self.assertEqual(synthesis.discovery_options, _ANGROP_OPTIONS)
+            self.assertEqual(
+                tuple(
+                    (image.name, image.sha256, image.load_bias, image.scan_gadgets, image.cle_main)
+                    for image in synthesis.images
+                ),
+                (
+                    ("libc", libc.identity.sha256, owner_base, False, False),
+                    ("non-PIE fixture", main_image.identity.sha256, 0, True, True),
+                ),
+            )
+            self.assertEqual(
+                tuple(call.name for call in synthesis.calls),
+                tuple(f"{index}:{stage.operation.value}:{stage.symbol}" for index, stage in enumerate(program.stages)),
+            )
+            self.assertEqual(
+                tuple(call.image_offset for call in synthesis.calls),
+                tuple(program.libc.offset(stage.symbol) for stage in program.stages),
+            )
+            self.assertEqual({call.image_sha256 for call in synthesis.calls}, {libc.identity.sha256})
+            self.assertTrue(all(call.needs_return for call in synthesis.calls[:-1]))
+            self.assertFalse(synthesis.calls[-1].needs_return)
+            call_targets = tuple(gadget for gadget in synthesis.gadgets if gadget.call_target)
+            selected_gadgets = tuple(gadget for gadget in synthesis.gadgets if not gadget.call_target)
+            self.assertTrue(call_targets)
+            self.assertTrue(selected_gadgets)
+            self.assertEqual({gadget.image_sha256 for gadget in call_targets}, {libc.identity.sha256})
+            self.assertEqual({gadget.image_sha256 for gadget in selected_gadgets}, {main_image.identity.sha256})
             self.assertFalse(lowered.program.inline_path)
             self.assertIsNone(lowered.inline_path_offset)
-            self.assertLessEqual(len(lowered.data), 0x10000)
+            self.assertLessEqual(len(lowered.data), chain_capacity)
             protocol = _protocol_header(target, len(path.data), len(lowered.data)) + path.data + lowered.data
             stdout, stderr = process.communicate(protocol, timeout=30)
             self.assertEqual(process.returncode, exit_status, stderr.decode(errors="replace"))

@@ -340,6 +340,7 @@ class ROPChain:
     kind: PayloadKind = PayloadKind.ROP
     steps: tuple[str, ...] = ()
     call_frame: CallFrame | None = None
+    required_chain_base: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "words", tuple(self.words))
@@ -348,6 +349,11 @@ class ROPChain:
             object.__setattr__(self, "kind", PayloadKind(self.kind))
         if self.call_frame is not None and not isinstance(self.call_frame, CallFrame):
             raise TypeError("ROPChain.call_frame must be a CallFrame or None")
+        if self.required_chain_base is not None:
+            if isinstance(self.required_chain_base, bool) or not isinstance(self.required_chain_base, int):
+                raise TypeError("ROPChain.required_chain_base must be an int or None")
+            if not 0 <= self.required_chain_base <= self.target.mask:
+                raise ROPBuildError("required chain base does not fit the target pointer width")
         for word in self.words:
             if not isinstance(word, ChainWord):
                 raise TypeError("ROPChain.words must contain ChainWord records")
@@ -423,6 +429,21 @@ class ROPChain:
 
         return tuple(word.resolve(self.target, layout) for word in self.words)
 
+    def validate_chain_base(self, chain_base: int | None) -> int:
+        """Validate an exact placement constraint and return the chain base."""
+
+        if chain_base is None:
+            if self.required_chain_base is None:
+                raise TypeError("chain_base is required")
+            raise ROPBuildError(f"this ROP chain must be placed at {self.required_chain_base:#x}")
+        if isinstance(chain_base, bool) or not isinstance(chain_base, int):
+            raise TypeError("chain_base must be an int")
+        if not 0 <= chain_base <= self.target.mask:
+            raise ROPBuildError(f"chain base {chain_base:#x} does not fit the target pointer width")
+        if self.required_chain_base is not None and chain_base != self.required_chain_base:
+            raise ROPBuildError(f"this ROP chain requires base {self.required_chain_base:#x}, got {chain_base:#x}")
+        return chain_base
+
     def materialize(
         self,
         layout: RuntimeLayout | None = None,
@@ -432,7 +453,11 @@ class ROPChain:
     ) -> bytes:
         """Resolve and target-pack the complete chain."""
 
-        if chain_base is not None or entry_sp is not None:
+        if self.required_chain_base is not None:
+            chain_base = self.validate_chain_base(chain_base)
+        if entry_sp is not None or (
+            chain_base is not None and (self.call_frame is not None or self.required_chain_base is None)
+        ):
             self.validate_call_frame(chain_base, entry_sp=entry_sp)
         return b"".join(self.target.pack(value) for value in self.resolved_words(layout))
 
@@ -454,12 +479,15 @@ class ROPChain:
                 "entry_sp_alignment_bias": self.call_frame.entry_sp_alignment_bias,
                 "caller_area_size": self.call_frame.caller_area_size,
             }
+        if self.required_chain_base is not None:
+            metadata["required_chain_base"] = self.required_chain_base
         return Payload(
             self.materialize(layout, chain_base=chain_base, entry_sp=entry_sp),
             self.target,
             self.kind,
             self.description,
             metadata=metadata,
+            required_load_address=self.required_chain_base,
         )
 
 

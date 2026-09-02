@@ -149,6 +149,19 @@ class RuntimeModelTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             payload.metadata["new"] = "value"  # type: ignore[index]
 
+    def test_payload_can_enforce_an_exact_load_address(self) -> None:
+        payload = Payload(
+            b"\x90",
+            resolve_target("x86"),
+            PayloadKind.ROP,
+            "placement-bound chain",
+            required_load_address=0x804C000,
+        )
+
+        self.assertEqual(payload.entry(0x804C000), 0x804C000)
+        with self.assertRaisesRegex(ConstraintError, "requires load address"):
+            payload.entry(0x804C004)
+
     def test_payload_data_requirement_is_explicit_and_must_cover_bytes(self) -> None:
         target = resolve_target("arm")
         requirement = MemoryRequirement(4, Permission.READ | Permission.EXECUTE, "serialized bytes", 4)

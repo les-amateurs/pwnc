@@ -85,7 +85,7 @@ def _compile_exact_rop_fixture(
             f"-m{bits}",
             "-nostdlib",
             "-shared",
-            "-Wl,-soname,libc-rop-fixture.so",
+            f"-Wl,-soname,{name}-{bits}.so",
             "-Wl,--build-id",
             "-Wl,-z,relro,-z,now,-z,noexecstack",
             "-x",
@@ -381,6 +381,33 @@ class PwntoolsArchitectureAliasTests(unittest.TestCase):
     def test_s390_context_backend_alias_remains_strict(self) -> None:
         with self.assertRaisesRegex(PwntoolsCompatibilityError, "target backend alias 'em_s390'"):
             _crosscheck_pwntools_elf(self._elf("em_s390"), self._profile(backend_arch="em_s390"))
+
+    def test_thumb_accepts_the_arm_elf_machine_spelling_without_weakening_its_backend_alias(self) -> None:
+        target = resolve_target("thumb")
+        profile = mock.Mock(
+            target=target,
+            pie=False,
+            nx=True,
+            relro=Relro.FULL,
+            symbol_offsets={"entry": 0x1001},
+        )
+        elf = mock.Mock(
+            arch="arm",
+            bits=32,
+            endian="little",
+            os="linux",
+            pie=False,
+            nx=True,
+            relro="Full",
+            canary=False,
+            fortify=False,
+            symbols={"entry": 0x1001},
+        )
+
+        mitigations = _crosscheck_pwntools_elf(elf, profile)
+
+        self.assertTrue(mitigations.nx)
+        self.assertEqual(target.pwntools_arch, "thumb")
 
 
 if __name__ == "__main__":

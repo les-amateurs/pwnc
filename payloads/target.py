@@ -113,9 +113,10 @@ class Target:
     def local_context(self):
         """Return an isolated pwntools context for this exact target.
 
-        Pwntools owns useful packing, ELF, ROP, and shellcraft machinery, but
-        its process-global context must not leak between builders.  Callers
-        should use this as a context manager::
+        Pwntools owns useful packing, ELF/mitigation, and shellcraft machinery,
+        but its process-global context must not leak between builders.  Its ROP
+        builder is a compatibility-only path; automatic ROP uses pwnc's
+        embedded angrop source.  Callers should use this as a context manager::
 
             with target.local_context():
                 ...

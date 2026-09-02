@@ -13,7 +13,10 @@ the selected provisioned sysroot's exact ``libc.a`` supplied the program, and
 the guest reports ``gnu_get_libc_version()`` before accepting a target-endian
 ROP protocol.  Test-owned restore and pivot gadgets make the exploit primitive
 explicit while :func:`build_static_syscall` and :func:`build_static_call`
-produce the bytes which actually execute under qemu-user.
+produce the bytes which actually execute under qemu-user.  On x86, the
+embedded-angrop lane executes a returning static-glibc ``write`` call followed
+by a terminal static-glibc ``exit`` call, rather than accepting an exit-only
+smoke chain as evidence of call composition.
 """
 
 from __future__ import annotations
@@ -36,6 +39,9 @@ from payloads import (
     ABI,
     SUPPORTED_TARGETS,
     Address,
+    AngropDirectCall,
+    AngropDiscoveryOptions,
+    AngropImageSpec,
     Architecture,
     ExactELFAdapter,
     Image,
@@ -47,6 +53,7 @@ from payloads import (
     build_static_call,
     build_static_syscall,
     inspect_elf,
+    prepare_angrop,
 )
 from payloads.tests.runtime_support import ProvisionedSysroot, SysrootSpec, load_manifest, provision_sysroot
 
@@ -57,10 +64,10 @@ _DEFAULT_CACHE = Path(tempfile.gettempdir()) / "pwnc-runtime-sysroot-cache"
 _CHAIN_CAPACITY = 0x10000
 _TARGETS_BY_NAME = {target.name: target for target in SUPPORTED_TARGETS}
 _LIBC_ARCHIVE_PATTERN = re.compile(r"(?m)^\s*(\S*libc\.a)\(")
-_EXIT_DEFINITION_PATTERN = re.compile(r"(?P<archive>/\S*libc\.a)\((?P<member>[^)]+)\): definition of exit")
 _NATIVE_X86_HOST = platform.machine().lower() in {"amd64", "x86_64"}
 _XENIAL_SPEC_ID = "amd64-xenial-glibc-2.23"
 _XENIAL_STATIC_COMPILER_SPEC_ID = "x86-64-glibc-2.24"
+_ANGROP_STATIC_MARKER = b"pwnc-static-angrop\n"
 
 
 _FIXTURE_C = r"""
@@ -73,6 +80,8 @@ _FIXTURE_C = r"""
 #define PWNC_CHAIN_CAPACITY 0x10000u
 
 __attribute__((aligned(4096))) unsigned char pwnc_chain[PWNC_CHAIN_CAPACITY];
+__attribute__((used, visibility("default")))
+const unsigned char pwnc_angrop_marker[] = "pwnc-static-angrop\n";
 extern void pwnc_pivot(void *chain) __attribute__((noreturn));
 static void (*volatile pwnc_exit_keepalive)(int) __attribute__((used)) = exit;
 
@@ -619,6 +628,7 @@ def _compile_fixture(
         "-Wl,-z,noexecstack",
         "-static",
         "-Wl,--trace-symbol=exit",
+        "-Wl,--trace-symbol=write",
         f"-Wl,-Map,{linker_map}",
         "-o",
         str(executable),
@@ -664,19 +674,28 @@ def _mapped_libc_archive(linker_map: Path, provisioned: ProvisionedSysroot) -> t
     return archive, digest
 
 
-def _assert_exit_definition_trace(trace: str, archive: Path, provisioned: ProvisionedSysroot) -> None:
-    definitions = tuple(_EXIT_DEFINITION_PATTERN.finditer(trace))
+def _assert_libc_definition_trace(
+    trace: str,
+    archive: Path,
+    provisioned: ProvisionedSysroot,
+    symbol: str,
+) -> None:
+    pattern = re.compile(rf"(?P<archive>/\S*libc\.a)\((?P<member>[^)]+)\): definition of {re.escape(symbol)}(?:\s|$)")
+    definitions = tuple(pattern.finditer(trace))
     if len(definitions) != 1:
         raise AssertionError(
-            f"{provisioned.spec.id}: expected one traced static libc definition of exit, found {len(definitions)}:\n"
+            f"{provisioned.spec.id}: expected one traced static libc definition of {symbol}, "
+            f"found {len(definitions)}:\n"
             f"{trace}"
         )
     definition = definitions[0]
     traced_archive = Path(definition.group("archive")).resolve(strict=True)
     if traced_archive != archive:
-        raise AssertionError(f"{provisioned.spec.id}: exit came from {traced_archive}, not mapped archive {archive}")
+        raise AssertionError(
+            f"{provisioned.spec.id}: {symbol} came from {traced_archive}, not mapped archive {archive}"
+        )
     if not definition.group("member"):
-        raise AssertionError(f"{provisioned.spec.id}: traced exit definition has no archive member")
+        raise AssertionError(f"{provisioned.spec.id}: traced {symbol} definition has no archive member")
 
 
 def _symbol(profile, name: str) -> int:
@@ -825,6 +844,7 @@ def _run_chain(
     *,
     argv: tuple[str, ...] | None = None,
     runner: str = "qemu-user",
+    expected_stdout: bytes = b"",
 ) -> None:
     if argv is None:
         qemu = shutil.which(provisioned.qemu)
@@ -843,7 +863,7 @@ def _run_chain(
         test.assertEqual(_read_version_line(process, f"{provisioned.spec.id} {runner}"), expected_version)
         stdout, stderr = process.communicate(_protocol(target, offset, chain), timeout=30)
         test.assertEqual(process.returncode, expected_status, stderr.decode(errors="replace"))
-        test.assertEqual(stdout, b"")
+        test.assertEqual(stdout, expected_stdout)
     finally:
         if process.poll() is None:
             process.kill()
@@ -971,7 +991,8 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
             self.assertFalse(compiler.borrowed)
             self.assertEqual(compiler.owner_spec_id, provisioned.spec.id)
         archive, archive_digest = _mapped_libc_archive(linker_map, provisioned)
-        _assert_exit_definition_trace(link_trace, archive, provisioned)
+        _assert_libc_definition_trace(link_trace, archive, provisioned, "exit")
+        _assert_libc_definition_trace(link_trace, archive, provisioned, "write")
         profile = inspect_elf(executable)
         _assert_compiled_target(self, profile.target, target)
         self.assertIs(profile.linkage, Linkage.STATIC)
@@ -1048,6 +1069,70 @@ class GlibcStaticRopQemuTests(unittest.TestCase):
                     argv=(str(executable),),
                     runner="native",
                 )
+
+            if target.arch in {Architecture.X86, Architecture.X86_64}:
+                image = AngropImageSpec.from_adapter(
+                    adapter,
+                    load_bias=0,
+                    name=f"{provisioned.spec.id} static fixture and libc",
+                )
+                options = AngropDiscoveryOptions(
+                    processes=min(4, os.cpu_count() or 1),
+                    show_progress=False,
+                    timeout=120,
+                    optimize=True,
+                )
+                angrop_offset = 8 if target.arch is Architecture.X86 else 0
+                with prepare_angrop((image,), options=options) as session:
+                    synthesis = session.synthesize_calls(
+                        (
+                            AngropDirectCall(
+                                image.runtime_symbol("write"),
+                                (1, image.runtime_symbol("pwnc_angrop_marker"), len(_ANGROP_STATIC_MARKER)),
+                                name="returning static glibc write",
+                                needs_return=True,
+                            ),
+                            AngropDirectCall(
+                                image.runtime_symbol("exit"),
+                                (44,),
+                                name="static glibc exit",
+                                needs_return=False,
+                            ),
+                        ),
+                        chain_base=chain_symbol + angrop_offset,
+                        timeout=30,
+                    )
+                self.assertEqual(synthesis.images[0].sha256, adapter.identity.sha256)
+                self.assertEqual(synthesis.images[0].load_bias, 0)
+                self.assertTrue(synthesis.images[0].cle_main)
+                self.assertEqual({item.image_sha256 for item in synthesis.calls}, {adapter.identity.sha256})
+                self.assertEqual({item.image_sha256 for item in synthesis.gadgets}, {adapter.identity.sha256})
+                if target.arch is Architecture.X86_64:
+                    self.assertTrue(any(not item.call_target for item in synthesis.gadgets))
+                self.assertLessEqual(angrop_offset + len(synthesis.data), _CHAIN_CAPACITY)
+                _run_chain(
+                    self,
+                    provisioned,
+                    target,
+                    executable,
+                    synthesis.data,
+                    angrop_offset,
+                    44,
+                    expected_stdout=_ANGROP_STATIC_MARKER,
+                )
+                if _NATIVE_X86_HOST:
+                    _run_chain(
+                        self,
+                        provisioned,
+                        target,
+                        executable,
+                        synthesis.data,
+                        angrop_offset,
+                        44,
+                        argv=(str(executable),),
+                        runner="native-angrop",
+                        expected_stdout=_ANGROP_STATIC_MARKER,
+                    )
         elif target.arch is Architecture.THUMB:
             # The ARM hard-float glibc archives contain ARM-state functions,
             # even when the challenge fixture itself is compiled as Thumb.
