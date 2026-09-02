@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pwnc.dev/schemas/runtime-viewer/v1.json",
+  "title": "pwnc runtime viewer protocol v1 message",
+  "type": "object",
+  "required": ["protocol", "version", "type", "session_id"],
+  "properties": {
+    "protocol": {"const": "pwnc-runtime"},
+    "version": {"const": 1},
+    "type": {"enum": ["hello", "event", "snapshot", "goodbye"]},
+    "session_id": {"type": "string", "minLength": 1},
+    "session": {"$ref": "#/$defs/session"},
+    "event": {"$ref": "#/$defs/event"},
+    "snapshot": {"$ref": "#/$defs/snapshot"},
+    "diff_from_previous": {"$ref": "#/$defs/diff"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "hello"}}},
+      "then": {"required": ["session"]}
+    },
+    {
+      "if": {"properties": {"type": {"const": "event"}}},
+      "then": {"required": ["event"]}
+    },
+    {
+      "if": {"properties": {"type": {"const": "snapshot"}}},
+      "then": {"required": ["snapshot"]}
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "address": {"type": "integer", "minimum": 0},
+    "nullableAddress": {
+      "oneOf": [{"$ref": "#/$defs/address"}, {"type": "null"}]
+    },
+    "session": {
+      "type": "object",
+      "required": ["id", "pid", "inferior", "architecture", "main", "bata24"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "pid": {"type": ["integer", "null"], "minimum": 0},
+        "inferior": {"type": ["integer", "null"], "minimum": 0},
+        "architecture": {"type": ["string", "null"]},
+        "main": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["id", "path", "build_id", "load_bias"],
+              "properties": {
+                "id": {"type": "string"},
+                "path": {"type": ["string", "null"]},
+                "build_id": {"type": ["string", "null"]},
+                "load_bias": {"$ref": "#/$defs/nullableAddress"}
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "bata24": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["sequence", "timestamp_ns", "generation", "kind", "details"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0},
+        "timestamp_ns": {"type": "integer", "minimum": 0},
+        "generation": {"type": "integer", "minimum": 0},
+        "kind": {"type": "string", "minLength": 1},
+        "details": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "module": {
+      "type": "object",
+      "required": ["id", "name", "path", "kind", "build_id", "base", "end", "load_bias"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": ["string", "null"]},
+        "kind": {"type": "string"},
+        "build_id": {"type": ["string", "null"]},
+        "base": {"$ref": "#/$defs/nullableAddress"},
+        "end": {"$ref": "#/$defs/nullableAddress"},
+        "load_bias": {"$ref": "#/$defs/nullableAddress"}
+      },
+      "additionalProperties": false
+    },
+    "map": {
+      "type": "object",
+      "required": ["start", "end", "permissions", "offset", "path", "inode", "private", "module_id"],
+      "properties": {
+        "start": {"$ref": "#/$defs/address"},
+        "end": {"$ref": "#/$defs/address"},
+        "permissions": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "path": {"type": "string"},
+        "inode": {"type": ["integer", "null"], "minimum": 0},
+        "private": {"type": ["boolean", "null"]},
+        "module_id": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "variable": {
+      "type": "object",
+      "required": ["name", "type", "argument", "scope_depth", "available", "optimized_out", "value", "address", "pointer", "error"],
+      "properties": {
+        "name": {"type": "string"},
+        "type": {"type": ["string", "null"]},
+        "argument": {"type": "boolean"},
+        "scope_depth": {"type": "integer", "minimum": 0},
+        "available": {"type": "boolean"},
+        "optimized_out": {"type": "boolean"},
+        "value": {"type": ["string", "null"]},
+        "address": {"$ref": "#/$defs/nullableAddress"},
+        "pointer": {"$ref": "#/$defs/nullableAddress"},
+        "error": {"type": ["object", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "frame": {
+      "type": "object",
+      "required": ["level", "pc", "name", "type", "source", "line", "arguments", "locals"],
+      "properties": {
+        "level": {"type": "integer", "minimum": 0},
+        "pc": {"$ref": "#/$defs/address"},
+        "name": {"type": ["string", "null"]},
+        "type": {"type": "string"},
+        "source": {"type": ["string", "null"]},
+        "line": {"type": ["integer", "null"], "minimum": 0},
+        "arguments": {"type": "array", "items": {"$ref": "#/$defs/variable"}},
+        "locals": {"type": "array", "items": {"$ref": "#/$defs/variable"}}
+      },
+      "additionalProperties": false
+    },
+    "thread": {
+      "type": "object",
+      "required": ["id", "inferior_thread", "name", "details", "state", "ptid", "frames", "registers", "libc", "errors"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 0},
+        "inferior_thread": {"type": "integer", "minimum": 0},
+        "name": {"type": ["string", "null"]},
+        "details": {"type": ["string", "null"]},
+        "state": {"type": "string"},
+        "ptid": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer"}},
+        "frames": {"type": "array", "items": {"$ref": "#/$defs/frame"}},
+        "registers": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "libc": {"type": "object"},
+        "errors": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "typedField": {
+      "type": "object",
+      "required": ["path", "type", "offset", "size", "value", "display", "pointer"],
+      "properties": {
+        "path": {"type": "string"},
+        "type": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "size": {"type": "integer", "minimum": 0},
+        "value": {},
+        "display": {"type": "string"},
+        "pointer": {"$ref": "#/$defs/nullableAddress"}
+      },
+      "additionalProperties": false
+    },
+    "span": {
+      "type": "object",
+      "required": ["offset", "size", "role", "pointer_kind", "expression"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0},
+        "size": {"type": "integer", "minimum": 0},
+        "role": {"type": "string"},
+        "pointer_kind": {"type": ["string", "null"]},
+        "expression": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "payload": {
+      "type": "object",
+      "required": ["kind", "description", "architecture", "bits", "endian", "spans", "metadata"],
+      "properties": {
+        "kind": {"type": "string"},
+        "description": {"type": "string"},
+        "architecture": {"type": "string"},
+        "bits": {"type": "integer", "minimum": 0},
+        "endian": {"type": "string"},
+        "spans": {"type": "array", "items": {"$ref": "#/$defs/span"}},
+        "metadata": {}
+      },
+      "additionalProperties": false
+    },
+    "mark": {
+      "type": "object",
+      "required": ["mark_id", "label", "kind", "address", "size", "encoding", "data", "display", "error", "allocation_id", "allocation_generation", "payload", "type", "typed_fields"],
+      "properties": {
+        "mark_id": {"type": "string"},
+        "label": {"type": "string"},
+        "kind": {"enum": ["memory", "typed", "heap-chunk", "payload"]},
+        "address": {"$ref": "#/$defs/address"},
+        "size": {"type": "integer", "minimum": 1},
+        "encoding": {"enum": ["base64", null]},
+        "data": {"type": ["string", "null"], "contentEncoding": "base64"},
+        "display": {"type": ["string", "null"]},
+        "error": {"type": ["string", "null"]},
+        "allocation_id": {"type": ["string", "null"]},
+        "allocation_generation": {"type": ["integer", "null"], "minimum": 0},
+        "payload": {"oneOf": [{"$ref": "#/$defs/payload"}, {"type": "null"}]},
+        "type": {"type": ["string", "null"]},
+        "typed_fields": {"type": "array", "items": {"$ref": "#/$defs/typedField"}}
+      },
+      "additionalProperties": false
+    },
+    "arena": {
+      "type": "object",
+      "required": ["address", "name", "main", "heap_base", "top", "last_remainder", "system_mem", "tcache"],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "name": {"type": "string"},
+        "main": {"type": "boolean"},
+        "heap_base": {"$ref": "#/$defs/nullableAddress"},
+        "top": {"$ref": "#/$defs/address"},
+        "last_remainder": {"$ref": "#/$defs/address"},
+        "system_mem": {"type": "integer", "minimum": 0},
+        "tcache": {"$ref": "#/$defs/nullableAddress"}
+      },
+      "additionalProperties": false
+    },
+    "chunk": {
+      "type": "object",
+      "required": ["address", "base", "size", "usable_size", "previous_size", "arena", "heap_base", "state", "bins", "flags", "fd", "decoded_fd", "bk", "allocation_id", "generation"],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "base": {"$ref": "#/$defs/address"},
+        "size": {"type": "integer", "minimum": 0},
+        "usable_size": {"type": "integer", "minimum": 0},
+        "previous_size": {"type": "integer", "minimum": 0},
+        "arena": {"$ref": "#/$defs/address"},
+        "heap_base": {"$ref": "#/$defs/nullableAddress"},
+        "state": {"type": "string"},
+        "bins": {"type": "array", "items": {"type": "string"}},
+        "flags": {"type": "object"},
+        "fd": {"$ref": "#/$defs/nullableAddress"},
+        "decoded_fd": {"$ref": "#/$defs/nullableAddress"},
+        "bk": {"$ref": "#/$defs/nullableAddress"},
+        "allocation_id": {"type": "string"},
+        "generation": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "verification": {
+      "type": "object",
+      "required": ["sequence", "timestamp_ns", "name", "kind", "ok", "expected", "actual", "details"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0},
+        "timestamp_ns": {"type": "integer", "minimum": 0},
+        "name": {"type": "string"},
+        "kind": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "expected": {},
+        "actual": {},
+        "details": {}
+      },
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "required": ["sequence", "name", "timestamp_ns", "generation", "modules", "maps", "threads", "marks", "heap", "verifications", "errors"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0},
+        "name": {"type": "string", "minLength": 1},
+        "timestamp_ns": {"type": "integer", "minimum": 0},
+        "generation": {"type": "integer", "minimum": 0},
+        "modules": {"type": "array", "items": {"$ref": "#/$defs/module"}},
+        "maps": {"type": "array", "items": {"$ref": "#/$defs/map"}},
+        "threads": {"type": "array", "items": {"$ref": "#/$defs/thread"}},
+        "marks": {"type": "array", "items": {"$ref": "#/$defs/mark"}},
+        "heap": {
+          "type": "object",
+          "required": ["arenas", "chunks"],
+          "properties": {
+            "arenas": {"type": "array", "items": {"$ref": "#/$defs/arena"}},
+            "chunks": {"type": "array", "items": {"$ref": "#/$defs/chunk"}}
+          },
+          "additionalProperties": false
+        },
+        "verifications": {"type": "array", "items": {"$ref": "#/$defs/verification"}},
+        "errors": {"type": "object", "additionalProperties": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "diff": {
+      "type": "object",
+      "required": ["before_sequence", "after_sequence", "changed", "modules", "maps", "threads", "marks", "heap", "verifications_added"],
+      "properties": {
+        "before_sequence": {"type": "integer", "minimum": 0},
+        "after_sequence": {"type": "integer", "minimum": 0},
+        "changed": {"type": "boolean"},
+        "modules": {"type": "object"},
+        "maps": {"type": "object"},
+        "threads": {"type": "object"},
+        "marks": {"type": "object"},
+        "heap": {"type": "object"},
+        "verifications_added": {"type": "array"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

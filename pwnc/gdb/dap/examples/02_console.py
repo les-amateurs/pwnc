@@ -1,10 +1,9 @@
-"""Interactive gdb console in a separate terminal window.
+"""Interactive GDB console through an owned, reconnectable PTY.
 
-Opens a real gdb CLI console (kitty by default) alongside the script. The two
-share one gdb/inferior: you can type gdb commands in the window (run, continue,
-break, stepi, print, ...) and the script's breakpoint callbacks still fire. The
-window tracks resizes (width-aware plugins like pwndbg/GEF render correctly) and
-auto-closes when gdb exits unless console_keep_open=True.
+This example uses xterm only to demonstrate an explicit shell-free launcher;
+Kitty, another terminal, ViewerConfig.current(), or a custom launcher object work
+the same way.  The console and script share one GDB/inferior, and the stable PTY
+endpoint can accept a new viewer if the first window exits.
 
 Requires a display (a real terminal window). Uses the mi example target.
 """
@@ -14,13 +13,19 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 
-from pwnc.gdb.dap import launch
+from pwnc.gdb.dap import (
+    ArgvTerminalLauncher,
+    ConsoleConfig,
+    ViewerConfig,
+    launch,
+)
 
 TARGET = os.path.join(os.path.dirname(__file__), "..", "..", "mi", "examples", "target")
 
-# headless=False opens the console at startup; or call g.console() any time.
-# Set $PWNC_DAP_TERMINAL or pass console=[...] to use a terminal other than kitty.
-g = launch(TARGET, headless=False)
+viewer = ViewerConfig.external(
+    ArgvTerminalLauncher(["xterm", "-e", "{command}"])
+)
+g = launch(TARGET, console=ConsoleConfig.owned(viewer=viewer))
 print("A gdb console window opened — try typing 'continue' in it.")
 
 # Script-side instrumentation: fires on every update_origin hit, whether the
@@ -40,5 +45,5 @@ print("program", stop.get("reason"))
 # To hand control to the console and just let callbacks fire as YOU drive, park
 # the script instead:  while g.wait().get("reason") not in ("exited","terminated"): pass
 
-g.console_close()                     # close the window now (or pass console_keep_open=True
-g.close()                             # to keep it up after gdb exits)
+g.console_close()                     # close viewer; endpoint remains reconnectable until GDB exits
+g.close()
