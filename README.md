@@ -20,14 +20,23 @@ The opt-in runtime tests include 33 SHA-256-pinned glibc sysroot specs mapped
 to 37 target runs. Real-libc ROP coverage includes exact dynamic `write` calls
 on 28 mappings across 15 ABI variants, composed ORW/sendfile chains on all
 seven x86 mappings, static-glibc syscall chains on all 37 mappings, and static
-glibc `exit` calls on the 28 supported direct-call mappings. The seven pinned
-x86 mappings also have direct native mirrors. These contracts have been
+glibc calls on the 28 supported direct-call mappings. On x86 the locally
+embedded angrop source also builds a returning static-glibc `write` followed by
+terminal `exit`; the seven pinned x86 mappings have direct native mirrors. The
+dynamic x86 ORW/sendfile lane uses that same embedded source rather than
+pwntools ROP or an installed `angrop` package. These contracts have been
 completed across focused selector batches, and the complete 37-mapping static
 contract additionally passed a single no-selector run with 79 ROP process
 executions.
 The suite also covers qemu-user FSOP and an exact QEMU 7.1.0/7.2.0 AArch64
 execute-permission boundary; the payload documentation distinguishes the real
 artifacts from test-owned exploit primitives.
+
+## local challenge sandboxes
+
+The persistent Docker sandbox manager provides project discovery, isolated
+challenge networking, reconnectable stdio, and prepared GDB pools. See the
+[local sandbox documentation](pwnc/sandbox/README.md) for configuration and use.
 
 ## commands
 
