@@ -1,8 +1,6 @@
-import sys
-import os
+"""Compatibility entry point for existing `source dwarf/plugin/gdbinit.py` users."""
 
-sys.path.append(os.path.dirname(__file__))
+from pathlib import Path
 
-from teemo.client import vanilla
-
-binja = vanilla.BinjaCommand()
+script = Path(__file__).resolve().parents[1] / "gdb" / "teemo_gdb.py"
+exec(compile(script.read_bytes(), str(script), "exec"), {"__file__": str(script), "__name__": "teemo_gdb"})

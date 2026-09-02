@@ -1,0 +1,25 @@
+[package]
+name = "teemo-dwarf"
+version = "0.2.0"
+edition = "2024"
+description = "Emit GDB-loadable ELF/DWARF objects from Teemo Binary Ninja IR"
+license = "MIT"
+
+[lib]
+name = "teemo_dwarf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teemo-dwarf"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+gimli = { version = "0.32.3", features = ["write"] }
+object = { version = "0.37.3", features = ["write"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tempfile = "3.23.0"
+
+[dev-dependencies]
+object = { version = "0.37.3", features = ["read", "write"] }

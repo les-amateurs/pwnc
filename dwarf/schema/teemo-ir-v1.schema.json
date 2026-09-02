@@ -1,0 +1,455 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pwnc.dev/schemas/teemo-ir-v1.schema.json",
+  "title": "Teemo Binary Ninja debug information IR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "producer",
+    "binary",
+    "sections",
+    "types",
+    "globals",
+    "functions",
+    "labels",
+    "sources",
+    "lines",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema": { "const": "pwnc.teemo.ir" },
+    "version": { "const": 1 },
+    "producer": { "type": "string", "minLength": 1 },
+    "binary": { "$ref": "#/$defs/binary" },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "types": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/type" }
+    },
+    "globals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/variable" }
+    },
+    "functions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/function" }
+    },
+    "labels": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/label" }
+    },
+    "sources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "lines": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/line" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    }
+  },
+  "$defs": {
+    "uint": { "type": "integer", "minimum": 0 },
+    "id": { "type": "string", "minLength": 1 },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "format", "architecture", "endianness", "address_size", "entry_point", "image_base"],
+      "properties": {
+        "filename": { "type": "string", "minLength": 1 },
+        "build_id": { "type": ["string", "null"], "pattern": "^(?:[0-9a-fA-F]{2})+$" },
+        "format": { "const": "elf" },
+        "architecture": { "enum": ["x86_64", "x86", "arm", "aarch64"] },
+        "endianness": { "enum": ["little", "big"] },
+        "address_size": { "enum": [4, 8] },
+        "entry_point": { "$ref": "#/$defs/uint" },
+        "image_base": { "$ref": "#/$defs/uint" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "architecture": { "enum": ["x86_64", "x86"] } } },
+          "then": { "properties": { "endianness": { "const": "little" } } }
+        }
+      ]
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "address", "size", "readable", "writable", "executable"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1 },
+        "address": { "$ref": "#/$defs/uint" },
+        "size": { "type": "integer", "minimum": 1 },
+        "readable": { "type": "boolean" },
+        "writable": { "type": "boolean" },
+        "executable": { "type": "boolean" }
+      }
+    },
+    "address": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value"],
+      "properties": {
+        "value": { "$ref": "#/$defs/uint" },
+        "section": { "type": ["string", "null"] }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "#/$defs/address" },
+        "end": { "$ref": "#/$defs/address" }
+      }
+    },
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "line", "column"],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/id" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "offset"],
+      "properties": {
+        "name": { "type": "string" },
+        "type_id": { "type": ["string", "null"], "minLength": 1 },
+        "offset": { "$ref": "#/$defs/uint" },
+        "bit_size": { "anyOf": [{ "$ref": "#/$defs/uint" }, { "type": "null" }] },
+        "bit_offset": { "anyOf": [{ "$ref": "#/$defs/uint" }, { "type": "null" }] }
+      }
+    },
+    "base_class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type_id", "offset"],
+      "properties": {
+        "type_id": { "$ref": "#/$defs/id" },
+        "offset": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "array_dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lower_bound": { "type": "integer", "default": 0 },
+        "count": { "anyOf": [{ "$ref": "#/$defs/uint" }, { "type": "null" }] }
+      }
+    },
+    "type_parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "type_id": { "type": ["string", "null"], "minLength": 1 },
+        "artificial": { "type": "boolean", "default": false }
+      }
+    },
+    "type": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "byte_size", "encoding"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "base" },
+            "name": { "type": ["string", "null"] },
+            "byte_size": { "type": "integer", "minimum": 1 },
+            "encoding": {
+              "enum": ["address", "boolean", "complex_float", "float", "signed", "signed_char", "unsigned", "unsigned_char", "utf"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "byte_size"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "pointer" },
+            "name": { "type": ["string", "null"] },
+            "byte_size": { "enum": [4, 8] },
+            "target": { "type": ["string", "null"], "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "element_type", "dimensions"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "array" },
+            "name": { "type": ["string", "null"] },
+            "byte_size": { "anyOf": [{ "$ref": "#/$defs/uint" }, { "type": "null" }] },
+            "element_type": { "$ref": "#/$defs/id" },
+            "dimensions": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/array_dimension" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "declaration_only", "members"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "enum": ["structure", "class"] },
+            "name": { "type": ["string", "null"] },
+            "byte_size": { "anyOf": [{ "$ref": "#/$defs/uint" }, { "type": "null" }] },
+            "declaration_only": { "type": "boolean" },
+            "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] },
+            "members": { "type": "array", "items": { "$ref": "#/$defs/member" } },
+            "bases": { "type": "array", "items": { "$ref": "#/$defs/base_class" } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "declaration_only", "members"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "union" },
+            "name": { "type": ["string", "null"] },
+            "byte_size": { "anyOf": [{ "$ref": "#/$defs/uint" }, { "type": "null" }] },
+            "declaration_only": { "type": "boolean" },
+            "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] },
+            "members": { "type": "array", "items": { "$ref": "#/$defs/member" } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "byte_size", "enumerators"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "enum" },
+            "name": { "type": ["string", "null"] },
+            "byte_size": { "type": "integer", "minimum": 1 },
+            "underlying_type": { "type": ["string", "null"], "minLength": 1 },
+            "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] },
+            "enumerators": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "value"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "value": {
+                    "oneOf": [
+                      { "type": "integer" },
+                      { "type": "string", "pattern": "^-?(0|[1-9][0-9]*)$" }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "name", "target"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "typedef" },
+            "name": { "type": "string", "minLength": 1 },
+            "target": { "$ref": "#/$defs/id" },
+            "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "qualifier", "target"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "qualified" },
+            "qualifier": { "enum": ["const", "volatile", "restrict", "atomic"] },
+            "target": { "$ref": "#/$defs/id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "parameters", "variadic"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "kind": { "const": "function" },
+            "name": { "type": ["string", "null"] },
+            "return_type": { "type": ["string", "null"], "minLength": 1 },
+            "parameters": { "type": "array", "items": { "$ref": "#/$defs/type_parameter" } },
+            "variadic": { "type": "boolean" },
+            "calling_convention": { "type": ["string", "null"], "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "location_expression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "register"],
+          "properties": { "kind": { "const": "register" }, "register": { "type": "string", "minLength": 1 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "offset"],
+          "properties": { "kind": { "enum": ["frame_offset", "cfa_offset"] }, "offset": { "type": "integer" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "address"],
+          "properties": { "kind": { "const": "address" }, "address": { "$ref": "#/$defs/address" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": { "kind": { "const": "constant" }, "value": { "type": "integer" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "expression"],
+          "properties": {
+            "kind": { "enum": ["entry_value", "stack_value", "dereference"] },
+            "expression": { "$ref": "#/$defs/location_expression" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "unavailable" }, "reason": { "type": ["string", "null"] } }
+        }
+      ]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["range", "expression"],
+      "properties": {
+        "range": { "$ref": "#/$defs/range" },
+        "expression": { "$ref": "#/$defs/location_expression" }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "locations"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1 },
+        "linkage_name": { "type": ["string", "null"], "minLength": 1 },
+        "kind": { "enum": ["global", "parameter", "local"] },
+        "type_id": { "type": ["string", "null"], "minLength": 1 },
+        "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] },
+        "locations": { "type": "array", "items": { "$ref": "#/$defs/location" } },
+        "static_location": {
+          "anyOf": [{ "$ref": "#/$defs/location_expression" }, { "type": "null" }]
+        },
+        "external": { "type": "boolean", "default": false }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ranges", "variables", "children"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "ranges": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/range" } },
+        "variables": { "type": "array", "items": { "$ref": "#/$defs/variable" } },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/scope" } }
+      }
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "ranges", "return_type", "parameters", "scope", "variadic", "external"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1 },
+        "linkage_name": { "type": ["string", "null"], "minLength": 1 },
+        "ranges": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/range" } },
+        "return_type": { "type": ["string", "null"], "minLength": 1 },
+        "parameters": { "type": "array", "items": { "$ref": "#/$defs/variable" } },
+        "scope": { "$ref": "#/$defs/scope" },
+        "variadic": { "type": "boolean" },
+        "external": { "type": "boolean" },
+        "calling_convention": { "type": ["string", "null"], "minLength": 1 },
+        "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] }
+      }
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "address"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1 },
+        "address": { "$ref": "#/$defs/address" },
+        "function_id": { "type": ["string", "null"], "minLength": 1 },
+        "declaration": { "anyOf": [{ "$ref": "#/$defs/declaration" }, { "type": "null" }] }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "language", "generated", "contents"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "path": { "type": "string", "minLength": 1 },
+        "language": { "type": "string", "minLength": 1 },
+        "generated": { "type": "boolean" },
+        "contents": { "type": "string" }
+      }
+    },
+    "line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["range", "source_id", "line", "column", "statement", "discriminator"],
+      "properties": {
+        "range": { "$ref": "#/$defs/range" },
+        "source_id": { "$ref": "#/$defs/id" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "$ref": "#/$defs/uint" },
+        "statement": { "type": "boolean" },
+        "discriminator": { "$ref": "#/$defs/uint" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message"],
+      "properties": {
+        "severity": { "enum": ["info", "warning", "error"] },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "context": { "type": "object" }
+      }
+    }
+  }
+}

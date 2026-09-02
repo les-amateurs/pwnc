@@ -1,0 +1,15 @@
+{
+  "pluginmetadataversion": 2,
+  "name": "Teemo GDB Integration",
+  "type": ["helper"],
+  "api": ["python3"],
+  "description": "Export Binary Ninja HLIL analysis as DWARF debug information for GDB",
+  "longdescription": "Teemo exports typed analysis, generated pseudocode line mappings, lexical scopes, and proven variable locations through a versioned JSON IR into a relocatable ELF DWARF object.",
+  "platforms": ["Linux"],
+  "installinstructions": {
+    "Linux": "Copy this directory to ~/.binaryninja/plugins/teemo and build the Rust emitter with make -C dwarf emitter-release."
+  },
+  "version": "0.2.0",
+  "author": "pwnc contributors",
+  "minimumbinaryninjaversion": 5000
+}

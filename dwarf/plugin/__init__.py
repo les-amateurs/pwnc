@@ -1,50 +1,25 @@
-from pathlib import Path
-from binaryninja import (
-    BinaryView,
-    PluginCommand,
-)
-from .teemo.config import *
-from .teemo.server import start_server, stop_server, update_server, stop_all_servers
+"""Teemo: Binary Ninja HLIL debug information for GDB."""
 
-def reload():
-    import importlib
-    import sys
-    stop_all_servers()
-    importlib.reload(teemo.config)
-    importlib.reload(teemo.connect)
-    importlib.reload(teemo.extract)
-    importlib.reload(teemo.server)
-    importlib.reload(teemo)
-    importlib.reload(sys.modules[__name__])
+from binaryninja import PluginCommand
 
-class MenuPath:
-    def __init__(self, name: str):
-        self.components = [name]
+from .teemo.commands import disable_live_export, enable_live_export, is_supported_view, schedule_export
 
-    def __truediv__(self, other: str):
-        self.components.append(other)
-        return self
-
-    def __str__(self):
-        return " \\ ".join(self.components)
-
-    def encode(self, encoding: str):
-        return str(self).encode(encoding=encoding)
 
 PluginCommand.register(
-    MenuPath(NAME) / "start server",
-    "",
-    start_server,
+    "Teemo\\Export or refresh GDB debug info",
+    "Generate an atomic DWARF generation from the current Binary Ninja analysis",
+    schedule_export,
+    is_supported_view,
 )
-
 PluginCommand.register(
-    MenuPath(NAME) / "update server",
-    "",
-    update_server,
+    "Teemo\\Enable live export",
+    "Regenerate Teemo debug information after settled analysis changes",
+    enable_live_export,
+    is_supported_view,
 )
-
 PluginCommand.register(
-    MenuPath(NAME) / "stop server",
-    "",
-    stop_server,
+    "Teemo\\Disable live export",
+    "Stop watching this BinaryView for Teemo updates",
+    disable_live_export,
+    is_supported_view,
 )

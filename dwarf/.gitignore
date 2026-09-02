@@ -1,4 +1,6 @@
 *.json
+!schema/teemo-ir-v1.schema.json
+!plugin/plugin.json
 target/
 *.dwarf
 *.debug
